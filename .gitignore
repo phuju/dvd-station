@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.log
+.DS_Store
+Thumbs.db
+
+# Certificates / secrets
+*.key
+*.crt
+*.pem
+server.*
+
+# Arduino build
+arduino/**/build/
+arduino/**/partitions/
+arduino/**/bootloader/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Runtime
+/tmp/
+.cache/

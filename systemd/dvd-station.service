@@ -1,0 +1,12 @@
+[Unit]
+Description=DVD Station — physical disc burning appliance
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 -u /home/phuju/dvd_station.py
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGKILL
+
+[Install]
+WantedBy=default.target
