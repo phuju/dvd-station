@@ -14,7 +14,11 @@ import time
 import unicodedata
 from pathlib import Path
 
-CLEANUP_DAYS = int(os.environ.get("DVD_CLEANUP_DAYS", "2"))
+CLEANUP_DAYS = int(os.environ.get("DISC_CLEANUP_DAYS", "2"))
+
+
+class CancelError(Exception):
+    pass
 
 
 def reset_drive(device="/dev/sr0"):
@@ -50,7 +54,7 @@ def _esp32_port_from_sysfs():
 
 
 def detect_esp32_port():
-    override = os.environ.get("DVD_PORT")
+    override = os.environ.get("DISC_PORT")
     if override:
         return override
 
@@ -119,10 +123,10 @@ def iter_proc_or_cancel(proc, ser):
 
 
 DVD_DEVICE = os.environ.get("DVD_DEVICE")
-DVD_SPEED = os.environ.get("DVD_SPEED")
-DVD_DISC_BYTES = 4_700_000_000
+DISC_SPEED = os.environ.get("DISC_SPEED")
+DISC_DISC_BYTES = 4_700_000_000
 DVD_DL_BYTES = 8_500_000_000
-DVD_TARGET_BYTES = int(os.environ.get("DVD_TARGET_BYTES", "4300000000"))
+DISC_TARGET_BYTES = int(os.environ.get("DISC_TARGET_BYTES", "4300000000"))
 DVD_MUX_SAFETY = float(os.environ.get("DVD_MUX_SAFETY", "0.92"))
 AUDIO_BITRATE_K = int(os.environ.get("DVD_AUDIO_KBPS", "192"))
 MIN_VIDEO_BITRATE_K = 500
@@ -131,7 +135,7 @@ MAX_VIDEO_PEAK_K = 9000
 YTDLP_FORMAT = "bv*+ba/b"
 MODE_SETTINGS = {
     "AUTO": {
-        "target_bytes": DVD_TARGET_BYTES,
+        "target_bytes": DISC_TARGET_BYTES,
         "safety": DVD_MUX_SAFETY,
         "audio_k": AUDIO_BITRATE_K,
         "min_video_k": MIN_VIDEO_BITRATE_K,
@@ -140,25 +144,25 @@ MODE_SETTINGS = {
         "burn": True,
     },
     "BEST": {
-        "target_bytes": int(os.environ.get("DVD_BEST_TARGET_BYTES", "4450000000")),
-        "safety": float(os.environ.get("DVD_BEST_SAFETY", "0.95")),
-        "audio_k": int(os.environ.get("DVD_BEST_AUDIO_KBPS", "224")),
+        "target_bytes": int(os.environ.get("DISC_BEST_TARGET_BYTES", "4450000000")),
+        "safety": float(os.environ.get("DISC_BEST_SAFETY", "0.95")),
+        "audio_k": int(os.environ.get("DISC_BEST_AUDIO_KBPS", "224")),
         "min_video_k": 700,
         "max_video_k": 8000,
         "peak_video_k": 9000,
         "burn": True,
     },
     "LONG": {
-        "target_bytes": int(os.environ.get("DVD_LONG_TARGET_BYTES", "4300000000")),
-        "safety": float(os.environ.get("DVD_LONG_SAFETY", "0.90")),
-        "audio_k": int(os.environ.get("DVD_LONG_AUDIO_KBPS", "128")),
+        "target_bytes": int(os.environ.get("DISC_LONG_TARGET_BYTES", "4300000000")),
+        "safety": float(os.environ.get("DISC_LONG_SAFETY", "0.90")),
+        "audio_k": int(os.environ.get("DISC_LONG_AUDIO_KBPS", "128")),
         "min_video_k": 350,
         "max_video_k": 3500,
         "peak_video_k": 6000,
         "burn": True,
     },
     "TEST": {
-        "target_bytes": DVD_TARGET_BYTES,
+        "target_bytes": DISC_TARGET_BYTES,
         "safety": DVD_MUX_SAFETY,
         "audio_k": AUDIO_BITRATE_K,
         "min_video_k": MIN_VIDEO_BITRATE_K,
@@ -175,7 +179,7 @@ def user_home():
     return Path.home()
 
 USER_HOME = user_home()
-WORK = USER_HOME / ".cache" / "dvd-station"
+WORK = USER_HOME / ".cache" / "discstation"
 
 def cleanup_old_jobs():
     cutoff = time.time() - CLEANUP_DAYS * 86400
@@ -222,7 +226,7 @@ def remote_components_arg():
 def ytdlp_base_args():
     return [tool('yt-dlp'), "--no-playlist", *js_runtime_arg(), *remote_components_arg()]
 
-def dvd_device():
+def disc_device():
     if DVD_DEVICE:
         return DVD_DEVICE
     for name in ("/dev/dvd", "/dev/cdrom"):
@@ -248,7 +252,7 @@ def _udevadm_props(device):
 
 
 def disc_capacity_bytes(device):
-    override = os.environ.get("DVD_DISC_BYTES")
+    override = os.environ.get("DISC_DISC_BYTES")
     if override:
         try:
             return int(override)
@@ -262,7 +266,7 @@ def disc_capacity_bytes(device):
         props.get("ID_CDROM_MEDIA_DVD_R_DL_SEQ") == "1"
     )
     expected_min = 1_000_000_000
-    expected_max = DVD_DL_BYTES if is_dl else DVD_DISC_BYTES
+    expected_max = DVD_DL_BYTES if is_dl else DISC_DISC_BYTES
 
     best = None
     for attempt in range(3):
@@ -292,7 +296,7 @@ def disc_capacity_bytes(device):
             best = expected_max
         elif best < expected_min:
             best = None
-        elif is_dl and best < DVD_DISC_BYTES:
+        elif is_dl and best < DISC_DISC_BYTES:
             best = None
 
     if best is not None:
@@ -305,7 +309,7 @@ def disc_capacity_bytes(device):
         return DVD_DL_BYTES
     if props.get("ID_CDROM_MEDIA_DVD_PLUS_R") == "1" or \
        props.get("ID_CDROM_MEDIA_DVD_R") == "1":
-        return DVD_DISC_BYTES
+        return DISC_DISC_BYTES
     return None
 
 def detect_disc_type(device):
@@ -326,7 +330,7 @@ def detect_disc_type(device):
 
     capacity = disc_capacity_bytes(device)
     if capacity is None:
-        capacity = DVD_DL_BYTES if is_dl else (DVD_DISC_BYTES if is_sl else None)
+        capacity = DVD_DL_BYTES if is_dl else (DISC_DISC_BYTES if is_sl else None)
 
     return {
         "is_dual_layer": is_dl,
@@ -336,9 +340,6 @@ def detect_disc_type(device):
         "media_type": media_type,
         "capacity": capacity,
     }
-
-def is_dual_layer(device):
-    return detect_disc_type(device)["is_dual_layer"]
 
 def send(ser, msg):
     try:
@@ -414,9 +415,6 @@ def bitrate_plan(duration, mode="AUTO", disc_bytes=None):
         "peak_video_k": settings.get("peak_video_k", settings["max_video_k"]),
         "burn": settings["burn"],
     }
-
-def dvd_video_bitrate(duration, mode="AUTO"):
-    return bitrate_plan(duration, mode)["video_k"]
 
 def tree_size(path):
     return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
@@ -554,7 +552,7 @@ def copy_with_keepalive(ser, src, dest, base_pct=0, pct_span=100):
                     fout.close()
                     dest.unlink(missing_ok=True)
                     safe_send(ser, "CANCELLED:Copy cancelled")
-                    raise RuntimeError("Cancelled")
+                    raise CancelError("Cancelled")
                 chunk = fin.read(1024 * 1024)
                 if not chunk:
                     break
@@ -654,7 +652,7 @@ def download(ser, source, job_dir):
     if proc.wait() != 0:
         if proc.returncode == -15:
             safe_send(ser, "CANCELLED:Download cancelled")
-            raise RuntimeError("Cancelled")
+            raise CancelError("Cancelled")
         raise RuntimeError("Download failed")
     files = [p for p in download_dir.iterdir()
              if p.is_file() and not p.name.endswith(('.part', '.ytdl'))]
@@ -779,7 +777,7 @@ def _run_ffmpeg_pass(ser, cmd, total, pass_label):
     if proc.wait() != 0:
         if proc.returncode == -15:
             safe_send(ser, "CANCELLED:Convert cancelled")
-            raise RuntimeError("Cancelled")
+            raise CancelError("Cancelled")
         raise RuntimeError("FFmpeg encode failed")
 
 
@@ -861,14 +859,14 @@ def author(ser, mpg, job_dir, aspect="4:3"):
     if proc.wait() != 0:
         if proc.returncode == -15:
             safe_send(ser, "CANCELLED:Authoring cancelled")
-            raise RuntimeError("Cancelled")
+            raise CancelError("Cancelled")
         raise RuntimeError("DVD authoring failed")
     return dvd_dir
 
 def check_dvd_size(ser, dvd_dir, disc_bytes=None):
     send(ser, "STATUS:Checking size...")
     size = tree_size(dvd_dir)
-    limit = disc_bytes if disc_bytes and disc_bytes > 0 else DVD_DISC_BYTES
+    limit = disc_bytes if disc_bytes and disc_bytes > 0 else DISC_DISC_BYTES
     send(ser, f"PROGRESS:{size / 1_000_000_000:.2f}GB / {limit / 1_000_000_000:.1f}GB")
     if size > limit:
         raise RuntimeError("Output too large for disc")
@@ -876,7 +874,7 @@ def check_dvd_size(ser, dvd_dir, disc_bytes=None):
 
 def wait_for_burn_confirm(ser, dvd_dir, disc_capacity):
     data_size = tree_size(dvd_dir)
-    actual_cap = disc_capacity_bytes(dvd_device()) or disc_capacity
+    actual_cap = disc_capacity_bytes(disc_device()) or disc_capacity or DISC_TARGET_BYTES
     cap_gb = actual_cap / 1_000_000_000
     data_gb = data_size / 1_000_000_000
     line = f"WAITING:{data_gb:.2f}GB / {cap_gb:.1f}GB"
@@ -897,12 +895,50 @@ def wait_for_burn_confirm(ser, dvd_dir, disc_capacity):
             raise RuntimeError("Serial error during burn confirm")
         time.sleep(0.05)
 
+def _run_growisofs(ser, growisofs_cmd, log_path):
+    """Shared growisofs runner — Popen, progress, cancel, error handling."""
+    proc = subprocess.Popen(
+        growisofs_cmd,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    out_lines = []
+    last_prog = 0
+    try:
+        for line in iter_proc_or_cancel(proc, ser):
+            out_lines.append(line)
+            m = re.search(r'(\d+\.\d+)%', line)
+            if m:
+                now = time.time()
+                if now - last_prog >= 0.2:
+                    send(ser, f"PROGRESS:{m.group(1)}%")
+                    last_prog = now
+    except (KeyboardInterrupt, SystemExit):
+        stop_process(proc)
+        raise
+    rc = proc.wait()
+    if rc != 0:
+        with open(log_path, 'w') as f:
+            f.write('\n'.join(out_lines))
+        for line in out_lines[-10:]:
+            print(f"growisofs: {line}")
+        if rc == -15:
+            safe_send(ser, "CANCELLED:Burn cancelled")
+            raise CancelError("Cancelled")
+        if "unable to reload tray" in "\n".join(out_lines):
+            safe_send(ser, "INFO:Disc written OK (tray reload skipped)")
+            print("growisofs: tray reload failed after successful write — disc is fine")
+            return
+        else:
+            safe_send(ser, "INFO:Burn failed, check log")
+            raise RuntimeError("Disc burn failed")
+    subprocess.run(["eject", disc_device()], timeout=10, capture_output=True)
+
+
 def burn(ser, dvd_dir, disc_label, speed=None, is_dual_layer=False):
     send(ser, "STATUS:Burning disc...")
     send(ser, "PROGRESS:Starting burn")
     send(ser, f"INFO:Label {disc_label[:13]}")
-    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', dvd_device()]
-    speed = speed or DVD_SPEED
+    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', disc_device()]
+    speed = speed or DISC_SPEED
     if speed and speed.lower() != "auto":
         if is_dual_layer:
             speed_num = int(re.sub(r'[^0-9]', '', speed) or '6')
@@ -911,51 +947,15 @@ def burn(ser, dvd_dir, disc_label, speed=None, is_dual_layer=False):
                 send(ser, "INFO:Capped DL speed to 4x")
         growisofs_cmd += ['-speed', speed.rstrip('x')]
     growisofs_cmd += ['-V', disc_label, '-dvd-video', str(dvd_dir)]
-    log_path = dvd_dir.parent / "growisofs.log"
-    proc = subprocess.Popen(
-        growisofs_cmd,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    out_lines = []
-    last_prog = 0
-    try:
-        for line in iter_proc_or_cancel(proc, ser):
-            out_lines.append(line)
-            m = re.search(r'(\d+\.\d+)%', line)
-            if m:
-                now = time.time()
-                if now - last_prog >= 0.2:
-                    send(ser, f"PROGRESS:{m.group(1)}%")
-                    last_prog = now
-    except (KeyboardInterrupt, SystemExit):
-        stop_process(proc)
-        raise
-    rc = proc.wait()
-    if rc != 0:
-        with open(log_path, 'w') as f:
-            f.write('\n'.join(out_lines))
-        for line in out_lines[-10:]:
-            print(f"growisofs: {line}")
-        if rc == -15:
-            safe_send(ser, "CANCELLED:Burn cancelled")
-            raise RuntimeError("Cancelled")
-        # "unable to reload tray" is a false positive — the data was already
-        # written and the disc finalized before growisofs attempted the
-        # reload-verify.  The disc is good; the user just has to reinsert it
-        # manually if the tray didn't catch it on the way back in.
-        if "unable to reload tray" in "\n".join(out_lines):
-            safe_send(ser, "INFO:Disc written OK (tray reload skipped)")
-            print("growisofs: tray reload failed after successful write — disc is fine")
-        else:
-            safe_send(ser, "INFO:Burn failed, check log")
-            raise RuntimeError("Disc burn failed")
+    _run_growisofs(ser, growisofs_cmd, dvd_dir.parent / "growisofs.log")
 
 def burn_data(ser, source_paths, disc_label, speed=None, is_dual_layer=False):
     """Burn files as a data DVD — no conversion, no authoring, original quality."""
     send(ser, "STATUS:Burning data disc...")
     send(ser, "PROGRESS:Starting")
     send(ser, f"INFO:Label {disc_label[:13]}")
-    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', dvd_device()]
-    speed = speed or DVD_SPEED
+    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', disc_device()]
+    speed = speed or DISC_SPEED
     if speed and speed.lower() != "auto":
         if is_dual_layer:
             speed_num = int(re.sub(r'[^0-9]', '', speed) or '6')
@@ -963,48 +963,139 @@ def burn_data(ser, source_paths, disc_label, speed=None, is_dual_layer=False):
                 speed = "4x"
                 send(ser, "INFO:Capped DL speed to 4x")
         growisofs_cmd += ['-speed', speed.rstrip('x')]
-    growisofs_cmd += ['-R', '-J', '-joliet-long', '-V', disc_label]
+    growisofs_cmd += ['-R', '-J', '-joliet-long', '-allow-limited-size', '-V', disc_label]
     growisofs_cmd += [str(p) for p in source_paths]
-    log_path = source_paths[0].parent / "growisofs.log"
-    proc = subprocess.Popen(
-        growisofs_cmd,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    _run_growisofs(ser, growisofs_cmd, source_paths[0].parent / "growisofs.log")
+
+def burn_audio_cd(ser, audio_files, disc_label, speed=None):
+    """Convert audio files to CD-DA WAV and burn via cdrdao with CD-TEXT."""
+    send(ser, "STATUS:Reading tags...")
+    track_meta = []
+    album_artist = ""
+    album_title = ""
+    for f in audio_files:
+        artist, title = "", f.stem
+        try:
+            if f.suffix.lower() == ".flac":
+                from mutagen.flac import FLAC
+                a = FLAC(str(f))
+                artist = a.get("albumartist", [a.get("artist", [""])[0]])[0]
+                title = a.get("title", [f.stem])[0]
+                if not album_title:
+                    album_title = a.get("album", [""])[0]
+                    album_artist = artist
+            elif f.suffix.lower() == ".mp3":
+                from mutagen.mp3 import MP3
+                a = MP3(str(f))
+                artist = str(a.get("TPE1", a.get("TPE2", "")))
+                title = str(a.get("TIT2", f.stem))
+                if not album_title:
+                    album_title = str(a.get("TALB", ""))
+                    album_artist = str(a.get("TPE2", artist))
+            elif f.suffix.lower() == ".m4a":
+                from mutagen.mp4 import MP4
+                a = MP4(str(f))
+                artist = a.get("\xa9ART", [""])[0]
+                title = a.get("\xa9nam", [f.stem])[0]
+                if not album_title:
+                    album_title = a.get("\xa9alb", [""])[0]
+                    album_artist = a.get("aART", [artist])[0]
+        except Exception:
+            pass
+        track_meta.append((artist, title))
+    album_artist = album_artist or "Unknown Artist"
+    album_title = album_title or disc_label
+
+    send(ser, "STATUS:Converting audio...")
+    send(ser, "PROGRESS:0%")
+    tmp_dir = Path(audio_files[0]).parent / ".cd_tmp"
+    shutil.rmtree(str(tmp_dir), ignore_errors=True)
+    tmp_dir.mkdir(exist_ok=True)
+    total = len(audio_files)
+    for i, f in enumerate(audio_files):
+        wav = tmp_dir / f"track_{i + 1:02d}.wav"
+        subprocess.run(
+            [tool('ffmpeg'), '-y', '-i', str(f), '-ar', '44100', '-ac', '2',
+             '-sample_fmt', 's16', str(wav)],
+            capture_output=True, check=True)
+        pct = int((i + 1) / total * 30)
+        send(ser, f"PROGRESS:{pct}%")
+
+    send(ser, "STATUS:Writing TOC...")
+    toc_lines = ["CD_DA"]
+    toc_lines.append("CD_TEXT {")
+    toc_lines.append("  LANGUAGE_MAP { 0: EN }")
+    toc_lines.append("  LANGUAGE 0 {")
+    toc_lines.append(f'    TITLE "{album_title}"')
+    toc_lines.append(f'    PERFORMER "{album_artist}"')
+    toc_lines.append("  }")
+    toc_lines.append("}")
+    toc_lines.append("")
+    for i, (artist, title) in enumerate(track_meta):
+        wav = tmp_dir / f"track_{i + 1:02d}.wav"
+        toc_lines.append("TRACK AUDIO")
+        toc_lines.append("CD_TEXT {")
+        toc_lines.append("  LANGUAGE 0 {")
+        if title:
+            toc_lines.append(f'    TITLE "{title}"')
+        if artist:
+            toc_lines.append(f'    PERFORMER "{artist}"')
+        toc_lines.append("  }")
+        toc_lines.append("}")
+        toc_lines.append(f'FILE "{wav}" 0')
+        toc_lines.append("")
+    toc_path = tmp_dir / "disc.toc"
+    toc_path.write_text("\n".join(toc_lines) + "\n")
+    send(ser, f"PROGRESS:35%")
+
+    send(ser, "PROGRESS:35%")
+
+    send(ser, "STATUS:Burning audio CD...")
+    cdrdao_cmd = [tool('cdrdao'), 'write', '--buffers', '64',
+                  '--device', disc_device(), str(toc_path)]
+    speed_ = speed or DISC_SPEED
+    if speed_ and speed_.lower() != "auto":
+        cdrdao_cmd += ['--speed', speed_.rstrip('x')]
+
+    proc = subprocess.Popen(cdrdao_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     out_lines = []
     last_prog = 0
     try:
         for line in iter_proc_or_cancel(proc, ser):
             out_lines.append(line)
-            m = re.search(r'(\d+\.\d+)%', line)
+            m = re.search(r'(\d+)\s*%', line)
             if m:
+                pct = 35 + int(int(m.group(1)) * 0.65)
                 now = time.time()
                 if now - last_prog >= 0.2:
-                    send(ser, f"PROGRESS:{m.group(1)}%")
+                    send(ser, f"PROGRESS:{pct}%")
                     last_prog = now
     except (KeyboardInterrupt, SystemExit):
         stop_process(proc)
         raise
+    finally:
+        for w in tmp_dir.glob("*.wav"):
+            w.unlink(missing_ok=True)
+        toc_path.unlink(missing_ok=True)
+        shutil.rmtree(str(tmp_dir), ignore_errors=True)
     rc = proc.wait()
     if rc != 0:
-        with open(log_path, 'w') as f:
-            f.write('\n'.join(out_lines))
         for line in out_lines[-10:]:
-            print(f"growisofs: {line}")
+            print(f"cdrdao: {line}")
         if rc == -15:
             safe_send(ser, "CANCELLED:Burn cancelled")
-            raise RuntimeError("Cancelled")
-        if "unable to reload tray" in "\n".join(out_lines):
-            safe_send(ser, "INFO:Disc written OK (tray reload skipped)")
-            print("growisofs: tray reload failed after successful write — disc is fine")
-        else:
-            safe_send(ser, "INFO:Burn failed, check log")
-            raise RuntimeError("Disc burn failed")
+            raise CancelError("Cancelled")
+        safe_send(ser, "INFO:Burn failed, check log")
+        raise RuntimeError("Disc burn failed")
+    subprocess.run(["eject", disc_device()], timeout=10, capture_output=True)
+
 
 def burn_iso(ser, iso_path, speed=None, is_dual_layer=False):
     """Burn a pre-built ISO directly to disc — no filesystem building."""
     send(ser, "STATUS:Burning ISO...")
     send(ser, "PROGRESS:Starting")
-    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', f"{dvd_device()}={iso_path}"]
-    speed = speed or DVD_SPEED
+    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', f"{disc_device()}={iso_path}"]
+    speed = speed or DISC_SPEED
     if speed and speed.lower() != "auto":
         if is_dual_layer:
             speed_num = int(re.sub(r'[^0-9]', '', speed) or '6')
@@ -1012,39 +1103,7 @@ def burn_iso(ser, iso_path, speed=None, is_dual_layer=False):
                 speed = "4x"
                 send(ser, "INFO:Capped DL speed to 4x")
         growisofs_cmd += ['-speed', speed.rstrip('x')]
-    log_path = iso_path.parent / "growisofs.log"
-    proc = subprocess.Popen(
-        growisofs_cmd,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    out_lines = []
-    last_prog = 0
-    try:
-        for line in iter_proc_or_cancel(proc, ser):
-            out_lines.append(line)
-            m = re.search(r'(\d+\.\d+)%', line)
-            if m:
-                now = time.time()
-                if now - last_prog >= 0.2:
-                    send(ser, f"PROGRESS:{m.group(1)}%")
-                    last_prog = now
-    except (KeyboardInterrupt, SystemExit):
-        stop_process(proc)
-        raise
-    rc = proc.wait()
-    if rc != 0:
-        with open(log_path, 'w') as f:
-            f.write('\n'.join(out_lines))
-        for line in out_lines[-10:]:
-            print(f"growisofs: {line}")
-        if rc == -15:
-            safe_send(ser, "CANCELLED:Burn cancelled")
-            raise RuntimeError("Cancelled")
-        if "unable to reload tray" in "\n".join(out_lines):
-            safe_send(ser, "INFO:Disc written OK (tray reload skipped)")
-            print("growisofs: tray reload failed after successful write — disc is fine")
-        else:
-            safe_send(ser, "INFO:Burn failed, check log")
-            raise RuntimeError("Disc burn failed")
+    _run_growisofs(ser, growisofs_cmd, iso_path.parent / "growisofs.log")
 
 def remux_and_author(ser, mpg, disc_label, disc_capacity, dvd_aspect=None):
     """Remux an existing DVD-compliant .mpg to fix mux-rate/timestamp
@@ -1118,7 +1177,7 @@ def remux_and_burn(ser, mpg, disc_label, disc_capacity, dl_info, burn_speed=None
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 dvd_burn.py 'video URL or file path'")
+        print("Usage: python3 discstation_burn.py 'video URL or file path'")
         sys.exit(1)
     url = sys.argv[1]
     WORK.mkdir(parents=True, exist_ok=True)
@@ -1128,7 +1187,7 @@ def main():
     try:
         ser = serial.Serial(PORT, BAUD, timeout=1)
         time.sleep(2)
-        print("Connected to DVD Station")
+        print("Connected to DiscStation")
         print("Running preflight...")
         send(ser, "STATUS:Preflight...")
         info = get_video_info(url)
@@ -1138,7 +1197,7 @@ def main():
         print(f"Title: {title}")
         print(f"Duration: {format_duration(duration)}")
         print(f"Preflight: {fit_line}")
-        print(f"DVD drive: {dvd_device()}")
+        print(f"DVD drive: {disc_device()}")
         disc_label = sanitize_disc_label(title)
         print(f"Disc label: {disc_label}")
         send(ser, f"TITLE:{title}")
@@ -1147,10 +1206,10 @@ def main():
         if not can_fit:
             raise RuntimeError("Video too long for DVD5")
 
-        device = dvd_device()
+        device = disc_device()
         dl_info = detect_disc_type(device)
         if dl_info["is_dual_layer"]:
-            sl_target = int(os.environ.get("DVD_TARGET_BYTES", "4300000000"))
+            sl_target = int(os.environ.get("DISC_TARGET_BYTES", "4300000000"))
             try:
                 sl_plan = bitrate_plan(duration, "AUTO", sl_target)
                 if sl_plan:

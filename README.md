@@ -1,4 +1,4 @@
-# DVD Station
+# DiscStation
 
 Physical disc burning appliance — standalone DVD/Blu-ray burner with ESP32 remote control.
 
@@ -23,12 +23,12 @@ Physical disc burning appliance — standalone DVD/Blu-ray burner with ESP32 rem
 ```
 .
 ├── src/
-│   ├── dvd_station.py    # Main orchestrator, serial, web server
-│   └── dvd_burn.py       # Burn pipeline (download, convert, author, burn)
+│   ├── discstation.py    # Main orchestrator, serial, web server
+│   └── discstation_burn.py       # Burn pipeline (download, convert, author, burn)
 ├── arduino/
 │   ├── c6/               # ESP32-C6 firmware (current)
 │   └── v1/               # ESP32 V1 firmware (legacy)
-├── systemd/              # dvd-station.service for auto-start
+├── systemd/              # discstation.service for auto-start
 └── README.md
 ```
 
@@ -42,8 +42,8 @@ sudo apt install growisofs ffmpeg dvdauthor lsdvd wodim mpv genisoimage python3-
 # Upload arduino/c6/DVD_Station_C6.ino to ESP32-C6 via Arduino IDE
 
 # Systemd
-cp systemd/dvd-station.service ~/.config/systemd/user/
-systemctl --user enable --now dvd-station.service
+cp systemd/discstation.service ~/.config/systemd/user/
+systemctl --user enable --now discstation.service
 ```
 
 ## Web Interface

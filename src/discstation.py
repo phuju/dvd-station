@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import atexit
 import concurrent.futures
 import json
 import os
@@ -27,7 +28,7 @@ import requests
 import serial
 from mutagen.flac import FLAC, Picture
 
-import dvd_burn
+import discstation_burn
 
 # Web interface for URL input and file upload
 _burn_url_queue = Queue()
@@ -36,6 +37,7 @@ _web_server = None
 _last_burn_result = None
 _last_burn_result_time = 0
 _last_upload_dir = None
+_last_upload_label = None
 
 
 class _WebHandler(http.server.BaseHTTPRequestHandler):
@@ -83,12 +85,38 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         if not files:
             self._respond(400, 'No files uploaded')
             return
-        upload_dir = Path(dvd_burn.WORK) / f"upload_{time.strftime('%Y%m%d_%H%M%S')}"
+        paths_list = []
+        for filename, data in list(files):
+            if filename == '_paths':
+                try:
+                    paths_list = json.loads(data.decode())
+                    if not isinstance(paths_list, list):
+                        paths_list = []
+                except Exception:
+                    pass
+                files.remove((filename, data))
+        paths_list = []
+        for filename, data in list(files):
+            if filename == '_paths':
+                try:
+                    paths_list = json.loads(data.decode())
+                    if not isinstance(paths_list, list):
+                        paths_list = []
+                except Exception:
+                    pass
+                files.remove((filename, data))
+        upload_dir = Path(discstation_burn.WORK) / f"upload_{time.strftime('%Y%m%d_%H%M%S')}"
         upload_dir.mkdir(parents=True, exist_ok=True)
         total = 0
-        for filename, data in files:
-            safe_name = Path(filename).name
-            (upload_dir / safe_name).write_bytes(data)
+        for i, (filename, data) in enumerate(files):
+            rel = filename
+            if i < len(paths_list) and paths_list[i].get('p'):
+                p = paths_list[i]['p']
+                if p != paths_list[i].get('n', ''):
+                    rel = p
+            dest = upload_dir / rel.lstrip('/')
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
             total += len(data)
         _last_upload_dir = str(upload_dir)
         size_str = f"{total / 1e6:.1f}MB" if total > 1e6 else f"{total / 1e3:.0f}KB"
@@ -97,10 +125,10 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_disc_info(self):
         info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
         try:
-            device = dvd_burn.dvd_device()
+            device = discstation_burn.disc_device()
             props = udev_cdrom_properties(device)
             if props.get("ID_CDROM_MEDIA") == "1" or props.get("ID_CDROM_MEDIA_STATE") == "blank":
-                disc_bytes = dvd_burn.disc_capacity_bytes(device)
+                disc_bytes = discstation_burn.disc_capacity_bytes(device)
                 info["disc_present"] = True
                 info["capacity_bytes"] = disc_bytes or 0
                 info["capacity_gb"] = round((disc_bytes or 0) / 1e9, 2)
@@ -108,7 +136,8 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                     info["type"] = "DVD9"
                 elif disc_bytes:
                     info["type"] = "DVD5"
-        except Exception:
+        except Exception as e:
+            print(f"Disc info error: {e}")
             pass
         self._respond(200, json.dumps(info), "application/json")
 
@@ -140,8 +169,8 @@ self.addEventListener('fetch', e => {
     def _serve_manifest(self):
         icon_svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><circle cx="256" cy="256" r="230" fill="#5c9cf5" stroke="#0a0a0a" stroke-width="20"/><circle cx="256" cy="256" r="80" fill="#0a0a0a"/><rect x="176" y="246" width="160" height="20" rx="10" fill="#5c9cf5" opacity="0.7"/></svg>'
         manifest = {
-            "name": "DVD Station",
-            "short_name": "DVD Station",
+            "name": "DiscStation",
+            "short_name": "DiscStation",
             "start_url": "/",
             "display": "standalone",
             "background_color": "#0a0a0a",
@@ -202,7 +231,7 @@ self.addEventListener('fetch', e => {
         upload_info = '<p style="color:#5c9cf5;text-align:center">Files ready! Select BURN DATA on the remote.</p>' if upload_ready else ''
         html = f'''<!DOCTYPE html>
 <html><head>
-<title>DVD Station</title>
+<title>DiscStation</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#0a0a0a">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -236,7 +265,7 @@ self.addEventListener('fetch', e => {
   #file-list{{max-height:200px;overflow-y:auto;margin-bottom:.8em}}
 </style></head>
 <body>
-<h1>&#x1F4BF; DVD Station</h1>
+<h1>&#x1F4BF; DiscStation</h1>
 {result_html}
 {upload_info}
 <div id="install-spot"></div>
@@ -264,38 +293,45 @@ self.addEventListener('fetch', e => {
   </div>
   <div class="dropzone" id="dropzone" onclick="document.getElementById('filein').click()">
     <div class="icon">&#x2B06;</div>
-    <div>Tap or drop files <span style="color:#666;font-size:.85em">(repeat to add from other folders)</span></div>
+    <div>Tap for files &bull; <a href="#" onclick="event.stopPropagation();document.getElementById('folderin').click();return false" style="color:#5c9cf5">Tap for folder</a></div>
+    <div style="color:#666;font-size:.75em">repeat to add from other locations</div>
   </div>
   <input type="file" id="filein" multiple style="display:none" onchange="addFiles(this.files);this.value=''">
+  <input type="file" id="folderin" webkitdirectory style="display:none" onchange="addFiles(this.files);this.value=''">
   <div id="file-list"></div>
   <div id="iso-badge" style="display:none;text-align:center;color:#f90;font-size:.85em;margin:.5em 0"></div>
   <div id="label-row" style="display:none;margin-bottom:.8em">
     <input type="text" id="disc-label" placeholder="Disc label" style="text-align:center">
+    <div id="folder-summary" style="text-align:center;color:#666;font-size:.8em;margin-top:.3em"></div>
   </div>
   <button id="upload-btn" onclick="uploadFiles()" disabled>Upload &amp; Burn to Data DVD</button>
 </div>
 <script>
-  let files=[];
+  let files=[],folders=[];
   let discBytes=0,discType='';
   fetch('/disc-info').then(r=>r.json()).then(d=>{{
     discBytes=d.capacity_bytes;discType=d.type;
     if(d.disc_present){{document.getElementById('disc-type').textContent=discType==='none'?'No disc':discType;renderSize();}}
   }});
   function renderSize(){{
-    let t=0;files.forEach(f=>t+=f.size);
-    if(discBytes&&files.length){{
+    let t=0;files.forEach(e=>t+=e.file.size);folders.forEach(d=>d.files.forEach(e=>t+=e.file.size));
+    let total=files.length;folders.forEach(d=>total+=d.files.length);
+    if(discBytes&&total){{
       let pct=Math.min((t/discBytes*100),100);
       document.getElementById('disc-bar').style.display='block';
       document.getElementById('disc-space').textContent=fmtSize(t)+' / '+(discBytes/1e9).toFixed(1)+'GB';
       document.getElementById('disc-fill').style.width=pct+'%';
       document.getElementById('disc-fill').style.background=pct>95?'#f44':pct>80?'#f90':'#5c9cf5';
     }}else{{document.getElementById('disc-bar').style.display='none'}}
-    let iso=files.length===1&&files[0].name.toLowerCase().endsWith('.iso');
+    let iso=total===1&&(files.length?files[0].file.name:folders[0].files[0].file.name).toLowerCase().endsWith('.iso');
     document.getElementById('iso-badge').style.display=iso?'block':'none';
     document.getElementById('iso-badge').textContent=iso?'\U0001f4c0 ISO detected \u2014 burns directly, no quality loss':'';
-    document.getElementById('label-row').style.display=files.length?'block':'none';
+    document.getElementById('label-row').style.display=total?'block':'none';
+    let foldersSet=new Set();folders.forEach(d=>foldersSet.add(d.name));
+    files.forEach(e=>{{let p=e.path;let s=p.lastIndexOf('/');if(s>0)foldersSet.add(p.substring(0,s))}});
+    document.getElementById('folder-summary').textContent=(foldersSet.size?foldersSet.size+' folder(s), ':'' )+total+' file(s)';
     if(!document.getElementById('disc-label').value){{
-      let n=files.length?files[0].name.replace(/\\.[^.]+$/, ''):'';
+      let n=files.length?files[0].file.name.replace(/\\.[^.]+$/, ''):(folders.length?folders[0].name:'');
       document.getElementById('disc-label').value=n.slice(0,32);
     }}
   }}
@@ -305,24 +341,44 @@ self.addEventListener('fetch', e => {
     document.getElementById('panel-url').classList.toggle('active',id==='url');
     document.getElementById('panel-upload').classList.toggle('active',id==='upload');
   }}
-  function addFiles(fl){{for(let f of fl)files.push(f);render();renderSize()}}
+  function addFiles(fl){{
+    let fList=[],dList=[];
+    for(let f of fl){{
+      if(f.webkitRelativePath){{let parts=f.webkitRelativePath.split('/');let root=parts[0];
+        let found=dList.find(d=>d.name===root);if(!found){{found={{name:root,files:[]}};dList.push(found)}}
+        found.files.push({{file:f,path:f.webkitRelativePath}});}}
+      else{{fList.push({{file:f,path:f.name}});}}
+    }}
+    files=files.concat(fList);folders=folders.concat(dList);
+    render();renderSize();
+  }}
   function removeFile(i){{files.splice(i,1);render();renderSize()}}
+  function removeFolder(i){{folders.splice(i,1);render();renderSize()}}
   function render(){{
-    let h='';files.forEach((f,i)=>{{
-      h+=`<div class="file-item"><span class="name">${{f.name}}</span><span class="size">${{fmtSize(f.size)}}</span><span class="rm" onclick="removeFile(${{i}})">&times;</span></div>`;
+    let h='';
+    folders.forEach((d,i)=>{{
+      let sz=0;d.files.forEach(e=>sz+=e.file.size);
+      h+=`<div class="file-item"><span class="name">\U0001f4c1 ${{d.name}}/</span><span class="size">${{d.files.length}} files, ${{fmtSize(sz)}}</span><span class="rm" onclick="removeFolder(${{i}})">&times;</span></div>`;
+    }});
+    files.forEach((e,i)=>{{
+      h+=`<div class="file-item"><span class="name">${{e.file.name}}</span><span class="size">${{fmtSize(e.file.size)}}</span><span class="rm" onclick="removeFile(${{i}})">&times;</span></div>`;
     }});
     document.getElementById('file-list').innerHTML=h;
-    document.getElementById('upload-btn').disabled=files.length===0;
+    document.getElementById('upload-btn').disabled=(files.length===0&&folders.length===0);
   }}
   async function uploadFiles(){{
-    if(!files.length)return;
+    if(!(files.length||folders.length))return;
     let lbl=document.getElementById('disc-label').value.trim();
     if(lbl) await fetch('/set-label',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:'label='+encodeURIComponent(lbl)}});
     let btn=document.getElementById('upload-btn');btn.disabled=true;btn.textContent='Uploading...';
-    let fd=new FormData();files.forEach(f=>fd.append('files',f));
+    let fd=new FormData();
+    let paths=[];
+    files.forEach(e=>{{fd.append('files',e.file);paths.push({{n:e.file.name,p:e.path}});}});
+    folders.forEach(d=>d.files.forEach(e=>{{fd.append('files',e.file);paths.push({{n:e.file.name,p:e.path}});}}));
+    fd.append('_paths',JSON.stringify(paths));
     try{{let r=await fetch('/',{{method:'POST',body:fd}});btn.textContent=await r.text();}}
     catch(e){{btn.textContent='Upload failed'}}
-    if(btn.textContent.includes('Select BURN DATA')){{files=[];render();renderSize();btn.disabled=true}}
+    if(btn.textContent.includes('Select BURN DATA')){{files=[];folders=[];render();renderSize();btn.disabled=true}}
     else{{btn.disabled=false;btn.textContent='Upload & Burn to Data DVD'}}
   }}
   let dz=document.getElementById('dropzone');
@@ -368,8 +424,8 @@ def start_web_server(port=8080):
     server.server_bind()
     server.server_activate()
 
-    cert = Path.home() / '.local' / 'share' / 'dvd-station' / 'server.crt'
-    key = Path.home() / '.local' / 'share' / 'dvd-station' / 'server.key'
+    cert = Path.home() / '.local' / 'share' / 'discstation' / 'server.crt'
+    key = Path.home() / '.local' / 'share' / 'discstation' / 'server.key'
     if cert.exists() and key.exists():
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(str(cert), str(key))
@@ -405,7 +461,7 @@ def local_ip():
 
 def wait_for_web_url(ser):
     ip = local_ip()
-    protocol = "https" if (Path.home() / '.local' / 'share' / 'dvd-station' / 'server.crt').exists() else "http"
+    protocol = "https" if (Path.home() / '.local' / 'share' / 'discstation' / 'server.crt').exists() else "http"
     url = f"{protocol}://{ip}:{_web_port}"
     safe_send(ser, f"IP:{url}")
     print(f"URL displayed: {url}")
@@ -424,7 +480,7 @@ def wait_for_web_url(ser):
 
 
 MPV_SOCKET = "/tmp/dvd_station_mpv.sock"
-RIP_ROOT = dvd_burn.USER_HOME / "dvd_rips"
+RIP_ROOT = discstation_burn.USER_HOME / "dvd_rips"
 USER_AGENT = "DVDStation/0.1 (local appliance; phuju)"
 DISC_POLL_SECONDS = 6
 
@@ -438,17 +494,17 @@ def ensure_text(value):
 
 
 def send(ser, msg):
-    dvd_burn.send(ser, msg)
+    discstation_burn.send(ser, msg)
 
 
 def safe_send(ser, msg):
-    dvd_burn.safe_send(ser, msg)
+    discstation_burn.safe_send(ser, msg)
 
 
 def run_as_desktop_user(cmd):
     sudo_user = os.environ.get("SUDO_USER")
     if os.geteuid() == 0 and sudo_user and sudo_user != "root":
-        home = Path(dvd_burn.USER_HOME)
+        home = Path(discstation_burn.USER_HOME)
         uid = pwd.getpwnam(sudo_user).pw_uid
         return [
             "sudo", "-u", sudo_user,
@@ -495,7 +551,8 @@ def mpv_command(command):
             sock.connect(MPV_SOCKET)
             sock.sendall(payload)
     except OSError:
-        pass
+        return False
+    return True
 
 
 def wait_for_socket(path, proc, timeout=8):
@@ -535,11 +592,13 @@ def read_serial_line(ser, timeout=0.1):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _line_buf:
-            idx = _line_buf.find(b"\n")
-            if idx >= 0:
-                line = _line_buf[:idx]
-                _line_buf = _line_buf[idx + 1:]
-                return line.decode(errors="ignore").strip() or None
+            _line_buf = _line_buf.lstrip(b'\r\n')
+            if _line_buf:
+                idx = _line_buf.find(b"\n")
+                if idx >= 0:
+                    line = _line_buf[:idx]
+                    _line_buf = _line_buf[idx + 1:]
+                    return line.decode(errors="ignore").strip() or None
         try:
             chunk = os.read(ser.fd, 4096)
         except OSError:
@@ -571,7 +630,7 @@ def show_home(ser):
 
 
 def show_standby(ser):
-    safe_send(ser, "STANDBY:DVD Station")
+    safe_send(ser, "STANDBY:DiscStation")
 
 
 def eject_disc(ser, device):
@@ -643,6 +702,7 @@ def eject_disc(ser, device):
             print("Tray close timed out")
             tray_was_cancelled = True
     else:
+        tray_was_cancelled = False
         safe_send(ser, "ERROR:Eject failed")
     if tray_was_cancelled:
         safe_send(ser, "STANDBY:Tray open")
@@ -651,7 +711,7 @@ def eject_disc(ser, device):
     return ok
 
 
-HISTORY_FILE = dvd_burn.WORK / "burn_history.jsonl"
+HISTORY_FILE = discstation_burn.WORK / "burn_history.jsonl"
 
 
 def append_burn_history(entry):
@@ -851,7 +911,7 @@ def disc_kind(device):
         disc_kind._stuck_count = _stuck_count
         if _stuck_count >= 2:
             print("Drive appears stuck (2 probes), attempting USB reset...")
-            dvd_burn.reset_drive(device)
+            discstation_burn.reset_drive(device)
             disc_kind._stuck_count = 0
     else:
         disc_kind._stuck_count = 0
@@ -870,6 +930,33 @@ def disc_title(device):
                     if t:
                         return t
     elif kind == "audio_cd":
+        try:
+            toc = audio_cd_toc(device)
+            if toc and toc.get("track_count"):
+                n = toc["track_count"]
+                leadout = toc.get("leadout", 0)
+                tracks = toc.get("tracks", [])
+                if tracks:
+                    total_frames = leadout - tracks[0]
+                    total_sec = int(total_frames / 75)
+                else:
+                    total_sec = 0
+                fingerprint = f"{n}-{total_sec}"
+                match = None
+                if HISTORY_FILE.exists():
+                    for line in open(HISTORY_FILE):
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("disc_type") == "Audio CD" and entry.get("fingerprint") == fingerprint:
+                                match = entry
+                                break
+                        except Exception:
+                            pass
+                if match and match.get("title"):
+                    return match["title"]
+                return f"Audio CD ({n} tracks)"
+        except Exception:
+            pass
         return "Audio CD"
     elif kind == "vcd":
         return "VCD"
@@ -882,8 +969,8 @@ def menu_items_for_disc(device):
     kind = disc_kind(device)
     items = []
     if kind == "blank":
-        items = ["BURN", "BURN DATA"]
-        had = dvd_burn.WORK.rglob("movie.mpg")
+        items = ["BURN", "BURN DATA", "BURN AUDIO"]
+        had = discstation_burn.WORK.rglob("movie.mpg")
         if any(True for _ in had):
             items.append("BURN MPG")
     elif kind in ("dvd_video", "audio_cd", "vcd", "svcd", "video_data", "data_disc", "data_cd"):
@@ -1287,6 +1374,12 @@ def audio_metadata_lookup(device, track_count, artist_hint=None, album_hint=None
         except Exception as e:
             print(f"MusicBrainz release-group lookup failed: {e}")
 
+    if not metadata:
+        try:
+            metadata = gnudb_lookup(device, track_count)
+        except Exception as e:
+            print(f"GnuDB lookup failed: {e}")
+
     return metadata
 
 
@@ -1423,8 +1516,15 @@ def parse_ffmpeg_time(line):
         return None
 
 
-class CancelError(Exception):
-    pass
+from discstation_burn import CancelError
+
+
+def _check_cancel(ser):
+    try:
+        line = read_serial_line(ser, timeout=0)
+        return line in ("CANCEL", "PLAY_STOP") if line else False
+    except OSError:
+        return False
 
 
 def iter_process_events(proc, idle_seconds=1.0, ser=None):
@@ -1440,10 +1540,10 @@ def iter_process_events(proc, idle_seconds=1.0, ser=None):
         if not ready:
             if ser is not None:
                 if _check_cancel(ser):
-                    dvd_burn.stop_process(proc)
+                    discstation_burn.stop_process(proc)
                     raise CancelError
                 if time.time() - last_ping >= 5:
-                    dvd_burn.send(ser, "PING")
+                    discstation_burn.send(ser, "PING")
                     last_ping = time.time()
             yield None
             continue
@@ -1514,29 +1614,29 @@ def burn_flow(ser, url):
                 safe_send(ser, "ERROR:Need URL or file path")
                 return
 
-    device = dvd_burn.dvd_device()
-    disc_bytes = dvd_burn.disc_capacity_bytes(device)
+    device = discstation_burn.disc_device()
+    disc_bytes = discstation_burn.disc_capacity_bytes(device)
     if disc_bytes:
         print(f"Disc capacity: {disc_bytes / 1_000_000_000:.2f}GB")
     else:
         label_hint = "DVD5"
         if is_blank_disc(device):
-            label_hint = "DVD5 (set DVD_DISC_BYTES=8500000000 for DL)"
+            label_hint = "DVD5 (set DISC_DISC_BYTES=8500000000 for DL)"
         print(f"Disc capacity: unknown (assuming {label_hint})")
 
-    dvd_burn.WORK.mkdir(parents=True, exist_ok=True)
-    job_dir = dvd_burn.WORK / time.strftime("job_%Y%m%d_%H%M%S")
+    discstation_burn.WORK.mkdir(parents=True, exist_ok=True)
+    job_dir = discstation_burn.WORK / time.strftime("job_%Y%m%d_%H%M%S")
     job_dir.mkdir()
 
     send(ser, "STATUS:Preflight...")
-    info = dvd_burn.get_video_info(url)
+    info = discstation_burn.get_video_info(url)
     title = info["title"]
     duration = info["duration"]
-    duration_line, fit_line, can_fit = dvd_burn.preflight_lines(duration, disc_bytes)
-    disc_label = dvd_burn.sanitize_disc_label(title)
+    duration_line, fit_line, can_fit = discstation_burn.preflight_lines(duration, disc_bytes)
+    disc_label = discstation_burn.sanitize_disc_label(title)
 
     print(f"Title: {title}")
-    print(f"Duration: {dvd_burn.format_duration(duration)}")
+    print(f"Duration: {discstation_burn.format_duration(duration)}")
     print(f"Preflight: {fit_line}")
     print(f"Disc label: {disc_label}")
     print(f"DVD drive: {device}")
@@ -1556,11 +1656,11 @@ def burn_flow(ser, url):
     if not can_fit:
         raise RuntimeError(f"Video too long for {label_hint}")
 
-    dl_info = dvd_burn.detect_disc_type(device)
+    dl_info = discstation_burn.detect_disc_type(device)
     if dl_info["is_dual_layer"]:
-        sl_target = int(os.environ.get("DVD_TARGET_BYTES", "4300000000"))
+        sl_target = int(os.environ.get("DISC_TARGET_BYTES", "4300000000"))
         try:
-            sl_plan = dvd_burn.bitrate_plan(duration, "AUTO", sl_target)
+            sl_plan = discstation_burn.bitrate_plan(duration, "AUTO", sl_target)
             if sl_plan:
                 warn = f"DL disc for {label_hint} content"
                 print(f"WARNING: {warn}")
@@ -1582,14 +1682,14 @@ def burn_flow(ser, url):
             print("Burn cancelled by user")
             return
         if line.startswith("MODE:"):
-            selected_mode = dvd_burn.normalize_mode(line.split(":", 1)[1])
+            selected_mode = discstation_burn.normalize_mode(line.split(":", 1)[1])
             print(f"Burn mode: {selected_mode}")
         elif line.startswith("SPEED:"):
             burn_speed = line.split(":", 1)[1].strip()
             print(f"Burn speed: {burn_speed}")
         elif line == "START" or line.startswith("START:"):
             if ":" in line:
-                selected_mode = dvd_burn.normalize_mode(line.split(":", 1)[1])
+                selected_mode = discstation_burn.normalize_mode(line.split(":", 1)[1])
             print(f"Starting burn flow in {selected_mode} mode")
             send(ser, f"STATUS:Starting {selected_mode}...")
             break
@@ -1597,21 +1697,21 @@ def burn_flow(ser, url):
     start_time = time.time()
     disc_type_label = "DL" if dl_info["is_dual_layer"] else "SL"
     try:
-        plan = dvd_burn.bitrate_plan(duration, selected_mode, disc_bytes)
-        video = dvd_burn.download(ser, url, job_dir)
-        mpg, dvd_aspect = dvd_burn.convert(ser, video, job_dir, selected_mode, disc_bytes)
-        srt_files = dvd_burn.find_subtitle_files(video)
+        plan = discstation_burn.bitrate_plan(duration, selected_mode, disc_bytes)
+        video = discstation_burn.download(ser, url, job_dir)
+        mpg, dvd_aspect = discstation_burn.convert(ser, video, job_dir, selected_mode, disc_bytes)
+        srt_files = discstation_burn.find_subtitle_files(video)
         if not srt_files:
-            srt_files = dvd_burn.extract_embedded_subtitles(video, job_dir)
+            srt_files = discstation_burn.extract_embedded_subtitles(video, job_dir)
         if srt_files:
             safe_send(ser, f"INFO:{len(srt_files)} subtitle(s)")
-            mpg = dvd_burn.add_subtitles(ser, mpg, srt_files, job_dir)
-        dvd_dir = dvd_burn.author(ser, mpg, job_dir, dvd_aspect)
-        dvd_burn.check_dvd_size(ser, dvd_dir, disc_bytes)
+            mpg = discstation_burn.add_subtitles(ser, mpg, srt_files, job_dir)
+        dvd_dir = discstation_burn.author(ser, mpg, job_dir, dvd_aspect)
+        discstation_burn.check_dvd_size(ser, dvd_dir, disc_bytes)
 
         if plan["burn"]:
-            dvd_burn.wait_for_burn_confirm(ser, dvd_dir, disc_bytes)
-            dvd_burn.burn(ser, dvd_dir, disc_label, burn_speed, dl_info["is_dual_layer"])
+            discstation_burn.wait_for_burn_confirm(ser, dvd_dir, disc_bytes)
+            discstation_burn.burn(ser, dvd_dir, disc_label, burn_speed, dl_info["is_dual_layer"])
             safe_send(ser, "DONE:Disc complete!")
             print("Burn complete.")
         else:
@@ -1660,20 +1760,20 @@ def _mpg_label(job_dir):
     dl = job_dir / "download"
     if dl.is_dir():
         for f in sorted(dl.iterdir()):
-            if f.suffix.lower() in dvd_burn.VIDEO_EXTS:
-                label = dvd_burn.sanitize_disc_label(f.stem)
+            if f.suffix.lower() in discstation_burn.VIDEO_EXTS:
+                label = discstation_burn.sanitize_disc_label(f.stem)
                 break
         else:
             for f in sorted(dl.iterdir()):
-                label = dvd_burn.sanitize_disc_label(f.stem)
+                label = discstation_burn.sanitize_disc_label(f.stem)
                 break
     if label == "DVD_VIDEO" or not label:
-        label = dvd_burn.sanitize_disc_label(job_dir.name)
+        label = discstation_burn.sanitize_disc_label(job_dir.name)
     return label
 
 
 def burn_mpg_flow(ser):
-    jobs = sorted(dvd_burn.WORK.glob("job_*"), reverse=True)
+    jobs = sorted(discstation_burn.WORK.glob("job_*"), reverse=True)
     candidates = []
     for jd in jobs:
         mpg = jd / "movie.mpg"
@@ -1713,7 +1813,7 @@ def burn_mpg_flow(ser):
                     safe_send(ser, "ERROR:Not an .mpg file")
                     time.sleep(2)
                     continue
-                disc_label = dvd_burn.sanitize_disc_label(mpg.stem)
+                disc_label = discstation_burn.sanitize_disc_label(mpg.stem)
                 break
             else:
                 idx = next((i for i, n in enumerate(candidates) if n[1][:20] == sel), None)
@@ -1725,10 +1825,10 @@ def burn_mpg_flow(ser):
             return
         time.sleep(0.05)
 
-    device = dvd_burn.dvd_device()
-    dl_info = dvd_burn.detect_disc_type(device)
+    device = discstation_burn.disc_device()
+    dl_info = discstation_burn.detect_disc_type(device)
     disc_bytes = dl_info["capacity"]
-    dvd_burn.remux_and_burn(ser, mpg, disc_label, disc_bytes, dl_info)
+    discstation_burn.remux_and_burn(ser, mpg, disc_label, disc_bytes, dl_info)
 
 
 def _copy_to_job(ser, src, dst_dir):
@@ -1737,10 +1837,10 @@ def _copy_to_job(ser, src, dst_dir):
         n = len(items)
         for i, item in enumerate(items):
             if item.is_file():
-                dvd_burn.copy_with_keepalive(ser, item, dst_dir / item.name,
+                discstation_burn.copy_with_keepalive(ser, item, dst_dir / item.name,
                                               base_pct=int(i * 100 / n), pct_span=100 / n)
     else:
-        dvd_burn.copy_with_keepalive(ser, src, dst_dir / src.name)
+        discstation_burn.copy_with_keepalive(ser, src, dst_dir / src.name)
 
 
 def burn_data_flow(ser):
@@ -1769,8 +1869,8 @@ def burn_data_flow(ser):
             safe_send(ser, "ERROR:Need URL or file path")
             return
 
-    device = dvd_burn.dvd_device()
-    dl_info = dvd_burn.detect_disc_type(device)
+    device = discstation_burn.disc_device()
+    dl_info = discstation_burn.detect_disc_type(device)
     disc_bytes = dl_info["capacity"]
     if disc_bytes:
         print(f"Disc capacity: {disc_bytes / 1_000_000_000:.2f}GB")
@@ -1782,14 +1882,14 @@ def burn_data_flow(ser):
         title = local_path.name if local_path.is_dir() else local_path.stem
     else:
         send(ser, "STATUS:Probing source...")
-        info = dvd_burn.get_video_info(url)
+        info = discstation_burn.get_video_info(url)
         title = info["title"]
 
     if _last_upload_label:
-        disc_label = dvd_burn.sanitize_disc_label(_last_upload_label)
+        disc_label = discstation_burn.sanitize_disc_label(_last_upload_label)
         _last_upload_label = None
     else:
-        disc_label = dvd_burn.sanitize_disc_label(title)
+        disc_label = discstation_burn.sanitize_disc_label(title)
     print(f"Source: {url}")
     print(f"Disc label: {disc_label}")
     print(f"DVD drive: {device}")
@@ -1815,27 +1915,34 @@ def burn_data_flow(ser):
     if not is_blank_disc(device):
         raise RuntimeError("No blank disc in drive")
 
-    dvd_burn.WORK.mkdir(parents=True, exist_ok=True)
-    job_dir = dvd_burn.WORK / time.strftime("job_%Y%m%d_%H%M%S")
+    discstation_burn.WORK.mkdir(parents=True, exist_ok=True)
+    job_dir = discstation_burn.WORK / time.strftime("job_%Y%m%d_%H%M%S")
     job_dir.mkdir()
     download_dir = job_dir / "download"
     download_dir.mkdir()
 
     start_time = time.time()
     try:
-        if local_path.exists():
+        is_dir = local_path.is_dir() if local_path.exists() else False
+        if is_dir:
+            files_to_burn = [local_path]
+        elif local_path.exists():
             safe_send(ser, "STATUS:Copying files...")
             _copy_to_job(ser, local_path, download_dir)
+            files_to_burn = sorted(download_dir.iterdir())
         else:
-            dvd_burn.download(ser, url, job_dir)
+            discstation_burn.download(ser, url, job_dir)
+            files_to_burn = sorted(download_dir.iterdir())
 
-        files_to_burn = sorted(download_dir.iterdir())
         if not files_to_burn:
             raise RuntimeError("No files to burn")
 
         total_bytes = sum(f.stat().st_size for f in files_to_burn if f.is_file())
+        for d in files_to_burn:
+            if d.is_dir():
+                total_bytes += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
         label = "DVD5" if not dl_info["is_dual_layer"] else "DVD9"
-        overhead = 0.97
+        overhead = 0.995
         usable = (disc_bytes or 0) * overhead
         if usable and total_bytes > usable:
             size_gb = total_bytes / 1e9
@@ -1845,9 +1952,9 @@ def burn_data_flow(ser):
 
         is_iso = len(files_to_burn) == 1 and files_to_burn[0].suffix.lower() == '.iso'
         if is_iso:
-            dvd_burn.burn_iso(ser, files_to_burn[0], burn_speed, dl_info["is_dual_layer"])
+            discstation_burn.burn_iso(ser, files_to_burn[0], burn_speed, dl_info["is_dual_layer"])
         else:
-            dvd_burn.burn_data(ser, files_to_burn, disc_label, burn_speed, dl_info["is_dual_layer"])
+            discstation_burn.burn_data(ser, files_to_burn, disc_label, burn_speed, dl_info["is_dual_layer"])
         safe_send(ser, "DONE:Data disc complete!")
         print("Data burn complete.")
 
@@ -1872,21 +1979,18 @@ def burn_data_flow(ser):
             "duration_s": round(time.time() - start_time),
         })
         raise
-    except RuntimeError as e:
-        msg = str(e)
-        if msg == "Cancelled":
-            append_burn_history({
-                "timestamp": datetime.datetime.now().isoformat(),
-                "title": title,
-                "disc_type": "Data DVD",
-                "mode": "DATA",
-                "speed": burn_speed or "Auto",
-                "success": False,
-                "error": "Cancelled",
-                "duration_s": round(time.time() - start_time),
-            })
-            return
-        raise
+    except CancelError:
+        append_burn_history({
+            "timestamp": datetime.datetime.now().isoformat(),
+            "title": title,
+            "disc_type": "Data DVD",
+            "mode": "DATA",
+            "speed": burn_speed or "Auto",
+            "success": False,
+            "error": "Cancelled",
+            "duration_s": round(time.time() - start_time),
+        })
+        return
     except Exception as e:
         append_burn_history({
             "timestamp": datetime.datetime.now().isoformat(),
@@ -1903,12 +2007,147 @@ def burn_data_flow(ser):
     time.sleep(3)
 
 
-def _check_cancel(ser):
+def burn_audio_flow(ser):
+    if sys.stdin.isatty():
+        safe_send(ser, "STATUS:Enter path to audio files in terminal")
+        print("=== Enter path to audio files/folder, then press Enter ===")
+        try:
+            url = sys.stdin.readline().strip()
+        except (EOFError, KeyboardInterrupt, OSError):
+            safe_send(ser, "CANCELLED:Cancelled")
+            return
+        if not url:
+            safe_send(ser, "ERROR:Need path to audio files")
+            return
+    else:
+        url = wait_for_web_url(ser)
+        if url is None:
+            safe_send(ser, "CANCELLED:Cancelled")
+            return
+        if not url:
+            safe_send(ser, "ERROR:Need path to audio files")
+            return
+
+    src_path = Path(url)
+    if not src_path.exists():
+        safe_send(ser, "ERROR:Path not found")
+        return
+
+    audio_files = []
+    audio_exts = {".wav", ".flac", ".mp3", ".aac", ".ogg", ".wma", ".m4a", ".opus"}
+    if src_path.is_dir():
+        for f in sorted(src_path.iterdir()):
+            if f.suffix.lower() in audio_exts:
+                audio_files.append(f)
+    elif src_path.is_file():
+        audio_files = [src_path]
+
+    if not audio_files:
+        safe_send(ser, "ERROR:No audio files found")
+        return
+
+    album_title = ""
+    album_artist = ""
+    total_dur = 0
+    for f in audio_files:
+        try:
+            if f.suffix.lower() == ".flac":
+                from mutagen.flac import FLAC
+                a = FLAC(str(f))
+                total_dur += a.info.length
+                if not album_title:
+                    album_title = a.get("album", [""])[0]
+                    album_artist = a.get("albumartist", [a.get("artist", [""])[0]])[0]
+            elif f.suffix.lower() == ".mp3":
+                from mutagen.mp3 import MP3
+                a = MP3(str(f))
+                total_dur += a.info.length
+                if not album_title:
+                    album_title = str(a.get("TALB", ""))
+                    album_artist = str(a.get("TPE2", str(a.get("TPE1", ""))))
+            else:
+                total_dur += discstation_burn.probe_duration(str(f))
+        except Exception:
+            pass
+    fingerprint = f"{len(audio_files)}-{int(total_dur)}"
+
+    if album_title and album_artist:
+        disc_label = f"{album_artist} - {album_title}"
+    elif album_title:
+        disc_label = album_title
+    else:
+        disc_label = discstation_burn.sanitize_disc_label(src_path.name if src_path.is_dir() else src_path.stem)
+    disc_label = discstation_burn.sanitize_disc_label(disc_label)[:32]
+    mins = int(total_dur / 60)
+    secs = int(total_dur % 60)
+    fits = "OK" if total_dur <= 4740 else "TOO LONG"  # 79 min max for 700MB CD-R
+    send(ser, f"TITLE:{disc_label}")
+    send(ser, f"META:Dur {mins}m{secs}s")
+    send(ser, f"FIT:CD-R {fits}")
+
+    burn_speed = None
+    print("Waiting for START button...")
+    while True:
+        line = wait_for_button(ser)
+        if line == "CANCEL" or line == "PLAY_STOP":
+            safe_send(ser, "CANCELLED:Cancelled")
+            return
+        if line.startswith("SPEED:"):
+            burn_speed = line.split(":", 1)[1].strip()
+        elif line == "START" or line.startswith("START:"):
+            send(ser, "STATUS:Starting audio burn...")
+            break
+
+    device = discstation_burn.disc_device()
+    if not is_blank_disc(device):
+        raise RuntimeError("No blank disc in drive")
+    if total_dur > 4740:
+        raise RuntimeError(f"Too long for CD-R: {int(total_dur/60)}m{int(total_dur%60)}s > 79m")
+
+    start_time = time.time()
     try:
-        line = read_serial_line(ser, timeout=0)
-        return line in ("CANCEL", "PLAY_STOP") if line else False
-    except OSError:
-        return False
+        discstation_burn.burn_audio_cd(ser, audio_files, disc_label, burn_speed)
+        safe_send(ser, "DONE:Audio CD complete!")
+        append_burn_history({
+            "timestamp": datetime.datetime.now().isoformat(),
+            "title": disc_label,
+            "fingerprint": fingerprint,
+            "disc_type": "Audio CD",
+            "mode": "AUDIO",
+            "speed": burn_speed or "Auto",
+            "success": True,
+            "duration_s": round(time.time() - start_time),
+        })
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except CancelError:
+        append_burn_history({
+            "timestamp": datetime.datetime.now().isoformat(),
+            "title": disc_label,
+            "fingerprint": fingerprint,
+            "disc_type": "Audio CD",
+            "mode": "AUDIO",
+            "speed": burn_speed or "Auto",
+            "success": False,
+            "error": "Cancelled",
+            "duration_s": round(time.time() - start_time),
+        })
+        return
+    except Exception as e:
+        append_burn_history({
+            "timestamp": datetime.datetime.now().isoformat(),
+            "title": disc_label,
+            "fingerprint": fingerprint,
+            "disc_type": "Audio CD",
+            "mode": "AUDIO",
+            "speed": burn_speed or "Auto",
+            "success": False,
+            "error": str(e)[:100],
+            "duration_s": round(time.time() - start_time),
+        })
+        raise
+
+    time.sleep(3)
 
 
 def _iter_proc_lines(proc, ser):
@@ -1919,12 +2158,12 @@ def _iter_proc_lines(proc, ser):
 
     while proc.poll() is None:
         if time.time() - last_ping >= 5:
-            dvd_burn.send(ser, "PING")
+            discstation_burn.send(ser, "PING")
             last_ping = time.time()
         ready, _, _ = select.select([proc_fd, ser_fd], [], [], 0.5)
 
         if ser_fd in ready and _check_cancel(ser):
-            dvd_burn.stop_process(proc)
+            discstation_burn.stop_process(proc)
             return
 
         if proc_fd in ready:
@@ -1970,7 +2209,7 @@ def _run_mpv(ser, cmd, label, kind=None):
 
     try:
         if not wait_for_socket(MPV_SOCKET, proc):
-            dvd_burn.stop_process(proc)
+            discstation_burn.stop_process(proc)
             raise RuntimeError("Could not start mpv")
 
         time.sleep(1)
@@ -1999,7 +2238,7 @@ def _run_mpv(ser, cmd, label, kind=None):
 
                 elif line == "PLAY_STOP":
                     send(ser, "STATUS:Stopping play")
-                    dvd_burn.stop_process(proc)
+                    discstation_burn.stop_process(proc)
                     break
 
                 elif line == "FF:BIG":
@@ -2065,7 +2304,7 @@ def _run_mpv(ser, cmd, label, kind=None):
             time.sleep(0.05)
     finally:
         if proc.poll() is None:
-            dvd_burn.stop_process(proc)
+            discstation_burn.stop_process(proc)
         try:
             os.unlink(MPV_SOCKET)
         except FileNotFoundError:
@@ -2073,7 +2312,7 @@ def _run_mpv(ser, cmd, label, kind=None):
 
 
 def play_flow(ser):
-    device = dvd_burn.dvd_device()
+    device = discstation_burn.disc_device()
     if not shutil.which("mpv"):
         raise RuntimeError("mpv not found")
 
@@ -2123,7 +2362,7 @@ def play_flow(ser):
 
 
 def rip_flow(ser, artist_hint=None, album_hint=None):
-    device = dvd_burn.dvd_device()
+    device = discstation_burn.disc_device()
     kind = disc_kind(device)
 
     if kind == "audio_cd":
@@ -2181,7 +2420,7 @@ def rip_flow(ser, artist_hint=None, album_hint=None):
         print("Rip cancelled by user")
         return
     except (KeyboardInterrupt, SystemExit):
-        dvd_burn.stop_process(proc)
+        discstation_burn.stop_process(proc)
         safe_send(ser, "CANCELLED:Rip stopped")
         raise
 
@@ -2318,7 +2557,7 @@ def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
                 pct = min(int(secs / rip_duration * 100), 99)
                 send(ser, f"PROGRESS:{pct}%")
     except (KeyboardInterrupt, SystemExit):
-        dvd_burn.stop_process(proc)
+        discstation_burn.stop_process(proc)
         safe_send(ser, "CANCELLED:Rip stopped")
         raise
 
@@ -2369,15 +2608,16 @@ def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
 
 
 def station_loop(ser, url, artist_hint=None, album_hint=None):
-    dvd_burn.cleanup_old_jobs()
-    device = dvd_burn.dvd_device()
+    global _last_burn_result, _last_burn_result_time
+    discstation_burn.cleanup_old_jobs()
+    device = discstation_burn.disc_device()
 
     for _ in range(50):
         line = read_serial_line(ser, timeout=0.2)
         if not line:
             break
         print(f"ESP32: {line}")
-        if "DVD_STATION_READY" in line:
+        if "DISCSTATION_READY" in line:
             break
 
     safe_send(ser, "STANDBY:Starting...")
@@ -2385,7 +2625,7 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
     last_disc_line = None
     last_disc_poll = 0
     standby = False
-    print("DVD Station menu ready.")
+    print("DiscStation menu ready.")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         fut = pool.submit(disc_status_line, device)
@@ -2419,6 +2659,7 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
     last_ping = time.time()
     last_pong = time.time()
     _disc_poll_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    atexit.register(_disc_poll_pool.shutdown, wait=False)
     _disc_poll_future = None
     _disc_poll_start = 0
 
@@ -2484,7 +2725,7 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
             continue
 
         if line == "EJECT":
-            device = dvd_burn.dvd_device()
+            device = discstation_burn.disc_device()
             safe_send(ser, "STATUS:Ejecting...")
             try:
                 eject_disc(ser, device)
@@ -2496,6 +2737,8 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
             continue
 
         if not line.startswith("SELECT:"):
+            if line.startswith("WiFi") or line.startswith("IP:") or "ip:" in line.lower():
+                print(f"ESP32: {line}")
             continue
 
         mode = line.split(":", 1)[1].strip().upper()
@@ -2520,6 +2763,10 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
                 last_pong = time.time()
                 burn_data_flow(ser)
                 _last_burn_result = "Burn complete"
+            elif mode == "BURN AUDIO":
+                last_pong = time.time()
+                burn_audio_flow(ser)
+                _last_burn_result = "Burn complete"
             else:
                 safe_send(ser, "ERROR:Bad mode")
                 time.sleep(2)
@@ -2536,7 +2783,7 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
         show_home(ser)
 
 
-PIDFILE = "/tmp/dvd-station.pid"
+PIDFILE = "/tmp/discstation.pid"
 
 
 def check_pidfile():
@@ -2580,38 +2827,6 @@ def main():
     ser = None
     exit_code = 0
 
-    def _connect_c6():
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        try:
-            # Try to find C6 via serial first to get its IP
-            try:
-                s = serial.Serial(dvd_burn.PORT, dvd_burn.BAUD, timeout=1, write_timeout=1)
-                s.setDTR(False); time.sleep(0.1); s.setDTR(True)
-                for _ in range(30):
-                    line = s.readline().decode(errors='ignore').strip()
-                    if line.startswith('IP:'):
-                        ip = line.split(':', 1)[1].strip()
-                        sock.connect((ip, 2323))
-                        sock.settimeout(0)
-                        class TCPWrap:
-                            def __init__(self, sock): self._s = sock; self.fd = sock.fileno()
-                            def write(self, d): self._s.sendall(d.encode() if isinstance(d, str) else d)
-                            def close(self): self._s.close()
-                            def fileno(self): return self._s.fileno()
-                        s.close()
-                        print(f"C6 on WiFi: {ip}")
-                        return TCPWrap(sock)
-                    if "DVD_STATION_READY" in line:
-                        break
-                s.close()
-            except (serial.SerialException, OSError, termios.error):
-                pass
-            sock.close()
-        except Exception:
-            pass
-        return None
-
     try:
         if args.retag_latest_audio:
             rip_dir = latest_audio_rip_dir()
@@ -2626,15 +2841,13 @@ def main():
 
         while True:
             try:
-                ser = _connect_c6()
-                if ser is None:
-                    ser = serial.Serial(dvd_burn.PORT, dvd_burn.BAUD, timeout=1, write_timeout=1)
-                    ser.setDTR(False)
-                    time.sleep(0.1)
-                    ser.setDTR(True)
-                    time.sleep(2)
+                ser = serial.Serial(discstation_burn.PORT, discstation_burn.BAUD, timeout=1, write_timeout=1)
+                ser.setDTR(False)
+                time.sleep(0.1)
+                ser.setDTR(True)
+                time.sleep(2)
                 station_loop(ser, args.url, args.artist, args.album)
-            except (serial.SerialException, OSError, termios.error, ConnectionError) as e:
+            except (serial.SerialException, OSError, termios.error) as e:
                 print(f"Disconnected ({e}), reconnecting in 3s...")
                 time.sleep(3)
             except KeyboardInterrupt:

@@ -1,5 +1,5 @@
 [Unit]
-Description=DVD Station — physical disc burning appliance
+Description=DiscStation — physical disc burning appliance
 After=network.target
 
 [Service]
