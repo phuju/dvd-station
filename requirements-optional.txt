@@ -1,0 +1,14 @@
+# Optional — richer disc detection + metadata. The host runs fine without any
+# of these (it falls back to subprocess parsing / degraded metadata).
+# Installed best-effort: a build failure here is NOT fatal.
+#
+# On Debian/Ubuntu prefer the apt packages (see install.sh):
+#   python3-pyudev python3-libdiscid python3-musicbrainzngs
+#
+# python-libdiscid is a C extension and needs the libdiscid dev headers +
+# a compiler; on macOS/Windows it often won't build and is simply skipped.
+
+pyudev>=0.24 ; sys_platform == "linux"
+python-libdiscid>=2.0 ; sys_platform == "linux"
+musicbrainzngs>=0.7.1
+tmdbsimple>=2.9

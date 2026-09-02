@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 import argparse
 import atexit
+import collections
 import concurrent.futures
+import errno
+import fcntl
 import json
+import mimetypes
 import os
 import signal
-import pwd
+try:
+    import pwd
+except ImportError:
+    pwd = None
 import re
-import select
 import shutil
 import socket
 import ssl
@@ -20,7 +26,12 @@ from pathlib import Path
 from queue import Queue, Empty
 import http.server
 import socketserver
-import termios
+try:
+    import termios
+except ImportError:
+    class _TermiosCompat:
+        error = OSError
+    termios = _TermiosCompat()
 import threading
 import urllib.parse
 
@@ -29,6 +40,7 @@ import serial
 from mutagen.flac import FLAC, Picture
 
 import discstation_burn
+import discstation_host
 
 # Web interface for URL input and file upload
 _burn_url_queue = Queue()
@@ -38,32 +50,47 @@ _last_burn_result = None
 _last_burn_result_time = 0
 _last_upload_dir = None
 _last_upload_label = None
+_web_status = "READY"
+_web_progress = -1
+_web_progress_active = False
+_active_ser = None
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 class _WebHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/':
+        path = urllib.parse.urlsplit(self.path).path
+        if path == '/':
             self._serve_page()
-        elif self.path == '/status':
+        elif path == '/status':
             result = _last_burn_result
-            self._respond(200, result or 'Idle')
-        elif self.path == '/disc-info':
+            self._respond(200, _web_status or result or 'Idle')
+        elif path == '/progress':
+            self._respond(200, json.dumps({
+                "status": _web_status or "READY",
+                "progress": _web_progress,
+                "active": _web_progress_active,
+            }), "application/json")
+        elif path == '/disc-info':
             self._serve_disc_info()
-        elif self.path == '/sw.js':
+        elif path == '/sw.js':
             self._serve_sw()
-        elif self.path == '/manifest.json':
+        elif path == '/manifest.json':
             self._serve_manifest()
+        elif path.startswith('/static/'):
+            self._serve_static(path[8:])
         else:
             self.send_error(404)
 
     def do_POST(self):
-        if self.path == '/':
+        path = urllib.parse.urlsplit(self.path).path
+        if path == '/':
             content_type = self.headers.get('Content-Type', '')
             if 'multipart/form-data' in content_type:
                 self._handle_upload()
             else:
                 self._handle_url()
-        elif self.path == '/set-label':
+        elif path == '/set-label':
             self._handle_set_label()
         else:
             self.send_error(404)
@@ -81,7 +108,8 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_upload(self):
         global _last_upload_dir
-        files = self._parse_multipart()
+        _set_web_progress("UPLOADING", 0)
+        files = self._parse_multipart(lambda percent: _set_web_progress("UPLOADING", percent))
         if not files:
             self._respond(400, 'No files uploaded')
             return
@@ -89,21 +117,10 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         for filename, data in list(files):
             if filename == '_paths':
                 try:
-                    paths_list = json.loads(data.decode())
-                    if not isinstance(paths_list, list):
-                        paths_list = []
-                except Exception:
-                    pass
-                files.remove((filename, data))
-        paths_list = []
-        for filename, data in list(files):
-            if filename == '_paths':
-                try:
-                    paths_list = json.loads(data.decode())
-                    if not isinstance(paths_list, list):
-                        paths_list = []
-                except Exception:
-                    pass
+                    parsed = json.loads(data.decode())
+                    paths_list = parsed if isinstance(parsed, list) else []
+                except Exception as e:
+                    print(f"Upload path metadata error: {e}")
                 files.remove((filename, data))
         upload_dir = Path(discstation_burn.WORK) / f"upload_{time.strftime('%Y%m%d_%H%M%S')}"
         upload_dir.mkdir(parents=True, exist_ok=True)
@@ -114,31 +131,36 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 p = paths_list[i]['p']
                 if p != paths_list[i].get('n', ''):
                     rel = p
-            dest = upload_dir / rel.lstrip('/')
+            dest = (upload_dir / rel.lstrip('/')).resolve()
+            if upload_dir.resolve() not in dest.parents:
+                print(f"Skipping unsafe upload path: {rel}")
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
             total += len(data)
         _last_upload_dir = str(upload_dir)
         size_str = f"{total / 1e6:.1f}MB" if total > 1e6 else f"{total / 1e3:.0f}KB"
+        _set_web_progress("UPLOAD READY", 100)
         self._respond(200, f'{len(files)} file(s) uploaded ({size_str}). Select BURN DATA on remote.')
 
     def _serve_disc_info(self):
         info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
         try:
             device = discstation_burn.disc_device()
-            props = udev_cdrom_properties(device)
-            if props.get("ID_CDROM_MEDIA") == "1" or props.get("ID_CDROM_MEDIA_STATE") == "blank":
-                disc_bytes = discstation_burn.disc_capacity_bytes(device)
-                info["disc_present"] = True
-                info["capacity_bytes"] = disc_bytes or 0
-                info["capacity_gb"] = round((disc_bytes or 0) / 1e9, 2)
-                if disc_bytes and disc_bytes > 6_000_000_000:
-                    info["type"] = "DVD9"
-                elif disc_bytes:
-                    info["type"] = "DVD5"
+            di = detect_disc(device, settle=False, budget=15)
+            info["disc_present"] = di.present
+            info["capacity_bytes"] = di.capacity_bytes
+            info["capacity_gb"] = round(di.capacity_bytes / 1e9, 2)
+            if not di.present:
+                info["type"] = "none"
+            elif di.transient:
+                info["type"] = "reading"
+            else:
+                info["type"] = di.web_type
+            info["kind"] = di.kind
+            info["label"] = di.label
         except Exception as e:
             print(f"Disc info error: {e}")
-            pass
         self._respond(200, json.dumps(info), "application/json")
 
     def _handle_set_label(self):
@@ -156,26 +178,33 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('dvd-v2').then(c => c.addAll(['/']));
+  caches.open('discstation-v6').then(c => c.addAll(['/','/static/style.css?v=6','/static/app.js?v=6']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
-  e.respondWith(
-    caches.match(e.request).then(r => r || fetch(e.request))
-  );
+  const path = new URL(e.request.url).pathname;
+  if (path === '/' || path.startsWith('/static/')) {
+    e.respondWith(fetch(e.request).then(r => {
+      const copy = r.clone();
+      caches.open('discstation-v6').then(c => c.put(e.request, copy));
+      return r;
+    }).catch(() => caches.match(e.request)));
+  } else {
+    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+  }
 });'''
         self._respond(200, sw, 'application/javascript')
 
     def _serve_manifest(self):
-        icon_svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><circle cx="256" cy="256" r="230" fill="#5c9cf5" stroke="#0a0a0a" stroke-width="20"/><circle cx="256" cy="256" r="80" fill="#0a0a0a"/><rect x="176" y="246" width="160" height="20" rx="10" fill="#5c9cf5" opacity="0.7"/></svg>'
+        icon_svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" fill="#f0ede4"/><circle cx="256" cy="256" r="210" fill="none" stroke="#1a1a1a" stroke-width="20"/><circle cx="256" cy="256" r="68" fill="none" stroke="#1a1a1a" stroke-width="16"/><path d="M256 188v68h68" fill="none" stroke="#1a1a1a" stroke-width="16"/></svg>'
         manifest = {
             "name": "DiscStation",
             "short_name": "DiscStation",
             "start_url": "/",
             "display": "standalone",
-            "background_color": "#0a0a0a",
-            "theme_color": "#0a0a0a",
-            "description": "Physical disc burning station",
+            "background_color": "#f0ede4",
+            "theme_color": "#f0ede4",
+            "description": "DiscStation physical media instrument",
             "icons": [{
                 "src": "data:image/svg+xml," + urllib.parse.quote(icon_svg),
                 "sizes": "512x512",
@@ -185,7 +214,7 @@ self.addEventListener('fetch', e => {
         }
         self._respond(200, json.dumps(manifest), 'application/json')
 
-    def _parse_multipart(self):
+    def _parse_multipart(self, progress_callback=None):
         content_type = self.headers.get('Content-Type', '')
         boundary = None
         for part in content_type.split(';'):
@@ -194,7 +223,18 @@ self.addEventListener('fetch', e => {
                 boundary = part[9:].strip('"')
         if not boundary:
             return []
-        raw = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        content_length = int(self.headers.get('Content-Length', 0))
+        chunks = []
+        received = 0
+        while received < content_length:
+            chunk = self.rfile.read(min(1024 * 1024, content_length - received))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            received += len(chunk)
+            if progress_callback and content_length:
+                progress_callback(min(99, int(received * 100 / content_length)))
+        raw = b"".join(chunks)
         boundary_b = ('--' + boundary).encode()
         parts = raw.split(boundary_b)[1:-1]
         files = []
@@ -215,200 +255,39 @@ self.addEventListener('fetch', e => {
                         attr = attr.strip()
                         if attr.startswith('filename='):
                             filename = attr[10:].strip('"')
-            if filename and body:
-                files.append((filename, body))
+            field_name = None
+            for line in headers_raw.split('\r\n'):
+                if line.lower().startswith('content-disposition:'):
+                    for attr in line.split(';'):
+                        attr = attr.strip()
+                        if attr.startswith('name='):
+                            field_name = attr[5:].strip('"')
+            if body and (filename or field_name == '_paths'):
+                files.append((filename or field_name, body))
         return files
 
     def _serve_page(self):
-        result_html = ""
-        r = _last_burn_result
-        t = _last_burn_result_time
-        if r and t and time.time() - t < 60:
-            is_err = "ERROR" in r or "error" in r or "fail" in r.lower()
-            color = "#4f4" if not is_err else "#f44"
-            result_html = f'<div class="status ok" style="background:{"#1a3a1a" if not is_err else "#3a1a1a"};color:{color}">{r}</div>'
-        upload_ready = _last_upload_dir and Path(_last_upload_dir).exists()
-        upload_info = '<p style="color:#5c9cf5;text-align:center">Files ready! Select BURN DATA on the remote.</p>' if upload_ready else ''
-        html = f'''<!DOCTYPE html>
-<html><head>
-<title>DiscStation</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#0a0a0a">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black">
-<link rel="manifest" href="/manifest.json">
-<style>
-  *{{box-sizing:border-box;margin:0;padding:0}}
-  body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a0a;color:#ddd;max-width:500px;margin:0 auto;padding:2em 1em}}
-  h1{{color:#5c9cf5;text-align:center;margin-bottom:1em;font-size:1.5em}}
-  .status{{text-align:center;padding:.7em;margin-bottom:1em;border-radius:8px;font-weight:600;font-size:.95em}}
-  .tabs{{display:flex;gap:0;margin-bottom:1.2em}}
-  .tab{{flex:1;text-align:center;padding:.8em;cursor:pointer;background:#141414;border:1px solid #2a2a2a;color:#888;font-weight:600;font-size:.9em;transition:all .15s}}
-  .tab.active{{background:#1e1e1e;color:#5c9cf5;border-bottom:2px solid #5c9cf5}}
-  .tab:first-child{{border-radius:8px 0 0 8px}}
-  .tab:last-child{{border-radius:0 8px 8px 0}}
-  .panel{{display:none}}
-  .panel.active{{display:block}}
-  .hint{{color:#777;font-size:.85em;margin-bottom:.8em;text-align:center}}
-  input[type=text]{{width:100%;padding:.9em;font-size:1em;background:#141414;border:1px solid #2a2a2a;color:#ddd;border-radius:8px;margin-bottom:.8em;outline:none}}
-  input[type=text]:focus{{border-color:#5c9cf5}}
-  button{{width:100%;padding:.9em;font-size:1em;border-radius:8px;cursor:pointer;border:none;font-weight:700;background:#5c9cf5;color:#0a0a0a;transition:background .15s}}
-  button:hover{{background:#7cb5ff}}
-  button:disabled{{opacity:.4;cursor:default}}
-  .dropzone{{border:2px dashed #333;text-align:center;color:#888;padding:2em 1em;margin-bottom:.8em;border-radius:8px;background:#141414;transition:all .2s;cursor:pointer}}
-  .dropzone:hover,.dropzone.drag{{border-color:#5c9cf5;color:#5c9cf5}}
-  .dropzone .icon{{font-size:2em;margin-bottom:.3em}}
-  .file-item{{padding:.5em .7em;margin:.2em 0;background:#141414;border-radius:6px;display:flex;justify-content:space-between;align-items:center;font-size:.9em}}
-  .file-item .name{{color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%}}
-  .file-item .size{{color:#666;font-size:.85em;flex-shrink:0;margin-left:.5em}}
-  .file-item .rm{{color:#f44;cursor:pointer;margin-left:.5em;font-weight:700;font-size:1.1em;flex-shrink:0}}
-  #file-list{{max-height:200px;overflow-y:auto;margin-bottom:.8em}}
-</style></head>
-<body>
-<h1>&#x1F4BF; DiscStation</h1>
-{result_html}
-{upload_info}
-<div id="install-spot"></div>
-<div class="tabs">
-  <div class="tab active" onclick="switchTab('url')">URL / Path</div>
-  <div class="tab" onclick="switchTab('upload')">Upload Files</div>
-</div>
-<div id="panel-url" class="panel active">
-  <div class="hint">YouTube URL or local file path &#x2192; video DVD</div>
-  <form method="POST">
-    <input type="text" name="url" placeholder="https://youtube.com/... or /path/to/file.mp4" autofocus>
-    <button type="submit">Burn Video DVD</button>
-  </form>
-</div>
-<div id="panel-upload" class="panel">
-  <div class="hint">Files burned as-is &#x2192; data DVD (no quality loss)</div>
-  <div id="disc-bar" style="display:none;margin-bottom:.8em;background:#1a1a1a;border-radius:8px;padding:.6em">
-    <div style="display:flex;justify-content:space-between;font-size:.85em;margin-bottom:.3em">
-      <span id="disc-type" style="color:#5c9cf5"></span>
-      <span id="disc-space" style="color:#888"></span>
-    </div>
-    <div style="background:#222;border-radius:4px;height:8px;overflow:hidden">
-      <div id="disc-fill" style="background:#5c9cf5;height:100%;width:0%;transition:width .2s;border-radius:4px"></div>
-    </div>
-  </div>
-  <div class="dropzone" id="dropzone" onclick="document.getElementById('filein').click()">
-    <div class="icon">&#x2B06;</div>
-    <div>Tap for files &bull; <a href="#" onclick="event.stopPropagation();document.getElementById('folderin').click();return false" style="color:#5c9cf5">Tap for folder</a></div>
-    <div style="color:#666;font-size:.75em">repeat to add from other locations</div>
-  </div>
-  <input type="file" id="filein" multiple style="display:none" onchange="addFiles(this.files);this.value=''">
-  <input type="file" id="folderin" webkitdirectory style="display:none" onchange="addFiles(this.files);this.value=''">
-  <div id="file-list"></div>
-  <div id="iso-badge" style="display:none;text-align:center;color:#f90;font-size:.85em;margin:.5em 0"></div>
-  <div id="label-row" style="display:none;margin-bottom:.8em">
-    <input type="text" id="disc-label" placeholder="Disc label" style="text-align:center">
-    <div id="folder-summary" style="text-align:center;color:#666;font-size:.8em;margin-top:.3em"></div>
-  </div>
-  <button id="upload-btn" onclick="uploadFiles()" disabled>Upload &amp; Burn to Data DVD</button>
-</div>
-<script>
-  let files=[],folders=[];
-  let discBytes=0,discType='';
-  fetch('/disc-info').then(r=>r.json()).then(d=>{{
-    discBytes=d.capacity_bytes;discType=d.type;
-    if(d.disc_present){{document.getElementById('disc-type').textContent=discType==='none'?'No disc':discType;renderSize();}}
-  }});
-  function renderSize(){{
-    let t=0;files.forEach(e=>t+=e.file.size);folders.forEach(d=>d.files.forEach(e=>t+=e.file.size));
-    let total=files.length;folders.forEach(d=>total+=d.files.length);
-    if(discBytes&&total){{
-      let pct=Math.min((t/discBytes*100),100);
-      document.getElementById('disc-bar').style.display='block';
-      document.getElementById('disc-space').textContent=fmtSize(t)+' / '+(discBytes/1e9).toFixed(1)+'GB';
-      document.getElementById('disc-fill').style.width=pct+'%';
-      document.getElementById('disc-fill').style.background=pct>95?'#f44':pct>80?'#f90':'#5c9cf5';
-    }}else{{document.getElementById('disc-bar').style.display='none'}}
-    let iso=total===1&&(files.length?files[0].file.name:folders[0].files[0].file.name).toLowerCase().endsWith('.iso');
-    document.getElementById('iso-badge').style.display=iso?'block':'none';
-    document.getElementById('iso-badge').textContent=iso?'\U0001f4c0 ISO detected \u2014 burns directly, no quality loss':'';
-    document.getElementById('label-row').style.display=total?'block':'none';
-    let foldersSet=new Set();folders.forEach(d=>foldersSet.add(d.name));
-    files.forEach(e=>{{let p=e.path;let s=p.lastIndexOf('/');if(s>0)foldersSet.add(p.substring(0,s))}});
-    document.getElementById('folder-summary').textContent=(foldersSet.size?foldersSet.size+' folder(s), ':'' )+total+' file(s)';
-    if(!document.getElementById('disc-label').value){{
-      let n=files.length?files[0].file.name.replace(/\\.[^.]+$/, ''):(folders.length?folders[0].name:'');
-      document.getElementById('disc-label').value=n.slice(0,32);
-    }}
-  }}
-  function fmtSize(b){{return b>1e9?(b/1e9).toFixed(1)+'GB':b>1e6?(b/1e6).toFixed(1)+'MB':(b/1e3).toFixed(0)+'KB'}}
-  function switchTab(id){{
-    document.querySelectorAll('.tab').forEach((t,i)=>{{t.classList.toggle('active',i===(id==='url'?0:1))}});
-    document.getElementById('panel-url').classList.toggle('active',id==='url');
-    document.getElementById('panel-upload').classList.toggle('active',id==='upload');
-  }}
-  function addFiles(fl){{
-    let fList=[],dList=[];
-    for(let f of fl){{
-      if(f.webkitRelativePath){{let parts=f.webkitRelativePath.split('/');let root=parts[0];
-        let found=dList.find(d=>d.name===root);if(!found){{found={{name:root,files:[]}};dList.push(found)}}
-        found.files.push({{file:f,path:f.webkitRelativePath}});}}
-      else{{fList.push({{file:f,path:f.name}});}}
-    }}
-    files=files.concat(fList);folders=folders.concat(dList);
-    render();renderSize();
-  }}
-  function removeFile(i){{files.splice(i,1);render();renderSize()}}
-  function removeFolder(i){{folders.splice(i,1);render();renderSize()}}
-  function render(){{
-    let h='';
-    folders.forEach((d,i)=>{{
-      let sz=0;d.files.forEach(e=>sz+=e.file.size);
-      h+=`<div class="file-item"><span class="name">\U0001f4c1 ${{d.name}}/</span><span class="size">${{d.files.length}} files, ${{fmtSize(sz)}}</span><span class="rm" onclick="removeFolder(${{i}})">&times;</span></div>`;
-    }});
-    files.forEach((e,i)=>{{
-      h+=`<div class="file-item"><span class="name">${{e.file.name}}</span><span class="size">${{fmtSize(e.file.size)}}</span><span class="rm" onclick="removeFile(${{i}})">&times;</span></div>`;
-    }});
-    document.getElementById('file-list').innerHTML=h;
-    document.getElementById('upload-btn').disabled=(files.length===0&&folders.length===0);
-  }}
-  async function uploadFiles(){{
-    if(!(files.length||folders.length))return;
-    let lbl=document.getElementById('disc-label').value.trim();
-    if(lbl) await fetch('/set-label',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:'label='+encodeURIComponent(lbl)}});
-    let btn=document.getElementById('upload-btn');btn.disabled=true;btn.textContent='Uploading...';
-    let fd=new FormData();
-    let paths=[];
-    files.forEach(e=>{{fd.append('files',e.file);paths.push({{n:e.file.name,p:e.path}});}});
-    folders.forEach(d=>d.files.forEach(e=>{{fd.append('files',e.file);paths.push({{n:e.file.name,p:e.path}});}}));
-    fd.append('_paths',JSON.stringify(paths));
-    try{{let r=await fetch('/',{{method:'POST',body:fd}});btn.textContent=await r.text();}}
-    catch(e){{btn.textContent='Upload failed'}}
-    if(btn.textContent.includes('Select BURN DATA')){{files=[];folders=[];render();renderSize();btn.disabled=true}}
-    else{{btn.disabled=false;btn.textContent='Upload & Burn to Data DVD'}}
-  }}
-  let dz=document.getElementById('dropzone');
-  dz.addEventListener('dragover',e=>{{e.preventDefault();dz.classList.add('drag')}});
-  dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
-  dz.addEventListener('drop',e=>{{e.preventDefault();dz.classList.remove('drag');addFiles(e.dataTransfer.files)}});
-</script>
-<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js')</script>
-<script>
-let deferredPrompt;
-window.addEventListener('beforeinstallprompt', e => {{
-  e.preventDefault();
-  deferredPrompt = e;
-  var b = document.createElement('button');
-  b.textContent = '\U0001f4e5 Install App';
-  b.style.cssText = 'width:100%;padding:.9em;font-size:1em;border-radius:8px;border:none;font-weight:700;background:#5c9cf5;color:#0a0a0a;margin-top:.6em;cursor:pointer;';
-  b.onclick = async () => {{ deferredPrompt.prompt(); var r = await deferredPrompt.userChoice; b.textContent = r.outcome === 'accepted' ? 'Installed!' : '\U0001f4e5 Install App'; if(r.outcome==='accepted')b.style.opacity='.4'; deferredPrompt = null; }};
-  document.getElementById('install-spot').appendChild(b);
-}});
-</script>
-</body></html>'''
-        self._respond(200, html, 'text/html')
+        self._serve_static("index.html", "text/html; charset=utf-8")
+
+    def _serve_static(self, relative_path, content_type=None):
+        root = STATIC_DIR.resolve()
+        requested = (root / relative_path).resolve()
+        if root not in requested.parents or not requested.is_file():
+            self.send_error(404)
+            return
+        content_type = content_type or mimetypes.guess_type(str(requested))[0] or "application/octet-stream"
+        self._respond(200, requested.read_bytes(), content_type)
 
     def _respond(self, code, body, ctype='text/plain'):
-        self.send_response(code)
-        self.send_header('Content-Type', ctype)
-        self.send_header('Connection', 'close')
-        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
-        self.end_headers()
-        self.wfile.write(body.encode() if isinstance(body, str) else body)
+        try:
+            self.send_response(code)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Connection', 'close')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.end_headers()
+            self.wfile.write(body.encode() if isinstance(body, str) else body)
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
+            pass
 
     def log_message(self, fmt, *args):
         pass
@@ -424,8 +303,9 @@ def start_web_server(port=8080):
     server.server_bind()
     server.server_activate()
 
-    cert = Path.home() / '.local' / 'share' / 'discstation' / 'server.crt'
-    key = Path.home() / '.local' / 'share' / 'discstation' / 'server.key'
+    cert_dir = discstation_host.config_dir()
+    cert = cert_dir / 'server.crt'
+    key = cert_dir / 'server.key'
     if cert.exists() and key.exists():
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(str(cert), str(key))
@@ -437,6 +317,22 @@ def start_web_server(port=8080):
     _web_server = server
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
+
+    # Plain-HTTP listener for the mobile app (Expo Go can't use the self-signed
+    # cert). Same handler, LAN only. Disable with DISCSTATION_HTTP_PORT=0.
+    try:
+        http_port = int(os.environ.get("DISCSTATION_HTTP_PORT", "8081"))
+    except ValueError:
+        http_port = 8081
+    if http_port and http_port != port:
+        try:
+            plain = socketserver.ThreadingTCPServer(('', http_port), _WebHandler)
+            plain.allow_reuse_address = True
+            threading.Thread(target=plain.serve_forever, daemon=True).start()
+            print(f"Plain HTTP (mobile app) on http://0.0.0.0:{http_port}")
+        except OSError as e:
+            print(f"Plain HTTP listener not started on {http_port}: {e}")
+
     return server
 
 
@@ -461,7 +357,7 @@ def local_ip():
 
 def wait_for_web_url(ser):
     ip = local_ip()
-    protocol = "https" if (Path.home() / '.local' / 'share' / 'discstation' / 'server.crt').exists() else "http"
+    protocol = "https" if (discstation_host.config_dir() / 'server.crt').exists() else "http"
     url = f"{protocol}://{ip}:{_web_port}"
     safe_send(ser, f"IP:{url}")
     print(f"URL displayed: {url}")
@@ -477,12 +373,99 @@ def wait_for_web_url(ser):
             return url
         except Empty:
             safe_send(ser, "PING")
+            check_serial_alive(ser)
 
 
-MPV_SOCKET = "/tmp/dvd_station_mpv.sock"
+MPV_SOCKET = str(Path(tempfile.gettempdir()) / "discstation_mpv.sock")
 RIP_ROOT = discstation_burn.USER_HOME / "dvd_rips"
 USER_AGENT = "DVDStation/0.1 (local appliance; phuju)"
 DISC_POLL_SECONDS = 6
+
+# Optional metadata libraries. If import/setup fails the code falls back to the
+# hand-rolled requests-based lookups further down.
+try:
+    import libdiscid as _libdiscid
+except Exception:
+    _libdiscid = None
+
+try:
+    import musicbrainzngs as _mb
+    _mb.set_useragent("DiscStation", "0.1", "https://github.com/phuju/dvd-station")
+    _mb.set_rate_limit(1.0, 1)  # MB asks for <=1 req/s; replaces manual time.sleep(1)
+except Exception:
+    _mb = None
+
+try:
+    import discstation_meta  # TMDb video metadata (optional)
+except Exception:
+    discstation_meta = None
+
+
+def _env_num(name, default, cast):
+    try:
+        return cast(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return cast(default)
+
+
+# --- Disc-detection tuning -------------------------------------------------
+# Probe timeouts are CEILINGS, not fixed costs: a healthy drive returns well
+# under these. They are large because this appliance's USB optical bridge can
+# need 5-15s on the first read after a disc loads. Every value is overridable
+# via a DISCSTATION_* environment variable (set them in the systemd unit).
+PROBE_TIMEOUT_UDEV = _env_num("DISCSTATION_PROBE_TIMEOUT_UDEV", 4, int)
+PROBE_TIMEOUT_BLKID = _env_num("DISCSTATION_PROBE_TIMEOUT_BLKID", 8, int)
+PROBE_TIMEOUT_LSDVD = _env_num("DISCSTATION_PROBE_TIMEOUT_LSDVD", 8, int)
+PROBE_TIMEOUT_WODIM_TOC = _env_num("DISCSTATION_PROBE_TIMEOUT_WODIM_TOC", 12, int)
+PROBE_TIMEOUT_MEDIAINFO = _env_num("DISCSTATION_PROBE_TIMEOUT_MEDIAINFO", 12, int)
+
+# Post-insert settle wait + classification retry budget.
+DISC_SETTLE_TIMEOUT = _env_num("DISCSTATION_DISC_SETTLE_TIMEOUT", 8, int)
+DISC_SETTLE_POLL = _env_num("DISCSTATION_DISC_SETTLE_POLL", 1.0, float)
+DISC_DETECT_RETRIES = _env_num("DISCSTATION_DISC_DETECT_RETRIES", 2, int)
+DISC_DETECT_RETRY_DELAY = _env_num("DISCSTATION_DISC_DETECT_RETRY_DELAY", 2.0, float)
+DISC_DETECT_BUDGET = _env_num("DISCSTATION_DISC_DETECT_BUDGET", 18, int)
+DISC_DETECT_CACHE_TTL = _env_num("DISCSTATION_DISC_DETECT_CACHE_TTL", 5.0, float)
+
+_NO_MEDIA_MARKERS = (
+    "no medium", "no disk", "no disc", "cannot load media",
+    "tray open", "medium not present",
+)
+
+DiscInfo = collections.namedtuple(
+    "DiscInfo",
+    "present kind capacity_bytes label web_type transient failed_probes",
+)
+
+
+def _disc_info(present=False, kind="none", capacity_bytes=0, label="",
+               web_type="none", transient=False, failed_probes=()):
+    return DiscInfo(bool(present), kind, int(capacity_bytes or 0), label or "",
+                    web_type, bool(transient), tuple(failed_probes))
+
+
+def _web_type_for(kind, capacity_bytes):
+    simple = {
+        "blank": "BLANK", "audio_cd": "AUDIO_CD", "data_cd": "DATA_CD",
+        "vcd": "VCD", "svcd": "SVCD", "video_data": "VIDEO", "none": "none",
+    }
+    if kind in simple:
+        return simple[kind]
+    if kind in ("dvd_video", "data_disc"):
+        if capacity_bytes and capacity_bytes > 6_000_000_000:
+            return "DVD9"
+        if capacity_bytes:
+            return "DVD5"
+        return "DVD-Video" if kind == "dvd_video" else "DATA_DISC"
+    return "UNKNOWN"
+
+
+def _udev_dvd_recordable(props):
+    return any(props.get(k) == "1" for k in (
+        "ID_CDROM_MEDIA_DVD_PLUS_R", "ID_CDROM_MEDIA_DVD_R",
+        "ID_CDROM_MEDIA_DVD_PLUS_R_DL", "ID_CDROM_MEDIA_DVD_R_DL",
+        "ID_CDROM_MEDIA_DVD_RW", "ID_CDROM_MEDIA_DVD_PLUS_RW",
+    ))
 
 
 def ensure_text(value):
@@ -493,15 +476,54 @@ def ensure_text(value):
     return str(value)
 
 
+def _set_web_progress(phase, percent=-1):
+    global _web_status, _web_progress, _web_progress_active
+    _web_status = phase
+    _web_progress = max(-1, min(100, int(percent))) if percent is not None else -1
+    _web_progress_active = True
+    if _active_ser:
+        discstation_burn.safe_send(_active_ser, f"STATUS:{phase}")
+        if _web_progress >= 0:
+            discstation_burn.safe_send(_active_ser, f"PROGRESS:{_web_progress}%")
+
+
+def _record_web_status(msg):
+    global _web_status, _web_progress, _web_progress_active
+    if msg.startswith("STATUS:"):
+        _web_status = msg[7:].strip() or "READY"
+        _web_progress_active = True
+    elif msg.startswith("PROGRESS:"):
+        value = msg[9:].strip()
+        _web_status = f"BURNING {value}"
+        match = re.search(r"(\d+(?:\.\d+)?)", value)
+        if match:
+            _web_progress = min(100, max(0, int(float(match.group(1)))))
+        _web_progress_active = True
+    elif msg.startswith("DONE:"):
+        _web_status = msg[5:].strip() or "DONE"
+        _web_progress = 100
+        _web_progress_active = False
+    elif msg.startswith("ERROR:"):
+        _web_status = msg[6:].strip() or "ERROR"
+        _web_progress_active = False
+    elif msg.startswith("CANCELLED:"):
+        _web_status = msg[10:].strip() or "CANCELLED"
+        _web_progress_active = False
+
+
 def send(ser, msg):
+    _record_web_status(msg)
     discstation_burn.send(ser, msg)
 
 
 def safe_send(ser, msg):
+    _record_web_status(msg)
     discstation_burn.safe_send(ser, msg)
 
 
 def run_as_desktop_user(cmd):
+    if os.name != "posix" or pwd is None:
+        return cmd
     sudo_user = os.environ.get("SUDO_USER")
     if os.geteuid() == 0 and sudo_user and sudo_user != "root":
         home = Path(discstation_burn.USER_HOME)
@@ -519,6 +541,8 @@ def run_as_desktop_user(cmd):
 
 def chown_to_sudo_user(path):
     sudo_user = os.environ.get("SUDO_USER")
+    if os.name != "posix" or pwd is None or not hasattr(os, "geteuid"):
+        return
     if os.geteuid() != 0 or not sudo_user or sudo_user == "root":
         return
 
@@ -555,6 +579,19 @@ def mpv_command(command):
     return True
 
 
+def mpv_query(command):
+    try:
+        payload = json.dumps({"command": command, "request_id": 1}).encode() + b"\n"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            sock.connect(MPV_SOCKET)
+            sock.sendall(payload)
+            response = json.loads(sock.recv(4096).decode(errors="ignore"))
+        return response.get("data")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def wait_for_socket(path, proc, timeout=8):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -582,6 +619,7 @@ def wait_for_button(ser):
         if now - last_ping >= 5:
             last_ping = now
             safe_send(ser, "PING")
+            check_serial_alive(ser)
 
 
 _line_buf = b""
@@ -598,10 +636,23 @@ def read_serial_line(ser, timeout=0.1):
                 if idx >= 0:
                     line = _line_buf[:idx]
                     _line_buf = _line_buf[idx + 1:]
-                    return line.decode(errors="ignore").strip() or None
+                    decoded = line.decode(errors="ignore").strip() or None
+                    if decoded:
+                        discstation_burn.note_serial_activity()
+                    return decoded
         try:
-            chunk = os.read(ser.fd, 4096)
-        except OSError:
+            waiting = getattr(ser, "in_waiting", None)
+            if waiting is not None:
+                chunk = ser.read(min(4096, waiting)) if waiting else b""
+            elif hasattr(ser, "fd"):
+                chunk = os.read(ser.fd, 4096)
+            else:
+                chunk = b""
+        except serial.SerialException:
+            raise
+        except OSError as e:
+            raise serial.SerialException(f"serial read failed: {e}") from e
+        except AttributeError:
             return None
         if chunk:
             chunk = _line_buf + chunk
@@ -610,10 +661,27 @@ def read_serial_line(ser, timeout=0.1):
             if idx >= 0:
                 _line_buf = chunk[idx + 1:]
                 chunk = chunk[:idx]
-                return chunk.decode(errors="ignore").strip() or None
+                decoded = chunk.decode(errors="ignore").strip() or None
+                if decoded:
+                    discstation_burn.note_serial_activity()
+                return decoded
             _line_buf = chunk
-        time.sleep(min(deadline - time.monotonic(), 0.05))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(remaining, 0.05))
     return None
+
+
+def check_serial_alive(ser=None):
+    """Raise serial.SerialException if the ESP32 link looks dead, so main()'s
+    reconnect loop can re-scan for the (possibly renumbered) serial port.
+    Call this inside any long poll loop that would otherwise spin forever on a
+    stale handle (writes to a re-enumerated /dev/ttyUSBN fail silently)."""
+    if discstation_burn.serial_write_failed():
+        raise serial.SerialException("serial write failed (ESP32 link lost)")
+    if discstation_burn.serial_activity_age() >= 35:
+        raise serial.SerialException("ESP32 not responding")
 
 
 def send_disc_info(ser, device, status_line=None):
@@ -629,13 +697,37 @@ def show_home(ser):
     send(ser, "HOME:Select mode")
 
 
+def refresh_main_menu(ser):
+    """Restore the disc menu after a temporary picker changes MENU_ITEMS."""
+    try:
+        device = discstation_burn.disc_device()
+        send_disc_info(ser, device)
+    except Exception as e:
+        print(f"Menu refresh error: {e}")
+    show_home(ser)
+
+
 def show_standby(ser):
     safe_send(ser, "STANDBY:DiscStation")
 
 
 def eject_disc(ser, device):
-    global _tray_open
+    global _tray_open, _tray_open_since
     print(f"Ejecting disc from {device}")
+    if discstation_host.system_name() != "linux":
+        try:
+            ok = discstation_host.eject_device(device)
+        except Exception as e:
+            print(f"Cross-platform eject error: {e}")
+            ok = False
+        if ok:
+            _tray_open = True
+            _tray_open_since = time.monotonic()
+            safe_send(ser, "STANDBY:Tray open")
+        else:
+            safe_send(ser, "ERROR:Eject failed")
+            safe_send(ser, "STANDBY:Insert disc")
+        return ok
     subprocess.run(["sync"], timeout=5)
 
     subprocess.run(["sg_raw", device, "1e", "00", "00", "00", "00", "00"],
@@ -658,20 +750,23 @@ def eject_disc(ser, device):
 
     if ok:
         _tray_open = True
+        _tray_open_since = time.monotonic()
         safe_send(ser, "WAITING:Press SELECT/to close tray")
         last_ping = time.time()
         deadline = time.time() + 60
         tray_was_cancelled = False
-        last_udev_check = 0
+        last_status_check = 0
+        # Let the eject settle before touching the drive again (the reclose guard).
+        settle_until = time.time() + 3
         while time.time() < deadline:
             if time.time() - last_ping >= 5:
                 last_ping = time.time()
                 safe_send(ser, "PING")
-            if time.time() - last_udev_check >= 2:
-                last_udev_check = time.time()
-                if _tray_closed_with_disc(device):
-                    print("Disc detected — tray closed manually, continuing")
-                    time.sleep(1)
+            if time.time() >= settle_until and time.time() - last_status_check >= 1.5:
+                last_status_check = time.time()
+                if drive_status(device) in ("disc", "no_disc"):
+                    print("Tray closed — continuing")
+                    _tray_open = False
                     break
             line = read_serial_line(ser, timeout=0.1)
             if not line:
@@ -720,7 +815,7 @@ def append_burn_history(entry):
         f.write(json.dumps(entry) + "\n")
 
 
-def run_probe(cmd, timeout=8):
+def run_probe(cmd, timeout=8, name=None):
     try:
         return subprocess.run(
             cmd,
@@ -730,26 +825,101 @@ def run_probe(cmd, timeout=8):
         )
     except subprocess.TimeoutExpired as e:
         return subprocess.CompletedProcess(cmd, 124, ensure_text(e.stdout), ensure_text(e.stderr))
+    except (FileNotFoundError, OSError) as e:
+        return subprocess.CompletedProcess(cmd, 127, "", str(e))
 
 
-def udev_cdrom_properties(device):
-    result = run_probe(["udevadm", "info", "--query=property", "--name", device], timeout=2)
-    if result.returncode != 0:
+try:
+    import pyudev as _pyudev
+    _UDEV_CTX = _pyudev.Context()
+except Exception:  # pyudev missing, or libudev not loadable
+    _pyudev = None
+    _UDEV_CTX = None
+
+
+def _udev_props_via_pyudev(device):
+    """Return the udev property dict for `device` via pyudev, or None if pyudev
+    is unavailable / errored (caller then falls back to `udevadm info`)."""
+    if _pyudev is None:
+        return None
+    try:
+        dev = _pyudev.Devices.from_device_file(_UDEV_CTX, device)
+        return dict(dev.properties)
+    except Exception:
+        return None
+
+
+_CDROM_ID_BIN = None
+
+
+def _cdrom_id_path():
+    global _CDROM_ID_BIN
+    if _CDROM_ID_BIN is None:
+        _CDROM_ID_BIN = ""
+        for cand in ("/usr/lib/udev/cdrom_id", "/lib/udev/cdrom_id"):
+            if Path(cand).exists():
+                _CDROM_ID_BIN = cand
+                break
+    return _CDROM_ID_BIN
+
+
+def _refresh_udev(device):
+    """Best-effort re-probe so ID_CDROM_MEDIA* reflects the disc that is in the
+    drive *now*. USB ATAPI bridges frequently emit no media-change uevent, so
+    `udevadm info` otherwise serves stale properties from the last change.
+    Never raises; returns a dict of freshly read ID_CDROM*/ID_FS* keys."""
+    if discstation_host.system_name() != "linux":
         return {}
+    try:
+        run_probe(
+            ["udevadm", "trigger", "--settle", "--subsystem-match=block",
+             "--name-match", Path(device).name],
+            name="udevadm-trigger", timeout=5,
+        )
+    except Exception:
+        pass
+    extra = {}
+    binpath = _cdrom_id_path()
+    if binpath:
+        r = run_probe([binpath, device], name="cdrom_id", timeout=PROBE_TIMEOUT_UDEV)
+        if r.returncode == 0:
+            for line in ensure_text(r.stdout).splitlines():
+                line = line.strip()
+                if "=" in line and (line.startswith("ID_CDROM") or line.startswith("ID_FS")):
+                    key, value = line.split("=", 1)
+                    extra[key] = value
+    return extra
 
-    properties = {}
-    for line in ensure_text(result.stdout).splitlines():
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        properties[key] = value
+
+def udev_cdrom_properties(device, refresh=False):
+    if discstation_host.system_name() != "linux":
+        return discstation_host.media_properties(device)
+    overlay = _refresh_udev(device) if refresh else {}
+    properties = _udev_props_via_pyudev(device)
+    if properties is None:
+        # pyudev unavailable — fall back to parsing `udevadm info` output.
+        result = run_probe(
+            ["udevadm", "info", "--query=property", "--name", device],
+            name="udevadm-info", timeout=PROBE_TIMEOUT_UDEV,
+        )
+        properties = {}
+        if result.returncode == 0:
+            for line in ensure_text(result.stdout).splitlines():
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                properties[key] = value
+    properties.update(overlay)  # a fresh cdrom_id read wins over the cached udev db
     return properties
 
 
 _tray_open = False
+_tray_open_since = 0.0  # time.monotonic() of the last OLED-initiated eject
 
 
 def _tray_closed_with_disc(device):
+    if not device:
+        return False
     global _tray_open
     if not Path(device).exists():
         return False
@@ -764,33 +934,31 @@ def _tray_closed_with_disc(device):
 
 
 def disc_present(device):
+    if not device:
+        return False
     if _tray_closed_with_disc(device):
         return True
     if _tray_open:
         return False
     if not Path(device).exists():
         return False
+    if discstation_host.system_name() != "linux":
+        properties = udev_cdrom_properties(device)
+        return properties.get("ID_CDROM_MEDIA") == "1"
 
-    toc = run_probe(["wodim", "-toc", "dev=" + device], timeout=5)
+    toc = run_probe(["wodim", "-toc", "dev=" + device], name="wodim-toc", timeout=PROBE_TIMEOUT_WODIM_TOC)
     toc_text = ensure_text(toc.stdout) + ensure_text(toc.stderr)
-    no_media_markers = (
-        "no medium",
-        "no disk",
-        "no disc",
-        "cannot load media",
-        "tray open",
-        "medium not present",
-    )
+    no_media_markers = _NO_MEDIA_MARKERS
     if toc.returncode == 124:
         return is_blank_disc(device)
     if toc_text.strip() and any(marker in toc_text.lower() for marker in no_media_markers):
         return False
 
-    dvd = run_probe(["lsdvd", device], timeout=3)
+    dvd = run_probe(["lsdvd", device], name="lsdvd", timeout=PROBE_TIMEOUT_LSDVD)
     if dvd.returncode == 0:
         return True
 
-    fs = run_probe(["blkid", "-o", "value", "-s", "TYPE", device], timeout=3)
+    fs = run_probe(["blkid", "-o", "value", "-s", "TYPE", device], name="blkid", timeout=PROBE_TIMEOUT_BLKID)
     if fs.returncode == 0 and ensure_text(fs.stdout).strip():
         return True
 
@@ -804,33 +972,49 @@ def disc_present(device):
 
 
 def is_blank_disc(device):
+    if not device:
+        return False
     if not Path(device).exists():
         return False
 
-    properties = udev_cdrom_properties(device)
-    if properties.get("ID_CDROM_MEDIA") != "1":
+    properties = udev_cdrom_properties(device, refresh=True)
+    media = properties.get("ID_CDROM_MEDIA")
+    if media == "0":
         return False
+    if discstation_host.system_name() != "linux":
+        return properties.get("ID_CDROM_MEDIA_STATE") == "blank"
 
-    if properties.get("ID_CDROM_MEDIA_STATE") == "blank":
-        return True
-
-    info = run_probe(["dvd+rw-mediainfo", device], timeout=3)
+    # dvd+rw-mediainfo talks to the drive directly and reliably reports blank
+    # status even when udev's media flag is stale/missing on this USB bridge.
+    info = run_probe(["dvd+rw-mediainfo", device], name="mediainfo", timeout=PROBE_TIMEOUT_MEDIAINFO)
     if info.returncode == 0:
-        text = ensure_text(info.stdout).lower()
+        # dvd+rw-mediainfo pads its labels ("Disc status:           blank"), so
+        # collapse runs of whitespace before matching.
+        text = re.sub(r"\s+", " ", ensure_text(info.stdout).lower())
         if "disc status: blank" in text or "disc status: empty" in text:
             return True
         if "state of last session: empty" in text:
             return True
+        if "disc status:" in text:
+            return False
 
-    fs = run_probe(["blkid", "-o", "value", "-s", "TYPE", device], timeout=3)
+    if properties.get("ID_CDROM_MEDIA_STATE") == "blank":
+        return True
+
+    # The weaker "no filesystem / no TOC => blank" evidence below misfires on an
+    # empty tray, so only trust it once udev confirms a disc is actually loaded.
+    if media != "1":
+        return False
+
+    fs = run_probe(["blkid", "-o", "value", "-s", "TYPE", device], name="blkid", timeout=PROBE_TIMEOUT_BLKID)
     if fs.returncode == 0 and ensure_text(fs.stdout).strip():
         return False
 
-    dvd = run_probe(["lsdvd", device], timeout=3)
+    dvd = run_probe(["lsdvd", device], name="lsdvd", timeout=PROBE_TIMEOUT_LSDVD)
     if dvd.returncode == 0:
         return False
 
-    toc = run_probe(["wodim", "-toc", "dev=" + device], timeout=5)
+    toc = run_probe(["wodim", "-toc", "dev=" + device], name="wodim-toc", timeout=PROBE_TIMEOUT_WODIM_TOC)
     toc_text = ensure_text(toc.stdout) + ensure_text(toc.stderr)
     if "first:" in toc_text and "track:" in toc_text:
         return False
@@ -838,89 +1022,427 @@ def is_blank_disc(device):
     return True
 
 
-def disc_status_line(device):
-    if not disc_present(device):
-        return "Disc: none"
+def is_rewritable_disc(device):
+    if not device:
+        return False
+    """Return whether the inserted medium can be overwritten."""
+    if not Path(device).exists():
+        return False
 
-    labels = {
-        "audio_cd": "Disc: Audio CD",
-        "dvd_video": "Disc: DVD-Video",
-        "vcd": "Disc: VCD",
-        "svcd": "Disc: SVCD",
-        "video_data": "Disc: Video data",
-        "data_disc": "Disc: Data disc",
-        "data_cd": "Disc: Data CD",
-        "blank": "Disc: Blank",
-        "unknown": "Disc: unknown",
-    }
+    properties = udev_cdrom_properties(device)
+    if any(properties.get(key) == "1" for key in (
+        "ID_CDROM_MEDIA_CD_RW",
+        "ID_CDROM_MEDIA_DVD_RW",
+        "ID_CDROM_MEDIA_DVD_RW_SEQ",
+        "ID_CDROM_MEDIA_DVD_PLUS_RW",
+    )):
+        return True
+
+    if discstation_host.system_name() == "linux":
+        info = run_probe(["dvd+rw-mediainfo", device], timeout=3)
+        text = ensure_text(info.stdout) + ensure_text(info.stderr)
+        media_line = next(
+            (line.lower() for line in text.splitlines() if "mounted media:" in line.lower()),
+            "",
+        )
+        return "rw" in media_line
+    return False
+
+
+def can_burn_disc(device):
+    return is_blank_disc(device) or is_rewritable_disc(device)
+
+
+_DISC_LABELS = {
+    "audio_cd": "Disc: Audio CD",
+    "dvd_video": "Disc: DVD-Video",
+    "vcd": "Disc: VCD",
+    "svcd": "Disc: SVCD",
+    "video_data": "Disc: Video data",
+    "data_disc": "Disc: Data disc",
+    "data_cd": "Disc: Data CD",
+    "blank": "Disc: Blank",
+    "unknown": "Disc: unknown",
+}
+
+
+def disc_status_line(device):
     try:
-        return labels.get(disc_kind(device), "Disc: unknown")
-    except Exception:
+        info = detect_disc(device)
+    except Exception as e:
+        print(f"disc status error: {e}")
         return "Disc: reading..."
+    if not info.present:
+        return "Disc: none"
+    if info.transient:
+        return "Disc: reading..."
+    return _DISC_LABELS.get(info.kind, "Disc: unknown")
 
 
 def disc_kind(device):
-    properties = udev_cdrom_properties(device)
-    if properties.get("ID_CDROM_MEDIA_STATE") == "blank":
-        return "blank"
+    try:
+        return detect_disc(device).kind
+    except Exception as e:
+        print(f"disc kind error: {e}")
+        return "unknown"
 
-    fs = run_probe(["blkid", "-o", "value", "-s", "TYPE", device], timeout=3)
-    if fs.returncode == 0 and ensure_text(fs.stdout).strip():
-        fstype = ensure_text(fs.stdout).strip()
-        if fstype in ("udf", "iso9660"):
+
+# ---------------------------------------------------------------------------
+# Shared disc-detection core. Both the ESP32/LCD path (disc_status_line /
+# disc_kind) and the web path (_serve_disc_info) go through detect_disc(), so
+# they always agree. A transient USB timeout yields a retry and then
+# "reading..." rather than a sticky, wrong "unknown".
+# ---------------------------------------------------------------------------
+
+_detect_cache = {}
+_detect_lock = threading.Lock()
+_stuck_cycles = {}
+
+
+_CDROM_DRIVE_STATUS = 0x5326  # CDS_NO_DISC=1  TRAY_OPEN=2  DRIVE_NOT_READY=3  DISC_OK=4
+
+
+def drive_status(device):
+    """Fast, reliable drive state via the CDROM_DRIVE_STATUS ioctl.
+
+    Returns 'disc' | 'no_disc' | 'open' | 'loading' | 'unknown'. Single ioctl on
+    an O_NONBLOCK fd — does not consult the (stale on this USB bridge) udev db and
+    does not disturb the tray. Never raises."""
+    if not device:
+        return "unknown"
+    if discstation_host.system_name() != "linux":
+        return discstation_host.drive_status()
+    try:
+        fd = os.open(device, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return "unknown"
+    try:
+        st = fcntl.ioctl(fd, _CDROM_DRIVE_STATUS, 0)
+    except OSError:
+        return "unknown"
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return {4: "disc", 1: "no_disc", 2: "open", 3: "loading"}.get(st, "unknown")
+
+
+def _media_quick_state(device, props):
+    """Fast, cheap read of whether a disc is loaded. No long probes."""
+    if not device:
+        return "empty"
+    if _tray_open:
+        return "empty"  # deliberate OLED eject — do not poke the drive
+    st = drive_status(device)
+    if st in ("open", "no_disc"):
+        return "empty"
+    if st == "disc":
+        return "present"
+    if st == "loading":
+        return "unsure"
+    # st == "unknown": fall through to the legacy probes below
+    try:
+        if not Path(device).exists():
+            return "empty"
+    except OSError:
+        return "empty"
+    if props.get("ID_CDROM_MEDIA") == "1" or props.get("ID_CDROM_MEDIA_STATE") == "blank":
+        return "present"
+    r = run_probe(["wodim", "-toc", "dev=" + device], name="wodim-toc",
+                  timeout=min(4, PROBE_TIMEOUT_WODIM_TOC))
+    txt = (ensure_text(r.stdout) + ensure_text(r.stderr)).lower()
+    if "first:" in txt and "track:" in txt:
+        return "present"
+    if txt.strip() and any(m in txt for m in _NO_MEDIA_MARKERS):
+        return "empty"
+    try:
+        fd = os.open(device, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as e:
+        return "empty" if e.errno in (errno.ENOMEDIUM, errno.ENXIO) else "unsure"
+    try:
+        os.read(fd, 2048)
+        return "present"
+    except OSError as e:
+        # EIO happens on a perfectly good audio CD, so it is NOT proof of "empty".
+        return "empty" if e.errno in (errno.ENOMEDIUM, errno.ENXIO) else "unsure"
+    finally:
+        os.close(fd)
+
+
+def wait_for_disc_ready(device, timeout=None):
+    """Block until the drive reports a stable media state after a tray close.
+    Returns (status, elapsed) where status is 'empty' | 'ready' | 'timeout'."""
+    if timeout is None:
+        timeout = DISC_SETTLE_TIMEOUT
+    if discstation_host.system_name() != "linux":
+        return "ready", 0.0
+    start = time.monotonic()
+    while True:
+        props = udev_cdrom_properties(device, refresh=True)
+        state = _media_quick_state(device, props)
+        elapsed = time.monotonic() - start
+        if state == "empty":
+            return "empty", elapsed
+        if state == "present":
+            return "ready", elapsed
+        if elapsed >= timeout:
+            return "timeout", elapsed
+        time.sleep(DISC_SETTLE_POLL)
+
+
+def _priv_mount_error(exc):
+    s = str(exc).lower()
+    return any(m in s for m in (
+        "must be superuser", "permission denied", "only root",
+        "operation not permitted", "are you root",
+    ))
+
+
+def _probe(name, cmd, timeout, deadline, failed):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        failed.append(f"{name}:timeout")
+        return subprocess.CompletedProcess(cmd, 124, "", "")
+    r = run_probe(cmd, name=name, timeout=max(1, int(min(timeout, remaining))))
+    if r.returncode == 124:
+        failed.append(f"{name}:timeout")
+    elif r.returncode == 127:
+        failed.append(f"{name}:missing")
+    return r
+
+
+def _cd_kind_from_toc(toc_text):
+    """audio_cd vs data_cd from a `wodim -toc` dump (lowercased stdout+stderr).
+
+    Decided by the per-track CONTROL field: bit 2 (0x04) set == data track.
+    The old `"control: 2" in text` test only caught the "digital copy permitted"
+    bit, so plain audio CDs (every track `control: 0`, including this appliance's
+    own cdrdao burns) were misread as data_cd."""
+    controls = [int(c) for c in re.findall(
+        r"track:\s*\d+\b[^\n]*?control:\s*(\d+)", toc_text)]
+    if not controls:
+        return "audio_cd"  # readable track TOC, no filesystem -> almost always audio
+    if all(c & 0x04 for c in controls):
+        return "data_cd"
+    return "audio_cd"  # >=1 audio track (incl. mixed-mode / CD-Extra)
+
+
+def _classify_disc(device, props, failed, deadline):
+    """One pass of the probe chain. Mirrors the historical disc_kind ordering
+    (blkid -> lsdvd -> wodim -toc -> fs fallback -> blank) but records which
+    probes timed out / were missing so the caller can retry."""
+    if discstation_host.system_name() != "linux":
+        if props.get("ID_CDROM_MEDIA_TYPE") == "audio":
+            return _disc_info(True, "audio_cd", web_type="AUDIO_CD")
+        if props.get("ID_FS_TYPE") in ("udf", "iso9660"):
+            kind = None
             try:
                 with mounted_disc(device) as mount_dir:
-                    kind, _ = disc_video_files(mount_dir)
-                    if kind:
-                        return kind
-            except RuntimeError:
-                pass
-            if fstype == "udf":
-                return "dvd_video"
-            return "data_disc"
+                    if (mount_dir / "VIDEO_TS").is_dir():
+                        kind = "dvd_video"
+                    else:
+                        k, _ = disc_video_files(mount_dir)
+                        kind = k
+            except (OSError, RuntimeError) as e:
+                print(f"Disc inspection failed: {e}")
+            kind = kind or "data_disc"
+            return _disc_info(True, kind, web_type=_web_type_for(kind, 0))
+        return _disc_info(True, "unknown", web_type="UNKNOWN", failed_probes=failed)
 
-    dvd = run_probe(["lsdvd", device], timeout=2)
-    if dvd.returncode == 0:
-        return "dvd_video"
-    stuck = dvd.returncode == 124
+    # Fast path for a blank disc: cdrom_id reports this reliably in ~20ms, and
+    # blkid/lsdvd/wodim all legitimately fail on blank media — running them here
+    # is just an opportunity to time out on a slow drive.
+    if props.get("ID_CDROM_MEDIA_STATE") == "blank":
+        cap = 0
+        if (deadline - time.monotonic()) > 8:
+            try:
+                cap = discstation_burn.disc_capacity_bytes(device) or 0
+            except Exception:
+                cap = 0
+        return _disc_info(True, "blank", capacity_bytes=cap, web_type="BLANK")
 
-    toc = run_probe(["wodim", "-toc", "dev=" + device], timeout=4)
-    toc_text = ensure_text(toc.stdout) + ensure_text(toc.stderr)
-    if not stuck:
-        stuck = toc.returncode == 124
-    if "first:" in toc_text and "track:" in toc_text:
-        if "control: 2" in toc_text or "mode: -1" in toc_text:
-            return "audio_cd"
-        return "data_cd"
+    fs = _probe("blkid", ["blkid", "-o", "value", "-s", "TYPE", device],
+                PROBE_TIMEOUT_BLKID, deadline, failed)
+    fstype = ensure_text(fs.stdout).strip() if fs.returncode == 0 else ""
 
-    if ensure_text(fs.stdout).strip():
+    kind = None
+    if fstype:
+        if time.monotonic() < deadline:
+            try:
+                with mounted_disc(device) as mount_dir:
+                    k, _ = disc_video_files(mount_dir)
+                    if k:
+                        kind = k
+            except (OSError, RuntimeError) as e:
+                if not _priv_mount_error(e):
+                    failed.append("mount:error")
+        if kind is None:
+            kind = "dvd_video" if fstype == "udf" else "data_disc"
+
+    dvd = None
+    if kind is None:
+        dvd = _probe("lsdvd", ["lsdvd", device], PROBE_TIMEOUT_LSDVD, deadline, failed)
+        if dvd.returncode == 0:
+            kind = "dvd_video"
+
+    toc_text = ""
+    if kind is None:
+        toc = _probe("wodim-toc", ["wodim", "-toc", "dev=" + device],
+                     PROBE_TIMEOUT_WODIM_TOC, deadline, failed)
+        toc_text = (ensure_text(toc.stdout) + ensure_text(toc.stderr)).lower()
+        if "first:" in toc_text and "track:" in toc_text:
+            kind = _cd_kind_from_toc(toc_text)
+
+    toc_has_tracks = "first:" in toc_text and "track:" in toc_text
+    media_present = (
+        props.get("ID_CDROM_MEDIA") == "1"
+        or bool(fstype)
+        or (dvd is not None and dvd.returncode == 0)
+        or toc_has_tracks
+    )
+    no_media = (
+        bool(toc_text.strip())
+        and any(m in toc_text for m in _NO_MEDIA_MARKERS)
+        and not toc_has_tracks
+    )
+
+    if kind is None:
+        if no_media and not media_present:
+            return _disc_info(False, "none", failed_probes=failed)
+        if is_blank_disc(device):
+            kind = "blank"
+
+    if kind is None:
+        present = media_present or not no_media
+        return _disc_info(present, "unknown", web_type="UNKNOWN",
+                          transient=bool(failed), failed_probes=failed)
+
+    # We have a definite kind — unrelated probe timeouts no longer make it transient.
+    capacity = 0
+    want_cap = kind in ("dvd_video", "data_disc", "blank") or _udev_dvd_recordable(props)
+    if want_cap and (deadline - time.monotonic()) > 8:
         try:
-            with mounted_disc(device) as mount_dir:
-                kind, _ = disc_video_files(mount_dir)
-                if kind:
-                    return kind
-        except RuntimeError:
-            pass
-        return "data_disc"
+            capacity = discstation_burn.disc_capacity_bytes(device) or 0
+        except Exception as e:
+            print(f"Disc capacity probe failed: {e}")
+    if not capacity:
+        bd = run_probe(["blockdev", "--getsize64", device], name="blockdev",
+                       timeout=PROBE_TIMEOUT_UDEV)
+        if bd.returncode == 0:
+            try:
+                capacity = int(ensure_text(bd.stdout).strip())
+            except ValueError:
+                capacity = 0
 
-    if is_blank_disc(device):
-        return "blank"
+    label = props.get("ID_FS_LABEL", "")
+    if kind == "dvd_video" and not label:
+        if dvd is None:
+            dvd = _probe("lsdvd", ["lsdvd", device], PROBE_TIMEOUT_LSDVD, deadline, failed)
+        if dvd.returncode == 0:
+            for line in ensure_text(dvd.stdout).splitlines():
+                if line.startswith("Disc Title:"):
+                    label = line.split(":", 1)[1].strip()
+                    break
 
-    if stuck:
-        _stuck_count = getattr(disc_kind, "_stuck_count", 0) + 1
-        disc_kind._stuck_count = _stuck_count
-        if _stuck_count >= 2:
-            print("Drive appears stuck (2 probes), attempting USB reset...")
+    return _disc_info(True, kind, capacity_bytes=capacity, label=label,
+                      web_type=_web_type_for(kind, capacity),
+                      failed_probes=failed)
+
+
+def _maybe_reset_stuck_drive(device, failed_probes):
+    if not any(p.endswith(":timeout") for p in failed_probes):
+        _stuck_cycles[device] = 0
+        return
+    n = _stuck_cycles.get(device, 0) + 1
+    _stuck_cycles[device] = n
+    if n >= 2:
+        print(f"Drive appears stuck ({n} cycles with probe timeouts), attempting USB reset...")
+        try:
             discstation_burn.reset_drive(device)
-            disc_kind._stuck_count = 0
-    else:
-        disc_kind._stuck_count = 0
+        except Exception as e:
+            print(f"USB reset failed: {e}")
+        _stuck_cycles[device] = 0
 
-    return "unknown"
+
+def _detect_disc_locked(device, settle, budget):
+    deadline = time.monotonic() + (DISC_DETECT_BUDGET if budget is None else budget)
+    props = udev_cdrom_properties(device, refresh=True)
+
+    if settle and discstation_host.system_name() == "linux":
+        status, waited = wait_for_disc_ready(device)
+        if status == "empty":
+            info = _disc_info(False, "none")
+            _detect_cache[device] = (time.monotonic(), info)
+            return info
+        props = udev_cdrom_properties(device, refresh=True)
+
+    result = None
+    for attempt in range(max(1, DISC_DETECT_RETRIES)):
+        failed = []
+        result = _classify_disc(device, props, failed, deadline)
+        if result.kind != "unknown" and not result.transient:
+            if result.failed_probes:
+                print(f"disc classify: {result.kind} "
+                      f"(partial probe failures: {list(result.failed_probes)})")
+            _stuck_cycles[device] = 0
+            _detect_cache[device] = (time.monotonic(), result)
+            return result
+        if (attempt < DISC_DETECT_RETRIES - 1
+                and (deadline - time.monotonic()) > DISC_DETECT_RETRY_DELAY + 3):
+            print(f"disc classify attempt {attempt + 1}: kind={result.kind} "
+                  f"failed_probes={failed} — retrying")
+            time.sleep(DISC_DETECT_RETRY_DELAY)
+            props = udev_cdrom_properties(device, refresh=True)
+        else:
+            break
+
+    if result is None:
+        result = _disc_info(False, "none")
+    if result.transient or result.failed_probes:
+        print(f"disc classify: unresolved after {DISC_DETECT_RETRIES} attempts; "
+              f"failed_probes={list(result.failed_probes)} — reporting as transient")
+        _maybe_reset_stuck_drive(device, result.failed_probes)
+        result = result._replace(kind="unknown", web_type="UNKNOWN", transient=True)
+    elif result.kind == "unknown":
+        print("disc classify: genuinely unknown (all probes ran, none matched)")
+        _stuck_cycles[device] = 0
+    _detect_cache[device] = (time.monotonic(), result)
+    return result
+
+
+def detect_disc(device, settle=True, budget=None, force=False):
+    """Return a DiscInfo for the disc in `device`. Results are cached briefly so
+    disc_status_line / disc_title / menu_items_for_disc in one refresh burst do a
+    single probe. `settle=False` skips the post-insert wait (used by the web
+    endpoint, which can just poll again)."""
+    if not device:
+        return _disc_info(False, "none")
+    if _tray_open:
+        # Tray was deliberately ejected from the OLED — report "no disc" without
+        # touching the drive (cdrom_id / wodim / open() would re-close the tray).
+        return _disc_info(False, "none")
+    if not force:
+        cached = _detect_cache.get(device)
+        if cached and time.monotonic() - cached[0] < DISC_DETECT_CACHE_TTL:
+            return cached[1]
+    with _detect_lock:
+        if not force:
+            cached = _detect_cache.get(device)
+            if cached and time.monotonic() - cached[0] < DISC_DETECT_CACHE_TTL:
+                return cached[1]
+        return _detect_disc_locked(device, settle, budget)
 
 
 def disc_title(device):
     kind = disc_kind(device)
+    if kind in ("data_disc", "data_cd", "video_data", "dvd_video"):
+        properties = udev_cdrom_properties(device)
+        label = properties.get("ID_FS_LABEL", "")
+        if label:
+            return label
+        if kind != "dvd_video":
+            return ""
     if kind == "dvd_video":
         dvd = run_probe(["lsdvd", device], timeout=5)
         if dvd.returncode == 0:
@@ -930,6 +1452,8 @@ def disc_title(device):
                     if t:
                         return t
     elif kind == "audio_cd":
+        if discstation_host.system_name() == "darwin":
+            return "Apple Music"
         try:
             toc = audio_cd_toc(device)
             if toc and toc.get("track_count"):
@@ -965,18 +1489,47 @@ def disc_title(device):
     return ""
 
 
+def audio_track_metadata(device):
+    """Return track count and saved names for a DiscStation-burned CD."""
+    try:
+        toc = audio_cd_toc(device)
+        track_count = int(toc.get("track_count", 0))
+        tracks = toc.get("tracks", [])
+        leadout = toc.get("leadout", 0)
+        if not track_count or not tracks:
+            return 0, [], []
+        fingerprint = f"{track_count}-{int((leadout - tracks[0]) / 75)}"
+        titles = []
+        if HISTORY_FILE.exists():
+            for line in reversed(HISTORY_FILE.read_text().splitlines()):
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                if (entry.get("disc_type") == "Audio CD" and
+                        entry.get("success") and entry.get("fingerprint") == fingerprint):
+                    titles = entry.get("track_titles") or []
+                    break
+        starts = [int((position - tracks[0]) / 75) for position in tracks]
+        return track_count, titles, starts
+    except Exception:
+        return 0, [], []
+
+
 def menu_items_for_disc(device):
     kind = disc_kind(device)
     items = []
-    if kind == "blank":
+    if kind == "blank" or is_rewritable_disc(device):
         items = ["BURN", "BURN DATA", "BURN AUDIO"]
         had = discstation_burn.WORK.rglob("movie.mpg")
         if any(True for _ in had):
             items.append("BURN MPG")
+    elif kind == "audio_cd" and discstation_host.system_name() == "darwin":
+        items = ["APPLE MUSIC"]
     elif kind in ("dvd_video", "audio_cd", "vcd", "svcd", "video_data", "data_disc", "data_cd"):
         items = ["PLAY", "RIP"]
     else:
-        items = ["BURN", "BURN DATA", "PLAY", "RIP"]
+        items = ["PLAY", "RIP"]
     return items
 
 
@@ -984,20 +1537,47 @@ class mounted_disc:
     def __init__(self, device):
         self.device = device
         self.tmp = None
+        self.mount_path = None
+        self.owned_mount = False
 
     def __enter__(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="dvd_station_disc_")
-        result = subprocess.run(
-            ["mount", "-o", "ro", self.device, self.tmp.name],
-            capture_output=True, text=True,
-        )
+        if discstation_host.system_name() == "darwin":
+            properties = discstation_host.media_properties(self.device)
+            existing_mount = properties.get("ID_MOUNT_POINT")
+            if existing_mount and Path(existing_mount).is_dir():
+                self.mount_path = Path(existing_mount)
+                return self.mount_path
+            self.tmp = tempfile.TemporaryDirectory(prefix="discstation_disc_")
+            command = [
+                discstation_host.tool("hdiutil"), "attach", "-readonly", "-nobrowse",
+                "-mountpoint", self.tmp.name, self.device,
+            ]
+        elif discstation_host.system_name() == "linux":
+            self.tmp = tempfile.TemporaryDirectory(prefix="discstation_disc_")
+            command = ["mount", "-o", "ro", self.device, self.tmp.name]
+        else:
+            self.tmp.cleanup()
+            raise RuntimeError("Disc mounting backend is not configured for this operating system")
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             self.tmp.cleanup()
             raise RuntimeError((result.stderr or result.stdout or "Could not mount disc").strip())
-        return Path(self.tmp.name)
+        self.mount_path = Path(self.tmp.name)
+        self.owned_mount = True
+        return self.mount_path
 
     def __exit__(self, exc_type, exc, tb):
-        subprocess.run(["umount", self.tmp.name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not self.owned_mount:
+            return
+        if discstation_host.system_name() == "darwin":
+            subprocess.run(
+                ["/usr/sbin/diskutil", "unmount", str(self.mount_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        else:
+            subprocess.run(["umount", str(self.mount_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.tmp.cleanup()
 
 
@@ -1022,6 +1602,66 @@ def disc_video_files(mount_dir):
 
 
 def audio_cd_toc(device):
+    if discstation_host.system_name() == "darwin":
+        toc_path = discstation_burn.WORK / "mac_audio_read.toc"
+        result = subprocess.run(
+            [discstation_burn.tool("cdrdao"), "read-toc", "--fast-toc",
+             "--device", discstation_host.cdrdao_device(device), str(toc_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        text = ensure_text(result.stdout) + ensure_text(result.stderr)
+        toc_text = toc_path.read_text(errors="replace") if toc_path.exists() else ""
+        toc_path.unlink(missing_ok=True)
+        if result.returncode != 0:
+            detail = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "cdrdao failed")
+            raise RuntimeError(f"Could not read macOS CD TOC: {detail[:100]}")
+
+        durations = []
+        for block in re.split(r"(?m)^\s*//\s*Track\s+\d+\s*$", toc_text)[1:]:
+            file_lines = re.findall(r"(?m)^\s*FILE\b.*$", block)
+            file_times = re.findall(r"\d+:\d+:\d+", file_lines[-1]) if file_lines else []
+            pregap_times = re.findall(r"(?m)^\s*SILENCE\s+(\d+:\d+:\d+)", block)
+            if file_times:
+                duration = _msf_frames(file_times[-1])
+                duration += sum(_msf_frames(value) for value in pregap_times)
+                durations.append(duration)
+        if not durations:
+            for line in text.splitlines():
+                match = re.match(r"\s*(\d+)\s+AUDIO.*?\((\d+)\).*?\((\d+)\)", line)
+                if match:
+                    durations.append(int(match.group(3)) - int(match.group(2)))
+        if not durations:
+            raise RuntimeError("Could not read macOS CD TOC")
+        tracks = []
+        position = 150
+        for duration in durations:
+            tracks.append(position)
+            position += duration
+        leadout = position
+        return {
+            "first_track": 1,
+            "track_count": len(durations),
+            "leadout": leadout,
+            "tracks": tracks,
+            "toc": "+".join(map(str, [1, len(durations), leadout, *tracks])),
+        }
+    if _libdiscid is not None:
+        try:
+            d = _libdiscid.read(device)
+            tracks = list(d.track_offsets)
+            if tracks:
+                return {
+                    "first_track": d.first_track,
+                    "track_count": len(tracks),
+                    "leadout": d.sectors,
+                    "tracks": tracks,
+                    "toc": d.toc,            # space-separated MB TOC string
+                    "mb_discid": d.id,       # real MusicBrainz disc ID
+                    "freedb_id": d.freedb_id,
+                }
+        except _libdiscid.DiscError as e:
+            print(f"libdiscid read failed, falling back to wodim: {e}")
+
     toc = run_probe(["wodim", "-toc", "dev=" + device], timeout=8)
     text = ensure_text(toc.stdout) + ensure_text(toc.stderr)
     tracks = []
@@ -1049,7 +1689,26 @@ def audio_cd_toc(device):
     }
 
 
+def _msf_frames(value):
+    minutes, seconds, frames = (int(part) for part in value.split(":"))
+    return (minutes * 60 + seconds) * 75 + frames
+
+
 def audio_cd_chapters(device):
+    if discstation_host.system_name() == "darwin":
+        toc = audio_cd_toc(device)
+        tracks = toc["tracks"]
+        first = tracks[0]
+        leadout = toc["leadout"]
+        chapters = []
+        for index, start in enumerate(tracks):
+            end = tracks[index + 1] if index + 1 < len(tracks) else leadout
+            chapters.append({
+                "start_time": (start - first) / 75,
+                "end_time": (end - first) / 75,
+                "tags": {"title": f"Track {index + 1:02d}"},
+            })
+        return chapters
     r = run_probe(
         [
             "ffprobe", "-v", "quiet", "-f", "libcdio", "-i", device,
@@ -1075,12 +1734,6 @@ def write_audio_tracks_file(out_dir, chapters):
     return path
 
 
-def artist_credit_name(credit):
-    if not credit:
-        return "Unknown Artist"
-    return "".join(part.get("name", "") + part.get("joinphrase", "") for part in credit).strip() or "Unknown Artist"
-
-
 def safe_path_name(name):
     name = re.sub(r'[\\/:*?"<>|]+', "_", name.strip())
     name = re.sub(r"\s+", " ", name)
@@ -1097,20 +1750,44 @@ def unique_dir(path):
     return path.with_name(f"{path.name} ({int(time.time())})")
 
 
-def metadata_from_musicbrainz_release(release, track_count, toc=None):
-    for medium in release.get("media", []):
-        tracks = medium.get("tracks", [])
-        if len(tracks) != track_count:
+_MB_RELEASE_INCLUDES = ["recordings", "artists", "artist-credits", "release-groups"]
+
+
+def _mb_artist_phrase(credit):
+    """Flatten a MusicBrainz artist-credit list into a display string."""
+    if not credit:
+        return ""
+    out = []
+    for part in credit:
+        if isinstance(part, str):
+            out.append(part)
+        elif isinstance(part, dict):
+            out.append((part.get("artist") or {}).get("name", "") or part.get("name", ""))
+            out.append(part.get("joinphrase", ""))
+    return "".join(out).strip()
+
+
+def _release_meta(release, track_count, toc=None):
+    """Extract our metadata dict from a MusicBrainz release, accepting both the
+    musicbrainzngs shape (`medium-list`/`track-list`) and the raw ws/2 JSON
+    shape (`media`/`tracks`)."""
+    media = release.get("medium-list") or release.get("media") or []
+    for medium in media:
+        tracks = medium.get("track-list") or medium.get("tracks") or []
+        if track_count and len(tracks) != track_count:
             continue
 
-        album_artist = artist_credit_name(release.get("artist-credit"))
-        album = release.get("title") or "Unknown Album"
+        album_artist = (
+            release.get("artist-credit-phrase")
+            or _mb_artist_phrase(release.get("artist-credit"))
+            or "Unknown Artist"
+        )
         date = release.get("date") or ""
         metadata = {
             "source": "musicbrainz",
             "release_id": release.get("id"),
             "release_group_id": (release.get("release-group") or {}).get("id"),
-            "album": album,
+            "album": release.get("title") or "Unknown Album",
             "album_artist": album_artist,
             "date": date,
             "year": date[:4],
@@ -1119,23 +1796,35 @@ def metadata_from_musicbrainz_release(release, track_count, toc=None):
             "tracks": [],
             "toc": toc,
         }
-
         for index, track in enumerate(tracks, start=1):
             recording = track.get("recording") or {}
+            artist = (
+                track.get("artist-credit-phrase")
+                or recording.get("artist-credit-phrase")
+                or _mb_artist_phrase(track.get("artist-credit") or recording.get("artist-credit"))
+                or album_artist
+            )
             metadata["tracks"].append({
                 "number": index,
                 "title": track.get("title") or recording.get("title") or f"Track {index:02d}",
-                "artist": artist_credit_name(track.get("artist-credit") or recording.get("artist-credit") or release.get("artist-credit")),
+                "artist": artist,
                 "recording_id": recording.get("id"),
                 "release_track_id": track.get("id"),
             })
-
         return metadata
 
     return None
 
 
+# Back-compat alias (older name).
+metadata_from_musicbrainz_release = _release_meta
+
+
 def musicbrainz_release_details(release_id):
+    if _mb is not None:
+        return _mb.get_release_by_id(
+            release_id, includes=_MB_RELEASE_INCLUDES + ["media"],
+        )["release"]
     response = requests.get(
         f"https://musicbrainz.org/ws/2/release/{release_id}",
         params={
@@ -1151,28 +1840,39 @@ def musicbrainz_release_details(release_id):
 
 def musicbrainz_lookup(device, track_count):
     toc = audio_cd_toc(device)
-    params = {
-        "toc": toc["toc"],
-        "inc": "recordings+artists+artist-credits+release-groups",
-        "fmt": "json",
-        "cdstubs": "no",
-        "media-format": "all",
-    }
-    headers = {"User-Agent": USER_AGENT}
+
+    if _mb is not None and toc.get("mb_discid"):
+        try:
+            res = _mb.get_releases_by_discid(
+                toc["mb_discid"], includes=["recordings", "artist-credits", "release-groups"],
+                toc=toc.get("toc"), cdstubs=False,
+            )
+        except _mb.ResponseError as e:
+            if getattr(getattr(e, "cause", None), "code", None) == 404:
+                return None
+            raise
+        releases = res.get("disc", {}).get("release-list") or res.get("release-list") or []
+        for release in releases:
+            metadata = _release_meta(release, track_count, toc)
+            if metadata:
+                return metadata
+        return None
+
+    # --- fallback: raw ws/2 disc-id lookup ---
     response = requests.get(
         "https://musicbrainz.org/ws/2/discid/-",
-        params=params,
-        headers=headers,
-        timeout=20,
+        params={
+            "toc": toc["toc"],
+            "inc": "recordings+artists+artist-credits+release-groups",
+            "fmt": "json", "cdstubs": "no", "media-format": "all",
+        },
+        headers={"User-Agent": USER_AGENT}, timeout=20,
     )
     response.raise_for_status()
-    data = response.json()
-
-    for release in data.get("releases", []):
-        metadata = metadata_from_musicbrainz_release(release, track_count, toc)
+    for release in response.json().get("releases", []):
+        metadata = _release_meta(release, track_count, toc)
         if metadata:
             return metadata
-
     return None
 
 
@@ -1180,39 +1880,52 @@ def musicbrainz_lookup_by_album_hints(album_artist, album, track_count):
     if not album:
         return None
 
+    if _mb is not None:
+        fields = {"release": album}
+        if album_artist:
+            fields["artist"] = album_artist
+        try:
+            hits = _mb.search_releases(limit=8, **fields).get("release-list", [])
+        except _mb.WebServiceError as e:
+            print(f"MusicBrainz search failed: {e}")
+            hits = []
+        for hit in hits:
+            release_id = hit.get("id")
+            if not release_id:
+                continue
+            try:
+                details = musicbrainz_release_details(release_id)
+            except Exception:
+                continue
+            metadata = _release_meta(details, track_count)
+            if metadata:
+                metadata["source"] = "musicbrainz-search"
+                return metadata
+        return None
+
+    # --- fallback: raw ws/2 search ---
     query_parts = [f'release:"{album}"']
     if album_artist:
         query_parts.append(f'artist:"{album_artist}"')
-
     response = requests.get(
         "https://musicbrainz.org/ws/2/release/",
-        params={
-            "query": " AND ".join(query_parts),
-            "fmt": "json",
-            "limit": 8,
-        },
-        headers={"User-Agent": USER_AGENT},
-        timeout=20,
+        params={"query": " AND ".join(query_parts), "fmt": "json", "limit": 8},
+        headers={"User-Agent": USER_AGENT}, timeout=20,
     )
     response.raise_for_status()
-
     for release in response.json().get("releases", []):
         release_id = release.get("id")
         if not release_id:
             continue
-
         try:
             details = musicbrainz_release_details(release_id)
         except Exception:
             continue
-
-        metadata = metadata_from_musicbrainz_release(details, track_count)
+        metadata = _release_meta(details, track_count)
         if metadata:
             metadata["source"] = "musicbrainz-search"
             return metadata
-
         time.sleep(1)
-
     return None
 
 def cddb_sum(value):
@@ -1255,7 +1968,11 @@ def parse_cddb_kv(text):
 
 def gnudb_lookup(device, track_count):
     toc = audio_cd_toc(device)
-    disc_id, total_seconds = cddb_disc_id(toc)
+    if toc.get("freedb_id"):
+        disc_id = toc["freedb_id"]
+        total_seconds = (toc["leadout"] - toc["tracks"][0]) // 75
+    else:
+        disc_id, total_seconds = cddb_disc_id(toc)
     offsets = " ".join(str(offset) for offset in toc["tracks"])
     query = f"cddb query {disc_id} {track_count} {offsets} {total_seconds}"
     response = cddb_get(query)
@@ -1319,10 +2036,19 @@ def musicbrainz_release_id_search(album_artist, album):
     if not album or album == "Unknown Album":
         return None
 
+    if _mb is not None:
+        fields = {"release": album}
+        if album_artist and album_artist != "Unknown Artist":
+            fields["artist"] = album_artist
+        try:
+            hits = _mb.search_releases(limit=1, **fields).get("release-list", [])
+        except _mb.WebServiceError:
+            hits = []
+        return hits[0].get("id") if hits else None
+
     query_parts = [f'release:"{album}"']
     if album_artist and album_artist != "Unknown Artist":
         query_parts.append(f'artist:"{album_artist}"')
-
     response = requests.get(
         "https://musicbrainz.org/ws/2/release/",
         params={"query": " AND ".join(query_parts), "fmt": "json", "limit": 1},
@@ -1390,9 +2116,31 @@ def write_album_info(out_dir, metadata):
     return path
 
 
+def _sniff_image_ext(data):
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    return "jpg"
+
+
 def download_cover_art(release_id, out_dir, release_group_id=None):
     if not release_id and not release_group_id:
         return None
+
+    if _mb is not None:
+        for fetch in (
+            (lambda: _mb.get_image_front(release_id, size=500)) if release_id else None,
+            (lambda: _mb.get_release_group_image_front(release_group_id, size=500)) if release_group_id else None,
+        ):
+            if fetch is None:
+                continue
+            try:
+                data = fetch()
+            except Exception:
+                continue
+            if data:
+                path = out_dir / f"cover.{_sniff_image_ext(data)}"
+                path.write_bytes(data)
+                return path
 
     headers = {"User-Agent": USER_AGENT}
     candidates = []
@@ -1528,52 +2276,38 @@ def _check_cancel(ser):
 
 
 def iter_process_events(proc, idle_seconds=1.0, ser=None):
-    buffer = ""
-    fd = proc.stdout.fileno()
-    last_ping = time.time()
+    lines = Queue()
+    finished = object()
 
-    while proc.poll() is None:
-        fds = [fd]
+    def read_output():
+        try:
+            for line in proc.stdout:
+                lines.put(line.rstrip("\r\n"))
+        finally:
+            lines.put(finished)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    last_ping = time.time()
+    output_done = False
+    while proc.poll() is None or not output_done:
         if ser is not None:
-            fds.append(ser.fileno())
-        ready, _, _ = select.select(fds, [], [], idle_seconds)
-        if not ready:
-            if ser is not None:
-                if _check_cancel(ser):
-                    discstation_burn.stop_process(proc)
-                    raise CancelError
-                if time.time() - last_ping >= 5:
-                    discstation_burn.send(ser, "PING")
-                    last_ping = time.time()
+            if _check_cancel(ser):
+                discstation_burn.stop_process(proc)
+                raise CancelError
+            if time.time() - last_ping >= 5:
+                discstation_burn.send(ser, "PING")
+                last_ping = time.time()
+        try:
+            line = lines.get(timeout=idle_seconds)
+        except Empty:
             yield None
             continue
-
-        chunk = os.read(fd, 4096).decode(errors="ignore")
-        if not chunk:
-            break
-
-        for char in chunk:
-            if char in "\r\n":
-                if buffer:
-                    yield buffer
-                    buffer = ""
-            else:
-                buffer += char
-
-    while True:
-        chunk = os.read(fd, 4096).decode(errors="ignore")
-        if not chunk:
-            break
-        for char in chunk:
-            if char in "\r\n":
-                if buffer:
-                    yield buffer
-                    buffer = ""
-            else:
-                buffer += char
-
-    if buffer:
-        yield buffer
+        if line is finished:
+            output_done = True
+        else:
+            yield line
+    reader.join(timeout=1)
 
 
 def device_size_bytes(device):
@@ -1700,14 +2434,16 @@ def burn_flow(ser, url):
         plan = discstation_burn.bitrate_plan(duration, selected_mode, disc_bytes)
         video = discstation_burn.download(ser, url, job_dir)
         mpg, dvd_aspect = discstation_burn.convert(ser, video, job_dir, selected_mode, disc_bytes)
+        discstation_burn.check_encoded_size(ser, mpg, disc_bytes)
         srt_files = discstation_burn.find_subtitle_files(video)
         if not srt_files:
             srt_files = discstation_burn.extract_embedded_subtitles(video, job_dir)
         if srt_files:
             safe_send(ser, f"INFO:{len(srt_files)} subtitle(s)")
             mpg = discstation_burn.add_subtitles(ser, mpg, srt_files, job_dir)
-        dvd_dir = discstation_burn.author(ser, mpg, job_dir, dvd_aspect)
-        discstation_burn.check_dvd_size(ser, dvd_dir, disc_bytes)
+        dvd_dir = discstation_burn.remux_and_author(
+            ser, mpg, disc_label, disc_bytes, dvd_aspect
+        )
 
         if plan["burn"]:
             discstation_burn.wait_for_burn_confirm(ser, dvd_dir, disc_bytes)
@@ -1794,6 +2530,7 @@ def burn_mpg_flow(ser):
             if sel == "Enter path...":
                 path_str = wait_for_web_url(ser)
                 if path_str is None:
+                    refresh_main_menu(ser)
                     return
                 path_str = path_str.strip()
                 p = Path(path_str)
@@ -1822,6 +2559,7 @@ def burn_mpg_flow(ser):
                     break
         elif line == "CANCEL":
             safe_send(ser, "CANCELLED:Cancelled")
+            refresh_main_menu(ser)
             return
         time.sleep(0.05)
 
@@ -1912,8 +2650,8 @@ def burn_data_flow(ser):
             send(ser, "STATUS:Starting data burn...")
             break
 
-    if not is_blank_disc(device):
-        raise RuntimeError("No blank disc in drive")
+    if not can_burn_disc(device):
+        raise RuntimeError("No writable disc in drive")
 
     discstation_burn.WORK.mkdir(parents=True, exist_ok=True)
     job_dir = discstation_burn.WORK / time.strftime("job_%Y%m%d_%H%M%S")
@@ -1942,8 +2680,7 @@ def burn_data_flow(ser):
             if d.is_dir():
                 total_bytes += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
         label = "DVD5" if not dl_info["is_dual_layer"] else "DVD9"
-        overhead = 0.995
-        usable = (disc_bytes or 0) * overhead
+        usable = discstation_burn.disc_output_limit_bytes(disc_bytes)
         if usable and total_bytes > usable:
             size_gb = total_bytes / 1e9
             cap_gb = usable / 1e9
@@ -2048,13 +2785,16 @@ def burn_audio_flow(ser):
 
     album_title = ""
     album_artist = ""
+    track_titles = []
     total_dur = 0
     for f in audio_files:
+        track_title = f.stem
         try:
             if f.suffix.lower() == ".flac":
                 from mutagen.flac import FLAC
                 a = FLAC(str(f))
                 total_dur += a.info.length
+                track_title = a.get("title", [f.stem])[0]
                 if not album_title:
                     album_title = a.get("album", [""])[0]
                     album_artist = a.get("albumartist", [a.get("artist", [""])[0]])[0]
@@ -2062,6 +2802,7 @@ def burn_audio_flow(ser):
                 from mutagen.mp3 import MP3
                 a = MP3(str(f))
                 total_dur += a.info.length
+                track_title = str(a.get("TIT2", f.stem))
                 if not album_title:
                     album_title = str(a.get("TALB", ""))
                     album_artist = str(a.get("TPE2", str(a.get("TPE1", ""))))
@@ -2069,15 +2810,11 @@ def burn_audio_flow(ser):
                 total_dur += discstation_burn.probe_duration(str(f))
         except Exception:
             pass
+        track_titles.append(track_title)
     fingerprint = f"{len(audio_files)}-{int(total_dur)}"
 
-    if album_title and album_artist:
-        disc_label = f"{album_artist} - {album_title}"
-    elif album_title:
-        disc_label = album_title
-    else:
-        disc_label = discstation_burn.sanitize_disc_label(src_path.name if src_path.is_dir() else src_path.stem)
-    disc_label = discstation_burn.sanitize_disc_label(disc_label)[:32]
+    source_label = src_path.name if src_path.is_dir() else src_path.stem
+    disc_label = discstation_burn.audio_disc_title(source_label)
     mins = int(total_dur / 60)
     secs = int(total_dur % 60)
     fits = "OK" if total_dur <= 4740 else "TOO LONG"  # 79 min max for 700MB CD-R
@@ -2099,8 +2836,8 @@ def burn_audio_flow(ser):
             break
 
     device = discstation_burn.disc_device()
-    if not is_blank_disc(device):
-        raise RuntimeError("No blank disc in drive")
+    if not can_burn_disc(device):
+        raise RuntimeError("No writable disc in drive")
     if total_dur > 4740:
         raise RuntimeError(f"Too long for CD-R: {int(total_dur/60)}m{int(total_dur%60)}s > 79m")
 
@@ -2112,6 +2849,7 @@ def burn_audio_flow(ser):
             "timestamp": datetime.datetime.now().isoformat(),
             "title": disc_label,
             "fingerprint": fingerprint,
+            "track_titles": track_titles,
             "disc_type": "Audio CD",
             "mode": "AUDIO",
             "speed": burn_speed or "Auto",
@@ -2125,6 +2863,7 @@ def burn_audio_flow(ser):
             "timestamp": datetime.datetime.now().isoformat(),
             "title": disc_label,
             "fingerprint": fingerprint,
+            "track_titles": track_titles,
             "disc_type": "Audio CD",
             "mode": "AUDIO",
             "speed": burn_speed or "Auto",
@@ -2138,6 +2877,7 @@ def burn_audio_flow(ser):
             "timestamp": datetime.datetime.now().isoformat(),
             "title": disc_label,
             "fingerprint": fingerprint,
+            "track_titles": track_titles,
             "disc_type": "Audio CD",
             "mode": "AUDIO",
             "speed": burn_speed or "Auto",
@@ -2151,44 +2891,39 @@ def burn_audio_flow(ser):
 
 
 def _iter_proc_lines(proc, ser):
-    proc_fd = proc.stdout.fileno()
-    ser_fd = ser.fileno()
-    buffer = ""
-    last_ping = time.time()
+    lines = Queue()
+    finished = object()
 
-    while proc.poll() is None:
+    def read_output():
+        try:
+            for line in proc.stdout:
+                lines.put(line.rstrip("\r\n"))
+        finally:
+            lines.put(finished)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    last_ping = time.time()
+    output_done = False
+    while proc.poll() is None or not output_done:
         if time.time() - last_ping >= 5:
             discstation_burn.send(ser, "PING")
             last_ping = time.time()
-        ready, _, _ = select.select([proc_fd, ser_fd], [], [], 0.5)
-
-        if ser_fd in ready and _check_cancel(ser):
+        if _check_cancel(ser):
             discstation_burn.stop_process(proc)
             return
-
-        if proc_fd in ready:
-            try:
-                chunk = os.read(proc_fd, 4096).decode(errors="ignore")
-            except OSError:
-                break
-            if not chunk:
-                break
-            for char in chunk:
-                if char in "\r\n":
-                    if buffer:
-                        yield buffer
-                        buffer = ""
-                else:
-                    buffer += char
-
-    if buffer:
-        yield buffer
-
-    for line in proc.stdout:
-        yield line.rstrip("\r\n")
+        try:
+            line = lines.get(timeout=0.5)
+        except Empty:
+            continue
+        if line is finished:
+            output_done = True
+        else:
+            yield line
+    reader.join(timeout=1)
 
 
-def _run_mpv(ser, cmd, label, kind=None):
+def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
     try:
         os.unlink(MPV_SOCKET)
     except FileNotFoundError:
@@ -2218,6 +2953,11 @@ def _run_mpv(ser, cmd, label, kind=None):
 
         paused = False
         current_volume = None
+        current_track = None
+        last_track_poll = 0
+        track_titles = track_titles or []
+        track_starts = track_starts or []
+        send(ser, "PLAY_MODE:AUDIO_CD" if kind == "audio_cd" else "PLAY_MODE:DEFAULT")
         send(ser, "PLAY:PLAYING")
         print(f"{label}. Short press toggles pause; long press stops.")
 
@@ -2227,8 +2967,26 @@ def _run_mpv(ser, cmd, label, kind=None):
                 last_ping = time.time()
                 safe_send(ser, "PING")
 
+            if kind == "audio_cd" and time.time() - last_track_poll >= 1:
+                last_track_poll = time.time()
+                track = mpv_query(["get_property", "chapter"])
+                if not isinstance(track, (int, float)) and track_starts:
+                    position = mpv_query(["get_property", "time-pos"])
+                    if isinstance(position, (int, float)):
+                        track = max((i for i, start in enumerate(track_starts) if start <= position), default=0)
+                if isinstance(track, (int, float)):
+                    track = int(track)
+                    if track != current_track:
+                        current_track = track
+                        title = track_titles[track] if 0 <= track < len(track_titles) else ""
+                        status = f"TRACK {track + 1:02d}"
+                        if title:
+                            status += f" // {title}"
+                        send(ser, f"PLAY_STATUS:{status}")
+
             if ser.in_waiting:
                 line = ser.readline().decode(errors="ignore").strip()
+                discstation_burn.note_serial_activity()
 
                 if line == "PLAY_BUTTON":
                     paused = not paused
@@ -2243,7 +3001,7 @@ def _run_mpv(ser, cmd, label, kind=None):
 
                 elif line == "FF:BIG":
                     if kind == "audio_cd":
-                        mpv_command(["playlist-next"])
+                        mpv_command(["add", "chapter", 1])
                         send(ser, "PLAY_STATUS:Next track")
                     else:
                         mpv_command(["seek", 120])
@@ -2257,7 +3015,7 @@ def _run_mpv(ser, cmd, label, kind=None):
                     except ValueError:
                         continue
                     if kind == "audio_cd":
-                        mpv_command(["playlist-next"])
+                        mpv_command(["add", "chapter", 1])
                         send(ser, "PLAY_STATUS:Next track")
                     else:
                         mpv_command(["seek", seek_sec])
@@ -2267,7 +3025,7 @@ def _run_mpv(ser, cmd, label, kind=None):
 
                 elif line == "REW:BIG":
                     if kind == "audio_cd":
-                        mpv_command(["playlist-prev"])
+                        mpv_command(["add", "chapter", -1])
                         send(ser, "PLAY_STATUS:Prev track")
                     else:
                         mpv_command(["seek", -120])
@@ -2281,7 +3039,7 @@ def _run_mpv(ser, cmd, label, kind=None):
                     except ValueError:
                         continue
                     if kind == "audio_cd":
-                        mpv_command(["playlist-prev"])
+                        mpv_command(["add", "chapter", -1])
                         send(ser, "PLAY_STATUS:Prev track")
                     else:
                         mpv_command(["seek", -seek_sec])
@@ -2313,32 +3071,59 @@ def _run_mpv(ser, cmd, label, kind=None):
 
 def play_flow(ser):
     device = discstation_burn.disc_device()
-    if not shutil.which("mpv"):
-        raise RuntimeError("mpv not found")
-
     kind = disc_kind(device)
     print(f"Disc type: {kind}")
 
+    if kind == "audio_cd" and discstation_host.system_name() == "darwin":
+        raise RuntimeError("Apple Music handles audio CD playback on macOS")
+    if not shutil.which("mpv"):
+        raise RuntimeError("mpv not found")
+
     if kind == "dvd_video":
-        cmd = [
-            "mpv",
-            "--input-ipc-server=" + MPV_SOCKET,
-            "--force-window=yes",
-            "--idle=no",
-            device,
-        ]
-        _run_mpv(ser, cmd, "Playing DVD", kind)
+        if discstation_host.system_name() == "darwin":
+            with mounted_disc(device) as mount_dir:
+                video_ts = mount_dir / "VIDEO_TS"
+                files = sorted(
+                    path for path in video_ts.glob("VTS_01_*.VOB")
+                    if re.search(r"_\d+\.VOB$", path.name, re.IGNORECASE)
+                    and not path.name.upper().endswith("_0.VOB")
+                )
+                if not files:
+                    raise RuntimeError("No playable DVD title found")
+                cmd = [
+                    "mpv",
+                    "--input-ipc-server=" + MPV_SOCKET,
+                    "--force-window=yes",
+                    "--idle=no",
+                    *[str(path) for path in files],
+                ]
+                _run_mpv(ser, cmd, "Playing DVD", kind)
+        else:
+            cmd = [
+                "mpv",
+                "--input-ipc-server=" + MPV_SOCKET,
+                "--force-window=yes",
+                "--idle=no",
+                device,
+            ]
+            _run_mpv(ser, cmd, "Playing DVD", kind)
 
     elif kind == "audio_cd":
+        _, track_titles, track_starts = audio_track_metadata(device)
+        audio_device = discstation_host.audio_output_device()
         cmd = [
             "mpv",
             "--input-ipc-server=" + MPV_SOCKET,
             "--force-window=no",
             "--idle=no",
             "--cdrom-device=" + device,
+            "--cdda-cdtext=yes",
             "cdda://",
         ]
-        _run_mpv(ser, cmd, "Playing audio CD", kind)
+        if audio_device:
+            cmd.insert(1, "--audio-device=" + audio_device)
+            print(f"Audio CD output: {audio_device}")
+        _run_mpv(ser, cmd, "Playing audio CD", kind, track_titles, track_starts)
 
     elif kind in ("vcd", "svcd", "video_data"):
         with mounted_disc(device) as mount_dir:
@@ -2361,10 +3146,147 @@ def play_flow(ser):
     time.sleep(3)
 
 
+def _finalize_video_rip(ser, out_dir, device, kind):
+    """After a successful video rip: look the title up on TMDb, rename the
+    output folder to "Title (Year)", and drop poster.jpg / movie.nfo. No-op if
+    discstation_meta is unavailable or no key is configured. Returns the final
+    directory."""
+    out_dir = Path(out_dir)
+    if discstation_meta is None or not discstation_meta.available():
+        return out_dir
+    try:
+        guess = disc_title(device) or ""
+    except Exception:
+        guess = ""
+    if not guess:
+        return out_dir
+    meta = discstation_meta.lookup(guess)
+    if not meta:
+        print(f"TMDb: no match for {guess!r}")
+        return out_dir
+
+    target = out_dir
+    new_name = discstation_meta.folder_name(meta)
+    if new_name and Path(new_name).name != out_dir.name:
+        candidate = unique_dir(RIP_ROOT / new_name)
+        try:
+            out_dir.rename(candidate)
+            target = candidate
+        except OSError as e:
+            print(f"TMDb: could not rename rip dir: {e}")
+
+    discstation_meta.save_assets(target, meta)
+    info_path = target / "disc_info.json"
+    try:
+        data = json.loads(info_path.read_text()) if info_path.exists() else {"kind": kind}
+    except Exception:
+        data = {"kind": kind}
+    data["tmdb"] = meta
+    try:
+        info_path.write_text(json.dumps(data, indent=2))
+    except OSError:
+        pass
+    safe_send(ser, f"INFO:{meta.get('title', '')} ({meta.get('year', '')})".strip())
+    print(f"TMDb: {meta.get('title')} ({meta.get('year')}) -> {target}")
+    return target
+
+
+def _handbrake_json_blocks(text):
+    """HandBrakeCLI --json prints one or more 'Marker: {json}' blocks.
+    Return {marker: parsed_obj}."""
+    blocks = {}
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^([A-Za-z][A-Za-z ]*): \{$", lines[i])
+        if not m:
+            i += 1
+            continue
+        buf = ["{"]
+        i += 1
+        while i < len(lines):
+            buf.append(lines[i])
+            if lines[i] == "}":
+                break
+            i += 1
+        try:
+            blocks[m.group(1)] = json.loads("\n".join(buf))
+        except ValueError:
+            pass
+        i += 1
+    return blocks
+
+
+def handbrake_scan(device):
+    """Return {'main_feature': int|None, 'titles': [{index,duration_s,chapters}]}
+    or None. Uses HandBrakeCLI, which does real main-feature detection."""
+    if not shutil.which("HandBrakeCLI"):
+        return None
+    try:
+        r = subprocess.run(
+            ["HandBrakeCLI", "--json", "--scan", "-i", device, "-t", "0"],
+            capture_output=True, text=True, timeout=180,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"HandBrake scan failed: {e}")
+        return None
+    ts = _handbrake_json_blocks(ensure_text(r.stdout) + ensure_text(r.stderr)).get("JSON Title Set")
+    if not ts or not ts.get("TitleList"):
+        return None
+    titles = []
+    for t in ts["TitleList"]:
+        dur = t.get("Duration") or {}
+        secs = dur.get("Hours", 0) * 3600 + dur.get("Minutes", 0) * 60 + dur.get("Seconds", 0)
+        titles.append({
+            "index": t.get("Index"),
+            "duration_s": secs,
+            "chapters": len(t.get("ChapterList") or []),
+        })
+    main = ts.get("MainFeature")
+    if main is None and titles:
+        main = max(titles, key=lambda x: x["duration_s"])["index"]
+    return {"main_feature": main, "titles": titles}
+
+
+def handbrake_rip_main_feature(ser, device, out_dir, title_index):
+    """Transcode one DVD title to MKV (H.264) with HandBrakeCLI, streaming its
+    JSON progress to the ESP32."""
+    dest = out_dir / "main_feature.mkv"
+    send(ser, "STATUS:Ripping main feature")
+    send(ser, f"INFO:HandBrake title {title_index}")
+    send(ser, "PROGRESS:0%")
+    proc = subprocess.Popen(
+        ["HandBrakeCLI", "--json", "-i", device, "-o", str(dest),
+         "-t", str(title_index), "-e", "x264", "-q", "20",
+         "--all-audio", "--all-subtitles"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    last_pct = -1
+    try:
+        for event in iter_process_events(proc, ser=ser):
+            if event is None:
+                continue
+            m = re.search(r'"Progress":\s*([0-9.]+)', event)
+            if m:
+                pct = int(float(m.group(1)) * 100)
+                if pct > last_pct:
+                    last_pct = pct
+                    send(ser, f"PROGRESS:{min(pct, 99)}%")
+    except CancelError:
+        discstation_burn.stop_process(proc)
+        safe_send(ser, "CANCELLED:Rip cancelled")
+        raise
+    if proc.wait() != 0 or not dest.exists():
+        raise RuntimeError("HandBrake rip failed")
+    return dest
+
+
 def rip_flow(ser, artist_hint=None, album_hint=None):
     device = discstation_burn.disc_device()
     kind = disc_kind(device)
 
+    if kind == "audio_cd" and discstation_host.system_name() == "darwin":
+        raise RuntimeError("Apple Music handles audio CD ripping on macOS")
     if kind == "audio_cd":
         rip_audio_cd(ser, device, artist_hint, album_hint)
         return
@@ -2373,14 +3295,40 @@ def rip_flow(ser, artist_hint=None, album_hint=None):
         rip_video_disc(ser, device, kind)
         return
 
+    if kind == "dvd_video" and discstation_host.system_name() == "darwin":
+        rip_dvd_video_macos(ser, device)
+        return
+
     if kind != "dvd_video":
         raise RuntimeError(f"Unsupported disc: {kind}")
 
-    if not shutil.which("dvdbackup"):
-        raise RuntimeError("dvdbackup not found")
-
     out_dir = RIP_ROOT / time.strftime("rip_%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    scan = handbrake_scan(device)
+    if scan:
+        main = scan["main_feature"]
+        mins = next((t["duration_s"] // 60 for t in scan["titles"] if t["index"] == main), 0)
+        send(ser, f"INFO:{len(scan['titles'])} titles, main #{main} ~{mins}m")
+        print(f"HandBrake scan: {len(scan['titles'])} titles; main feature #{main} (~{mins}m)")
+
+    # Opt-in: transcode just the main feature to MKV instead of a full mirror.
+    if os.environ.get("DISCSTATION_DVD_RIP_MODE", "").lower() == "mkv" and scan and scan["main_feature"]:
+        handbrake_rip_main_feature(ser, device, out_dir, scan["main_feature"])
+        (out_dir / "disc_info.json").write_text(
+            json.dumps({"kind": "dvd_video", "mode": "handbrake-main-feature",
+                        "title": scan["main_feature"], "files": ["main_feature.mkv"]}, indent=2),
+        )
+        safe_send(ser, "PROGRESS:100%")
+        safe_send(ser, "DONE:Rip complete!")
+        print(f"Rip complete: {out_dir}")
+        out_dir = _finalize_video_rip(ser, out_dir, device, "dvd_video")
+        chown_to_sudo_user(out_dir)
+        time.sleep(3)
+        return
+
+    if not shutil.which("dvdbackup"):
+        raise RuntimeError("dvdbackup not found")
 
     send(ser, "STATUS:Ripping disc...")
     send(ser, "INFO:Full VIDEO_TS copy")
@@ -2432,6 +3380,7 @@ def rip_flow(ser, artist_hint=None, album_hint=None):
     safe_send(ser, "PROGRESS:100%")
     safe_send(ser, "DONE:Rip complete!")
     print(f"Rip complete: {out_dir}")
+    out_dir = _finalize_video_rip(ser, out_dir, device, "dvd_video")
     chown_to_sudo_user(out_dir)
     time.sleep(3)
 
@@ -2444,6 +3393,45 @@ def remux_or_copy_video(src, dest):
     )
     if result.returncode != 0:
         shutil.copy2(src, dest.with_suffix(src.suffix.lower()))
+
+
+def rip_dvd_video_macos(ser, device):
+    out_dir = RIP_ROOT / f"dvd_video_{time.strftime('%Y%m%d_%H%M%S')}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    send(ser, "STATUS:Ripping DVD")
+    send(ser, "INFO:Copying VIDEO_TS")
+    send(ser, "PROGRESS:0%")
+
+    with mounted_disc(device) as mount_dir:
+        source_dir = mount_dir / "VIDEO_TS"
+        if not source_dir.is_dir():
+            raise RuntimeError("VIDEO_TS directory not found")
+        files = sorted(path for path in source_dir.rglob("*") if path.is_file())
+        total_bytes = sum(path.stat().st_size for path in files)
+        copied_bytes = 0
+        for source in files:
+            relative = source.relative_to(source_dir)
+            destination = out_dir / "VIDEO_TS" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            span = (source.stat().st_size / total_bytes * 100) if total_bytes else 0
+            discstation_burn.copy_with_keepalive(
+                ser,
+                source,
+                destination,
+                base_pct=(copied_bytes / total_bytes * 100) if total_bytes else 0,
+                pct_span=span,
+            )
+            copied_bytes += source.stat().st_size
+
+    (out_dir / "disc_info.json").write_text(
+        json.dumps({"kind": "dvd_video", "files": [str(path.relative_to(out_dir)) for path in (out_dir / "VIDEO_TS").rglob("*") if path.is_file()]}, indent=2),
+    )
+    safe_send(ser, "PROGRESS:100%")
+    safe_send(ser, "DONE:Rip complete!")
+    print(f"DVD rip complete: {out_dir}")
+    out_dir = _finalize_video_rip(ser, out_dir, device, "dvd_video")
+    chown_to_sudo_user(out_dir)
+    time.sleep(3)
 
 
 def rip_video_disc(ser, device, kind):
@@ -2470,6 +3458,74 @@ def rip_video_disc(ser, device, kind):
     safe_send(ser, "PROGRESS:100%")
     safe_send(ser, "DONE:Rip complete!")
     print(f"Video rip complete: {out_dir}")
+    out_dir = _finalize_video_rip(ser, out_dir, device, kind)
+    chown_to_sudo_user(out_dir)
+    time.sleep(3)
+
+
+def _rip_audio_cd_macos(ser, device, chapters, metadata, cover_path, out_dir):
+    if not chapters:
+        raise RuntimeError("No audio CD tracks found")
+    wav_dir = out_dir / ".wav"
+    wav_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        discstation_burn.tool("cdda2wav"), "-D",
+        discstation_host.cdrdao_device(device), "-B", "-O", "wav", "-x",
+    ]
+    send(ser, "STATUS:RIPPING AUDIO CD")
+    send(ser, "PROGRESS:0%")
+    proc = subprocess.Popen(
+        command,
+        cwd=str(wav_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output = []
+    try:
+        for line in _iter_proc_lines(proc, ser):
+            output.append(line)
+            count = len(list(wav_dir.glob("*.wav")))
+            if count:
+                send(ser, f"PROGRESS:{min(int(count / len(chapters) * 60), 60)}%")
+    except (KeyboardInterrupt, SystemExit):
+        discstation_burn.stop_process(proc)
+        raise
+    proc.wait()
+    if proc.returncode != 0:
+        detail = next((line.strip() for line in reversed(output) if line.strip()), "cdda2wav failed")
+        raise RuntimeError(f"Audio CD rip failed: {detail[:80]}")
+
+    wav_files = sorted(wav_dir.glob("*.wav"))
+    if len(wav_files) < len(chapters):
+        raise RuntimeError(f"Only ripped {len(wav_files)}/{len(chapters)} tracks")
+    for index, wav in enumerate(wav_files[:len(chapters)], start=1):
+        chapter = chapters[index - 1]
+        if metadata and index <= len(metadata["tracks"]):
+            track_meta = metadata["tracks"][index - 1]
+            title = track_meta["title"]
+        else:
+            title = chapter.get("tags", {}).get("title", f"track {index:02d}")
+            track_meta = {
+                "number": index,
+                "title": title,
+                "artist": metadata["album_artist"] if metadata else "Unknown Artist",
+                "recording_id": None,
+                "release_track_id": None,
+            }
+        out_file = out_dir / f"{index:02d} - {safe_path_name(title)}.flac"
+        subprocess.run(
+            [discstation_burn.tool("ffmpeg"), "-y", "-i", str(wav), "-c:a", "flac", str(out_file)],
+            capture_output=True,
+            check=True,
+        )
+        if metadata:
+            tag_flac(out_file, track_meta, metadata, cover_path)
+        wav.unlink(missing_ok=True)
+        send(ser, f"PROGRESS:{60 + int(index / len(chapters) * 40)}%")
+    shutil.rmtree(str(wav_dir), ignore_errors=True)
+    safe_send(ser, "PROGRESS:100%")
+    safe_send(ser, "DONE:Rip complete!")
     chown_to_sudo_user(out_dir)
     time.sleep(3)
 
@@ -2513,6 +3569,10 @@ def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
         print(f"Cover: {cover_path or 'not found'}")
     else:
         print("No MusicBrainz match; using generic track names.")
+
+    if discstation_host.system_name() == "darwin":
+        _rip_audio_cd_macos(ser, device, chapters, metadata, cover_path, out_dir)
+        return
 
     if not chapters:
         raise RuntimeError("No audio CD tracks found")
@@ -2608,9 +3668,12 @@ def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
 
 
 def station_loop(ser, url, artist_hint=None, album_hint=None):
-    global _last_burn_result, _last_burn_result_time
+    global _last_burn_result, _last_burn_result_time, _tray_open, _tray_open_since
     discstation_burn.cleanup_old_jobs()
-    device = discstation_burn.disc_device()
+    try:
+        device = discstation_burn.disc_device()
+    except Exception:
+        device = None  # empty drive (e.g. macOS after an eject) — keep the loop alive
 
     for _ in range(50):
         line = read_serial_line(ser, timeout=0.2)
@@ -2630,7 +3693,7 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         fut = pool.submit(disc_status_line, device)
         next_disc_line = None
-        probe_deadline = time.time() + 15
+        probe_deadline = time.time() + 25
         while time.time() < probe_deadline:
             if fut.done():
                 try:
@@ -2656,68 +3719,113 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
             show_standby(ser)
             standby = True
     last_disc_poll = time.time()
+    discstation_burn.note_serial_activity()
     last_ping = time.time()
-    last_pong = time.time()
     _disc_poll_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     atexit.register(_disc_poll_pool.shutdown, wait=False)
     _disc_poll_future = None
     _disc_poll_start = 0
 
     def _poll_disc():
-        return disc_status_line(device), None
+        try:
+            current_device = discstation_burn.disc_device()
+        except Exception:
+            return "Disc: none", None  # no drive/media visible right now
+        return disc_status_line(current_device), current_device
+
+    def apply_disc_line(new_line):
+        nonlocal last_disc_line, prev_disc_line, standby
+        if not new_line or new_line == last_disc_line:
+            return
+        prev_disc_line = last_disc_line
+        last_disc_line = new_line
+        send_disc_info(ser, device, new_line)
+        print(new_line)
+        low = new_line.lower()
+        transient = any(w in low for w in ("none", "checking", "reading", "tray open"))
+        if not transient or "blank" in low:
+            prev_empty = prev_disc_line is None or (prev_disc_line and "none" in prev_disc_line.lower())
+            if standby or prev_empty:
+                show_home(ser)
+                standby = False
+        elif not standby:
+            show_standby(ser)
+            standby = True
+
+    last_status_check = 0.0
+    last_status = None
 
     while True:
         now = time.time()
 
+        # --- fast drive-state check (~1.5s), independent of the 5s ping ---------
+        # CDROM_DRIVE_STATUS is a cheap ioctl that reports tray/media state
+        # reliably on this USB bridge (udev's ID_CDROM_MEDIA is stale here).
+        if now - last_status_check >= 1.5:
+            last_status_check = now
+            in_eject_guard = _tray_open and (time.monotonic() - _tray_open_since) < 8
+            if not in_eject_guard:
+                st = drive_status(device)
+                if st == "open":
+                    _tray_open = True
+                    _disc_poll_future = None
+                    apply_disc_line("Disc: Tray open")
+                elif st == "no_disc":
+                    _tray_open = False
+                    _disc_poll_future = None
+                    apply_disc_line("Disc: none")
+                elif st == "loading":
+                    _tray_open = False
+                    if (last_disc_line or "").lower().find("none") >= 0 or last_disc_line is None:
+                        apply_disc_line("Disc: reading...")
+                elif st == "disc":
+                    _tray_open = False
+                    have_line = last_disc_line and not any(
+                        w in last_disc_line.lower()
+                        for w in ("none", "checking", "reading", "tray open"))
+                    if not have_line and _disc_poll_future is None:
+                        _disc_poll_start = now
+                        last_disc_poll = now
+                        _detect_cache.pop(device, None)  # force a fresh classify
+                        _disc_poll_future = _disc_poll_pool.submit(_poll_disc)
+                if st != "unknown":
+                    last_status = st
+
         if now - last_ping >= 5:
             last_ping = now
             safe_send(ser, "PING")
-            if now - last_pong >= 35:
-                raise serial.SerialException("ESP32 not responding")
+            check_serial_alive(ser)
 
-            if _disc_poll_future is None and now - last_disc_poll >= DISC_POLL_SECONDS:
+            # Slow full classify as a backstop (type changes, stuck "reading...").
+            if (not _tray_open and _disc_poll_future is None
+                    and now - last_disc_poll >= DISC_POLL_SECONDS):
                 last_disc_poll = now
                 _disc_poll_start = now
                 _disc_poll_future = _disc_poll_pool.submit(_poll_disc)
 
-            if _disc_poll_future is not None:
-                next_disc_line = None
-                if _disc_poll_future.done():
-                    try:
-                        next_disc_line, _ = _disc_poll_future.result()
-                    except Exception as e:
-                        next_disc_line = "Disc: reading..."
-                        print(f"Disc poll error: {e}")
-                    _disc_poll_future = None
-                elif now - _disc_poll_start > 15:
-                    _disc_poll_future = None
+        if _disc_poll_future is not None:
+            next_disc_line = None
+            if _disc_poll_future.done():
+                try:
+                    next_disc_line, polled_device = _disc_poll_future.result()
+                    if polled_device:
+                        device = polled_device
+                except Exception as e:
                     next_disc_line = "Disc: reading..."
-                    print("Disc poll timed out (async)")
-
-                if next_disc_line is not None and next_disc_line != last_disc_line:
-                    prev_disc_line = last_disc_line
-                    last_disc_line = next_disc_line
-                    send_disc_info(ser, device, next_disc_line)
-                    print(next_disc_line)
-
-                    is_blank = "blank" in next_disc_line.lower()
-                    has_disc = "none" not in next_disc_line.lower() and "checking" not in next_disc_line.lower()
-
-                    if is_blank or has_disc:
-                        prev_empty = prev_disc_line is None or (prev_disc_line and "none" in prev_disc_line.lower())
-                        if standby or prev_empty:
-                            show_home(ser)
-                            standby = False
-                    elif not has_disc and not standby:
-                        show_standby(ser)
-                        standby = True
+                    print(f"Disc poll error: {e}")
+                _disc_poll_future = None
+            elif now - _disc_poll_start > 25:
+                _disc_poll_future = None
+                next_disc_line = "Disc: reading..."
+                print("Disc poll timed out (async)")
+            if not _tray_open:
+                apply_disc_line(next_disc_line)
 
         line = read_serial_line(ser, timeout=0.1)
         if not line:
             continue
 
         if line == "PONG":
-            last_pong = now
             continue
 
         if line.startswith("MENU:"):
@@ -2725,7 +3833,13 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
             continue
 
         if line == "EJECT":
-            device = discstation_burn.disc_device()
+            try:
+                device = discstation_burn.disc_device()
+            except FileNotFoundError:
+                if discstation_host.system_name() == "darwin":
+                    device = None
+                else:
+                    raise
             safe_send(ser, "STATUS:Ejecting...")
             try:
                 eject_disc(ser, device)
@@ -2734,6 +3848,12 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
                 safe_send(ser, "ERROR:Eject failed")
                 time.sleep(2)
                 safe_send(ser, "STANDBY:Error")
+            # eject_disc talks to the OLED directly and may leave the tray in any
+            # state — force station_loop to re-detect from scratch next tick.
+            last_disc_line = None
+            last_status = None
+            last_status_check = 0.0
+            _detect_cache.pop(device, None)
             continue
 
         if not line.startswith("SELECT:"):
@@ -2744,32 +3864,34 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
         mode = line.split(":", 1)[1].strip().upper()
         print(f"Selected: {mode}")
 
-        global _last_burn_result, _last_burn_result_time
+        # The user picked a mode — they want to act on a disc, so the drive is
+        # fair game again even if it was ejected from the OLED earlier.
+        _tray_open = False
         try:
             if mode == "BURN":
-                last_pong = time.time()
                 burn_flow(ser, url)
                 _last_burn_result = "Burn complete"
             elif mode == "PLAY":
                 play_flow(ser)
+            elif mode == "APPLE MUSIC":
+                safe_send(ser, "STATUS:Apple Music handles this audio CD")
+                time.sleep(2)
             elif mode == "RIP":
                 rip_flow(ser, artist_hint, album_hint)
                 _last_burn_result = "Rip complete"
             elif mode == "BURN MPG":
-                last_pong = time.time()
                 burn_mpg_flow(ser)
                 _last_burn_result = "Burn complete"
             elif mode == "BURN DATA":
-                last_pong = time.time()
                 burn_data_flow(ser)
                 _last_burn_result = "Burn complete"
             elif mode == "BURN AUDIO":
-                last_pong = time.time()
                 burn_audio_flow(ser)
                 _last_burn_result = "Burn complete"
             else:
-                safe_send(ser, "ERROR:Bad mode")
-                time.sleep(2)
+                print(f"Ignoring stale menu selection: {mode}")
+                refresh_main_menu(ser)
+                continue
 
         except KeyboardInterrupt:
             raise
@@ -2780,7 +3902,7 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
             time.sleep(4)
 
         _last_burn_result_time = time.time()
-        show_home(ser)
+        refresh_main_menu(ser)
 
 
 PIDFILE = "/tmp/discstation.pid"
@@ -2794,7 +3916,7 @@ def check_pidfile():
             try:
                 os.kill(old_pid, 0)
                 with open(f"/proc/{old_pid}/cmdline") as f:
-                    if "dvd_station" in f.read():
+                    if "discstation" in f.read():
                         print(f"Already running (PID {old_pid}), exiting")
                         sys.exit(0)
             except (OSError, IOError):
@@ -2820,6 +3942,7 @@ def parse_args():
 
 
 def main():
+    global _active_ser, _line_buf
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     check_pidfile()
 
@@ -2841,11 +3964,19 @@ def main():
 
         while True:
             try:
-                ser = serial.Serial(discstation_burn.PORT, discstation_burn.BAUD, timeout=1, write_timeout=1)
-                ser.setDTR(False)
-                time.sleep(0.1)
-                ser.setDTR(True)
+                _line_buf = b""
+                port = discstation_host.serial_port()
+                if not port:
+                    raise serial.SerialException("No ESP32 serial port found")
+                print(f"Using ESP32 serial port: {port}")
+                ser = serial.Serial(port, discstation_burn.BAUD, timeout=1, write_timeout=1)
+                if discstation_host.system_name() == "linux":
+                    ser.setDTR(False)
+                    time.sleep(0.1)
+                    ser.setDTR(True)
                 time.sleep(2)
+                discstation_burn.reset_serial_state()
+                _active_ser = ser
                 station_loop(ser, args.url, args.artist, args.album)
             except (serial.SerialException, OSError, termios.error) as e:
                 print(f"Disconnected ({e}), reconnecting in 3s...")
@@ -2853,6 +3984,7 @@ def main():
             except KeyboardInterrupt:
                 raise
             finally:
+                _active_ser = None
                 if ser:
                     try:
                         ser.close()

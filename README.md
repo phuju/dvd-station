@@ -1,6 +1,7 @@
 # DiscStation
 
-Physical disc burning appliance — standalone DVD/Blu-ray burner with ESP32 remote control.
+DiscStation is a physical-media appliance for DVD-Video, data DVDs, audio CDs,
+playback, ripping, phone uploads, and ESP32 remote control.
 
 ## Hardware
 
@@ -26,25 +27,57 @@ Physical disc burning appliance — standalone DVD/Blu-ray burner with ESP32 rem
 │   ├── discstation.py    # Main orchestrator, serial, web server
 │   └── discstation_burn.py       # Burn pipeline (download, convert, author, burn)
 ├── arduino/
-│   ├── c6/               # ESP32-C6 firmware (current)
-│   └── v1/               # ESP32 V1 firmware (legacy)
-├── systemd/              # discstation.service for auto-start
+│   ├── c6/               # ESP32-C6 firmware
+│   └── v1/               # ESP32 DevKit firmware
+├── docs/                 # Platform support notes
+├── install.sh            # Linux host installer
+├── install-macos.sh      # macOS host bootstrap
+├── install-windows.ps1   # Windows host bootstrap
+├── systemd/              # Linux auto-start unit
 └── README.md
 ```
 
 ## Setup
 
+### Install (any OS)
+
 ```bash
-# Dependencies
-sudo apt install growisofs ffmpeg dvdauthor lsdvd wodim mpv genisoimage python3-serial python3-mutagen python3-requests
+npm install -g discstation
+discstation-setup          # dispatches to the installer for your OS
+```
+
+`discstation-setup --help` lists the forwarded env vars. From a git clone,
+`npm run setup` does the same thing. Support by OS:
+
+| OS | What runs | Optical support |
+|----|-----------|-----------------|
+| Linux | `install.sh` — apt deps, venv, systemd `--user` service, self-signed cert | full burn / rip / play |
+| macOS | `install-macos.sh` — Homebrew deps, venv, launchd agent, cert | experimental (set `DISC_DEVICE` if detection fails) |
+| Windows | `install-windows.ps1` — files + venv | web / serial control only, no burn backend |
+
+### Or run the platform script directly
+
+```bash
+# Linux host
+./install.sh
 
 # Arduino
-# Upload arduino/c6/DVD_Station_C6.ino to ESP32-C6 via Arduino IDE
+arduino-cli lib install QRCode
+# Upload arduino/c6/DiscStation_C6.ino or arduino/v1/DiscStation.ino
+# to the matching ESP32 board
 
-# Systemd
-cp systemd/discstation.service ~/.config/systemd/user/
-systemctl --user enable --now discstation.service
+# macOS host
+./install-macos.sh
+
+# Windows host (web/control workflow)
+PowerShell -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
+
+## Platform Support
+
+Linux currently supports the complete optical workflow. macOS and Windows use
+the shared Python/web workflows, but their native optical burning backends are
+still being implemented. See `docs/PLATFORM_SUPPORT.md`.
 
 ## Web Interface
 
@@ -64,9 +97,31 @@ Built-in web server on port 8080 (HTTPS with self-signed cert):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DVD_SPEED` | auto | Burn speed (e.g. `4x`, `8x`) |
-| `DVD_TARGET_BYTES` | 4300000000 | Target size for AUTO mode |
-| `DVD_CLEANUP_DAYS` | 2 | Auto-cleanup old job directories |
+| `DISC_SPEED` | auto | Burn speed (e.g. `4x`, `8x`) |
+| `DISC_TARGET_BYTES` | 4300000000 | Target size for AUTO mode |
+| `DISC_CLEANUP_DAYS` | 2 | Auto-cleanup old job directories |
+| `DISC_OUTPUT_LIMIT_BYTES` | 4300000000 | Conservative DVD5 payload limit |
+| `DISC_DL_OUTPUT_LIMIT_BYTES` | 8000000000 | Conservative DVD9 payload limit |
+
+### YouTube Download Configuration
+
+The host prefers an embeddable YouTube client and small HTTP chunks to reduce
+current YouTube 403 failures. It falls back to the Android VR client if needed.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `YTDLP_PLAYER_CLIENTS` | `web_embedded,android_vr` | Comma-separated clients tried in order |
+| `YTDLP_HTTP_CHUNK_SIZE` | `1M` | HTTP chunk size for media downloads |
+| `YTDLP_FORMAT` | H.264/AAC up to 720p, then generic MP4 | yt-dlp format selector override |
+| `YTDLP_RETRIES` | `3` | HTTP download retries per client |
+| `YTDLP_FRAGMENT_RETRIES` | `3` | DASH/HLS fragment retries |
+| `YTDLP_COOKIES` | unset | Netscape-format cookies file |
+| `YTDLP_COOKIES_FROM_BROWSER` | unset | Browser source such as `firefox` or `chrome` |
+| `YTDLP_USER_AGENT` | unset | Optional browser user-agent matching the cookies |
+| `YTDLP_PO_TOKEN` | unset | Client/context PO token in yt-dlp format |
+| `YTDLP_EXTRACTOR_ARGS` | unset | Additional yt-dlp extractor arguments |
+
+Cookie files and PO tokens must stay outside the repository and service logs.
 
 ## Modes (Video DVD)
 

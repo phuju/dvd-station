@@ -1,21 +1,19 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include "esp_task_wdt.h"
-#include <WiFi.h>
-#include <ArduinoOTA.h>
+#include <QRCode.h>
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
 #define I2C_ADDRESS   0x3C
 
-#define BTN_SELECT_PIN  14
-#define BTN_UP_PIN      13
-#define BTN_DOWN_PIN    15
-#define LED_POWER_PIN   32
-#define LED_ACT_PIN     33
-#define POT_PIN         34
+#define BTN_SELECT_PIN  21  // D3
+#define BTN_UP_PIN      20  // D9/MISO
+#define BTN_DOWN_PIN    18  // D10/MOSI
+#define LED_POWER_PIN   15  // Built-in user LED
+#define LED_ACT_PIN     16  // D6/TX
+#define POT_PIN          0  // D0/A0 (ADC)
 
 #define DEBOUNCE_MS      50
 #define LONG_PRESS_MS    1000
@@ -28,52 +26,9 @@
 #define MAX_HOME_MODES 5
 #define BURN_COUNT 4
 #define SPEED_COUNT 4
-#define TCP_PORT 2323
 
 int homeCount = 3;
 String homeModes[MAX_HOME_MODES] = {"BURN", "PLAY", "RIP"};
-
-WiFiServer tcpServer(TCP_PORT);
-WiFiClient tcpClient;
-bool wifiConnected = false;
-bool wifiInitDone = false;
-
-class DualPrint : public Print {
-public:
-  void setClient(WiFiClient* c) { _client = c; }
-  size_t write(uint8_t c) override {
-    Serial.write(c);
-    if (_client && _client->connected()) _client->write(c);
-    return 1;
-  }
-  size_t write(const uint8_t* buf, size_t len) override {
-    Serial.write(buf, len);
-    if (_client && _client->connected()) _client->write(buf, len);
-    return len;
-  }
-private:
-  WiFiClient* _client = nullptr;
-} Out;
-
-void initWiFi() {
-  Out.print("WiFi Tez...");
-  WiFi.mode(WIFI_STA);
-  WiFi.begin("Tez", "Dellwin8#$");
-  for (int i = 0; i < 80; i++) {
-    if (WiFi.status() == WL_CONNECTED) break;
-    delay(250);
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    tcpServer.begin();
-    ArduinoOTA.begin();
-    ArduinoOTA.setHostname("dvd-station-v1");
-    ArduinoOTA.setPassword("dvdstation");
-    Out.print(" OK "); Out.println(WiFi.localIP());
-  } else {
-    Out.println(" fail");
-  }
-}
 String discName = "";
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
@@ -88,7 +43,8 @@ enum UiState {
   UI_STANDBY,
   UI_WAITING,
   UI_IP,
-  UI_DISCONNECTED
+  UI_DISCONNECTED,
+  UI_LOADING
 };
 
 const char* BURN_MODES[BURN_COUNT] = {"AUTO", "BEST", "LONG", "TEST"};
@@ -105,6 +61,9 @@ String line2 = "";
 String line3 = "";
 String waitingLine1 = "";
 String waitingLine2 = "";
+String loadingLine = "";
+int loadingDots = 0;
+unsigned long lastLoadingAnim = 0;
 int progressPercent = -1;
 
 bool displayOk = false;
@@ -113,26 +72,21 @@ unsigned long playStatusAt = 0;
 bool playStatusTemp = false;
 unsigned long lastPotRead = 0;
 
-// Select button state
 unsigned long selectDownAt = 0;
 bool selectDown = false;
 unsigned long selectLastDebounce = 0;
 
-// Up button state
 unsigned long upDownAt = 0;
 bool upDown = false;
 unsigned long upLastDebounce = 0;
 
-// Down button state
 unsigned long downDownAt = 0;
 bool downDown = false;
 unsigned long downLastDebounce = 0;
 
-// FF/REW speed state (used by UP/DOWN during playback)
 int ffSpeedIndex = 0;
 int rewSpeedIndex = 0;
 
-// LED state
 bool actLedState = false;
 unsigned long lastLedBlink = 0;
 int homeIndex = 0;
@@ -143,9 +97,9 @@ int playVolume = 50;
 unsigned long standbyStartTime = 0;
 unsigned long lastMsgTime = 0;
 bool displayBlank = false;
+bool audioPlayMode = false;
 int displayRotation = 0;
 
-// Indeterminate progress animation
 int indeterminateCount = 0;
 unsigned long lastIndeterminateAnim = 0;
 
@@ -162,27 +116,47 @@ int readPercent() {
   int pct = raw * 100 / 4095;
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
-  return pct;
+  return ((pct + 2) / 5) * 5;
 }
 
 void sendHomeMode() {
   if (homeIndex >= 0 && homeIndex < homeCount) {
-    Out.print("MENU:");
-    Out.println(homeModes[homeIndex]);
+    Serial.print("MENU:");
+    Serial.println(homeModes[homeIndex]);
   }
 }
 
 void sendBurnMode() {
-  Out.print("MODE:");
-  Out.println(BURN_MODES[burnModeIndex]);
+  Serial.print("MODE:");
+  Serial.println(BURN_MODES[burnModeIndex]);
+}
+
+void printUpper(String value) {
+  value.toUpperCase();
+  display.print(value);
+}
+
+void drawChrome() {
+  display.setRotation(displayRotation);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.drawLine(0, 0, 4, 0, SSD1306_WHITE);
+  display.drawLine(0, 0, 0, 4, SSD1306_WHITE);
+  display.drawLine(123, 0, 127, 0, SSD1306_WHITE);
+  display.drawLine(127, 0, 127, 4, SSD1306_WHITE);
+  display.drawLine(0, 63, 4, 63, SSD1306_WHITE);
+  display.drawLine(0, 59, 0, 63, SSD1306_WHITE);
+  display.drawLine(123, 63, 127, 63, SSD1306_WHITE);
+  display.drawLine(127, 59, 127, 63, SSD1306_WHITE);
 }
 
 void drawHeader() {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
+  drawChrome();
   display.setCursor(4, 0);
-  display.print("DVD STATION");
-  display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+  display.print("DISCSTATION // PANEL");
+  display.drawLine(6, 10, 121, 10, SSD1306_WHITE);
 }
 
 void drawHome() {
@@ -191,18 +165,17 @@ void drawHome() {
   if (!displayOk) return;
 
   display.clearDisplay();
-  display.setRotation(displayRotation);
   drawHeader();
 
   int y = 14;
   if (discName.length() > 0) {
     display.setTextSize(1);
     display.setCursor(2, y);
-    display.print(discName);
+    printUpper(discName);
     y += 10;
   } else {
     display.setCursor(2, y);
-    display.print(discLine);
+    printUpper(discLine);
     y += 10;
   }
 
@@ -210,7 +183,7 @@ void drawHome() {
     display.setCursor(2, y);
     display.print(i == homeIndex ? ">" : " ");
     display.setCursor(14, y);
-    display.print(homeModes[i]);
+    printUpper(homeModes[i]);
     y += 10;
   }
 
@@ -223,17 +196,16 @@ void drawBurnReady() {
   if (!displayOk) return;
 
   display.clearDisplay();
-  display.setRotation(displayRotation);
   drawHeader();
 
   display.setCursor(2, 14);
-  display.print(titleLine);
+  printUpper(titleLine);
 
   display.setCursor(2, 25);
-  display.print(metaLine);
+  printUpper(metaLine);
 
   display.setCursor(2, 37);
-  display.print(fitLine);
+  printUpper(fitLine);
 
   display.setCursor(2, 49);
   display.print(editingSpeed ? ' ' : '>');
@@ -246,7 +218,7 @@ void drawBurnReady() {
   display.print(SPEED_MODES[burnSpeedIndex]);
 
   display.setCursor(2, 57);
-  display.print("Long SELECT=Go");
+  display.print("HOLD SELECT // GO");
 
   display.display();
 }
@@ -257,17 +229,16 @@ void drawWaiting() {
   if (!displayOk) return;
 
   display.clearDisplay();
-  display.setRotation(displayRotation);
   drawHeader();
 
   display.setCursor(2, 16);
-  display.print(waitingLine1);
+  printUpper(waitingLine1);
 
   display.setCursor(2, 30);
-  display.print(waitingLine2);
+  printUpper(waitingLine2);
 
   display.setCursor(2, 49);
-  display.print("Short=Go Long=Back");
+  display.print("SHORT // GO");
 
   display.display();
 }
@@ -277,15 +248,14 @@ void drawStatus() {
   if (!displayOk) return;
 
   display.clearDisplay();
-  display.setRotation(displayRotation);
   drawHeader();
 
   display.setCursor(2, 16);
-  display.print(line1);
+  printUpper(line1);
   display.setCursor(2, 30);
-  display.print(line2);
+  printUpper(line2);
   display.setCursor(2, 44);
-  display.print(line3);
+  printUpper(line3);
 
   if (progressPercent >= 0) {
     int barW = map(progressPercent, 0, 100, 0, 124);
@@ -294,16 +264,39 @@ void drawStatus() {
       display.fillRect(2, 54, barW, 8, SSD1306_WHITE);
     }
   } else {
-    // Indeterminate progress — draw cycling dots
     String dots = "";
     for (int i = 0; i < indeterminateCount; i++) dots += ".";
     display.setCursor(2, 56);
     display.print(dots);
-    display.setCursor(70, 56);
-    display.print("Hold=Back");
   }
 
   display.display();
+}
+
+void drawQrCode(String value) {
+  drawChrome();
+  QRCode qr;
+  uint8_t qrData[qrcode_getBufferSize(2)];
+  if (qrcode_initText(&qr, qrData, 2, ECC_LOW, value.c_str()) < 0) {
+    display.setCursor(2, 25);
+    display.print("QR ERROR // USE URL");
+    return;
+  }
+  const int scale = 2;
+  const int quiet = 2;
+  const int pixels = qr.size * scale;
+  const int left = (SCREEN_WIDTH - pixels) / 2;
+  const int top = 2;
+  display.fillRect(left - quiet, top - quiet, pixels + quiet * 2, pixels + quiet * 2, SSD1306_WHITE);
+  for (uint8_t y = 0; y < qr.size; y++) {
+    for (uint8_t x = 0; x < qr.size; x++) {
+      if (qrcode_getModule(&qr, x, y)) {
+        display.fillRect(left + x * scale, top + y * scale, scale, scale, SSD1306_BLACK);
+      }
+    }
+  }
+  display.setCursor(2, 57);
+  display.print("SCAN // DISCSTATION");
 }
 
 void drawIP() {
@@ -312,19 +305,7 @@ void drawIP() {
   if (!displayOk) return;
 
   display.clearDisplay();
-  display.setRotation(displayRotation);
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(4, 8);
-  display.print("Open on phone:");
-
-  display.setTextSize(1);
-  display.setCursor(4, 22);
-  display.print(ipUrl);
-
-  display.setTextSize(1);
-  display.setCursor(4, 52);
-  display.print("Hold=Back");
+  drawQrCode(ipUrl);
 
   display.display();
 }
@@ -337,17 +318,11 @@ void drawStandby() {
   if (!displayOk) return;
 
   display.clearDisplay();
-  display.setRotation(displayRotation);
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(2);
-  display.setCursor(4, 10);
-  display.print("DVD");
-  display.setTextSize(1);
-  display.setCursor(4, 30);
-  display.print("S T A T I O N");
-  display.drawLine(0, 42, 127, 42, SSD1306_WHITE);
-  display.setCursor(4, 50);
-  display.print("Standby");
+  drawHeader();
+  display.setCursor(2, 25);
+  display.print("STANDBY // READY");
+  display.setCursor(2, 40);
+  display.print("INSERT MEDIA");
   display.display();
 }
 
@@ -358,17 +333,34 @@ void drawDisconnected() {
   if (!displayOk) return;
 
   display.clearDisplay();
-  display.setRotation(displayRotation);
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(2);
-  display.setCursor(4, 10);
-  display.print("DVD");
+  drawHeader();
+  display.setCursor(2, 25);
+  display.print("DISCONNECTED // LINK");
+  display.setCursor(2, 40);
+  display.print("CHECK USB");
+  display.display();
+}
+
+void drawLoading() {
+  uiState = UI_LOADING;
+  returnToHomeAt = 0;
+  displayBlank = false;
+  if (!displayOk) return;
+
+  display.clearDisplay();
+  drawHeader();
+
   display.setTextSize(1);
-  display.setCursor(4, 30);
-  display.print("S T A T I O N");
-  display.drawLine(0, 42, 127, 42, SSD1306_WHITE);
-  display.setCursor(4, 50);
-  display.print("Disconnected");
+  display.setCursor(2, 18);
+  printUpper(loadingLine);
+
+  String dots = "";
+  for (int i = 0; i < loadingDots; i++) dots += ".";
+  display.setCursor(2, 32);
+  display.print(dots);
+  display.setCursor(70, 32);
+  display.print("LOADING //");
+
   display.display();
 }
 
@@ -385,6 +377,7 @@ void wakeDisplay() {
     case UI_WAITING: drawWaiting(); break;
     case UI_STANDBY: drawStandby(); break;
     case UI_DISCONNECTED: drawDisconnected(); break;
+    case UI_LOADING: drawLoading(); break;
   }
 }
 
@@ -394,19 +387,20 @@ void drawPlay() {
   if (!displayOk) return;
 
   display.clearDisplay();
-  display.setRotation(displayRotation);
   drawHeader();
 
   display.setCursor(2, 16);
-  display.print(line1);
+  printUpper(line1);
   display.setCursor(2, 30);
-  display.print(line2);
+  printUpper(line2);
   display.setCursor(2, 44);
-  display.print("Vol ");
+  display.print("VOL // ");
   display.print(playVolume);
   display.print("%");
-  display.setCursor(2, 56);
-  display.print("Button: pause/play");
+  if (!audioPlayMode) {
+    display.setCursor(2, 56);
+    display.print("SELECT // PLAY");
+  }
 
   display.display();
 }
@@ -416,7 +410,7 @@ void parseMessage(String msg) {
 
   if (msg == "PING") {
     lastMsgTime = millis();
-    Out.println("PONG");
+    Serial.println("PONG");
     if (uiState == UI_DISCONNECTED) drawStandby();
     return;
   }
@@ -424,8 +418,8 @@ void parseMessage(String msg) {
   wakeDisplay();
   lastMsgTime = millis();
 
-  Out.print("RCV:");
-  Out.println(msg);
+  Serial.print("RCV:");
+  Serial.println(msg);
 
   if (msg.startsWith("HOME:")) {
     homeIndex = readBucket(homeCount);
@@ -481,9 +475,14 @@ void parseMessage(String msg) {
     playVolume = readPercent();
     drawPlay();
 
+  } else if (msg.startsWith("PLAY_MODE:")) {
+    audioPlayMode = msg.substring(10) == "AUDIO_CD";
+    drawPlay();
+
   } else if (msg.startsWith("PLAY_STATUS:")) {
     line1 = msg.substring(12);
-    if (line1 == "PLAYING" || line1 == "PAUSED") {
+    if (line1.length() > 20) line1 = line1.substring(0, 20);
+    if (line1 == "PLAYING" || line1 == "PAUSED" || (audioPlayMode && line1.startsWith("TRACK "))) {
       playStatusTemp = false;
     } else {
       playStatusAt = millis();
@@ -571,13 +570,31 @@ void parseMessage(String msg) {
   } else if (msg.startsWith("IP:")) {
     ipUrl = msg.substring(3);
     drawIP();
+
+  } else if (msg.startsWith("LOADING:")) {
+    loadingLine = msg.substring(8);
+    loadingDots = 0;
+    lastLoadingAnim = millis();
+    drawLoading();
+
+  } else if (msg.startsWith("NO_DISC:")) {
+    line1 = msg.substring(8);
+    line2 = "";
+    line3 = "";
+    progressPercent = -1;
+    drawStatus();
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  esp_task_wdt_add(NULL);
-  Wire.begin(21, 22);
+  Wire.begin(22, 23);
+
+  pinMode(3, OUTPUT);
+  digitalWrite(3, LOW);
+  pinMode(14, OUTPUT);
+  digitalWrite(14, LOW);
+
   pinMode(BTN_SELECT_PIN, INPUT_PULLUP);
   pinMode(BTN_UP_PIN, INPUT_PULLUP);
   pinMode(BTN_DOWN_PIN, INPUT_PULLUP);
@@ -587,7 +604,6 @@ void setup() {
   digitalWrite(LED_ACT_PIN, LOW);
   pinMode(POT_PIN, INPUT);
   analogReadResolution(12);
-  analogSetPinAttenuation(POT_PIN, ADC_11db);
 
   homeIndex = readBucket(homeCount);
   burnModeIndex = readBucket(BURN_COUNT);
@@ -596,13 +612,12 @@ void setup() {
   displayOk = display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS);
 
   if (displayOk) {
-    Out.println("Display OK");
+    Serial.println("Display OK");
   } else {
-    Out.println("Display FAILED");
+    Serial.println("Display FAILED");
     delay(3000);
   }
 
-  // Blink activity LED 3x to confirm it works
   for (int i = 0; i < 3; i++) {
     digitalWrite(LED_ACT_PIN, HIGH);
     delay(150);
@@ -612,22 +627,22 @@ void setup() {
 
   drawStandby();
   lastMsgTime = millis();
-  Out.println("DVD_STATION_READY");
+  Serial.println("DISCSTATION_READY");
 }
 
 void handleSelectPress(bool longPress) {
   wakeDisplay();
   if (uiState == UI_HOME) {
     if (longPress) {
-      Out.println("EJECT");
+      Serial.println("EJECT");
       line1 = "Ejecting...";
       line2 = "";
       line3 = "";
       returnToHomeAt = millis() + 5000;
       drawStatus();
     } else if (homeIndex >= 0 && homeIndex < homeCount) {
-      Out.print("SELECT:");
-      Out.println(homeModes[homeIndex]);
+      Serial.print("SELECT:");
+      Serial.println(homeModes[homeIndex]);
       line1 = "Selected";
       line2 = homeModes[homeIndex];
       line3 = "";
@@ -635,7 +650,7 @@ void handleSelectPress(bool longPress) {
     }
 
   } else if (uiState == UI_STANDBY) {
-    Out.println("EJECT");
+    Serial.println("EJECT");
     line1 = "Ejecting...";
     line2 = "";
     line3 = "";
@@ -643,21 +658,20 @@ void handleSelectPress(bool longPress) {
     drawStatus();
 
   } else if (uiState == UI_STATUS && line1 == "Ejecting...") {
-    // Manual escape if stuck on eject screen with no app response
     drawStandby();
 
   } else if (uiState == UI_IP) {
     if (longPress) {
-      Out.println("CANCEL");
+      Serial.println("CANCEL");
       drawHome();
     }
 
   } else if (uiState == UI_WAITING) {
     if (longPress) {
-      Out.println("CANCEL");
+      Serial.println("CANCEL");
       drawHome();
     } else {
-      Out.println("CONFIRM");
+      Serial.println("CONFIRM");
       line1 = "Confirmed!";
       line2 = "";
       line3 = "";
@@ -666,8 +680,8 @@ void handleSelectPress(bool longPress) {
 
   } else if (uiState == UI_BURN_READY) {
     if (longPress) {
-      Out.print("START:");
-      Out.println(BURN_MODES[burnModeIndex]);
+      Serial.print("START:");
+      Serial.println(BURN_MODES[burnModeIndex]);
       line1 = "Starting...";
       line2 = BURN_MODES[burnModeIndex];
       line3 = "";
@@ -679,7 +693,7 @@ void handleSelectPress(bool longPress) {
 
   } else if (uiState == UI_STATUS) {
     if (longPress) {
-      Out.println("CANCEL");
+      Serial.println("CANCEL");
       line1 = "Cancelling...";
       line2 = "";
       line3 = "";
@@ -687,19 +701,16 @@ void handleSelectPress(bool longPress) {
     }
 
   } else if (uiState == UI_DISCONNECTED) {
-    Out.println("CANCEL");
+    Serial.println("CANCEL");
     drawStandby();
 
-  } else if (uiState == UI_STANDBY) {
-    displayRotation = 2;
-    drawStandby();
   } else if (uiState == UI_PLAY) {
     ffSpeedIndex = 0;
     rewSpeedIndex = 0;
     if (longPress) {
-      Out.println("PLAY_STOP");
+      Serial.println("PLAY_STOP");
     } else {
-      Out.println("PLAY_BUTTON");
+      Serial.println("PLAY_BUTTON");
     }
   }
 }
@@ -715,26 +726,27 @@ void handleUp(bool longPress) {
   } else if (uiState == UI_BURN_READY) {
     if (editingSpeed) {
       burnSpeedIndex = (burnSpeedIndex - 1 + SPEED_COUNT) % SPEED_COUNT;
-      Out.print("SPEED:");
-      Out.println(SPEED_MODES[burnSpeedIndex]);
+      Serial.print("SPEED:");
+      Serial.println(SPEED_MODES[burnSpeedIndex]);
       drawBurnReady();
     } else {
       burnModeIndex = (burnModeIndex - 1 + BURN_COUNT) % BURN_COUNT;
       sendBurnMode();
       drawBurnReady();
     }
-  } else if (uiState == UI_STANDBY) {
-    displayRotation = 0;
-    drawStandby();
   } else if (uiState == UI_PLAY) {
+    if (audioPlayMode) {
+      Serial.println(displayRotation == 0 ? (longPress ? "REW:BIG" : "REW:10") : (longPress ? "FF:BIG" : "FF:10"));
+      return;
+    }
     rewSpeedIndex = 0;
     if (longPress) {
-      Out.println("FF:BIG");
+      Serial.println("FF:BIG");
     } else {
       ffSpeedIndex = (ffSpeedIndex + 1) % 4;
       int seek_sec[] = {10, 20, 30, 60};
-      Out.print("FF:");
-      Out.println(seek_sec[ffSpeedIndex]);
+      Serial.print("FF:");
+      Serial.println(seek_sec[ffSpeedIndex]);
     }
   }
 }
@@ -750,53 +762,32 @@ void handleDown(bool longPress) {
   } else if (uiState == UI_BURN_READY) {
     if (editingSpeed) {
       burnSpeedIndex = (burnSpeedIndex + 1) % SPEED_COUNT;
-      Out.print("SPEED:");
-      Out.println(SPEED_MODES[burnSpeedIndex]);
+      Serial.print("SPEED:");
+      Serial.println(SPEED_MODES[burnSpeedIndex]);
       drawBurnReady();
     } else {
       burnModeIndex = (burnModeIndex + 1) % BURN_COUNT;
       sendBurnMode();
       drawBurnReady();
     }
-  } else if (uiState == UI_STANDBY) {
-    displayRotation = 2;
-    drawStandby();
   } else if (uiState == UI_PLAY) {
+    if (audioPlayMode) {
+      Serial.println(displayRotation == 0 ? (longPress ? "FF:BIG" : "FF:10") : (longPress ? "REW:BIG" : "REW:10"));
+      return;
+    }
     ffSpeedIndex = 0;
     if (longPress) {
-      Out.println("REW:BIG");
+      Serial.println("REW:BIG");
     } else {
       rewSpeedIndex = (rewSpeedIndex + 1) % 4;
       int seek_sec[] = {10, 20, 30, 60};
-      Out.print("REW:");
-      Out.println(seek_sec[rewSpeedIndex]);
+      Serial.print("REW:");
+      Serial.println(seek_sec[rewSpeedIndex]);
     }
   }
 }
 
 void loop() {
-  if (!wifiInitDone && millis() > 3000) {
-    wifiInitDone = true;
-    initWiFi();
-  }
-  if (wifiConnected) {
-    ArduinoOTA.handle();
-    if (tcpServer.hasClient()) {
-      if (tcpClient) tcpClient.stop();
-      tcpClient = tcpServer.available();
-      Out.setClient(&tcpClient);
-    }
-    if (tcpClient && !tcpClient.connected()) {
-      tcpClient.stop();
-      Out.setClient(nullptr);
-    }
-    if (tcpClient && tcpClient.available()) {
-      String msg = tcpClient.readStringUntil('\n');
-      if (msg.length() > 0) parseMessage(msg);
-    }
-  }
-
-  esp_task_wdt_reset();
   if (Serial.available()) {
     String msg = Serial.readStringUntil('\n');
     parseMessage(msg);
@@ -812,19 +803,17 @@ void loop() {
     drawPlay();
   }
 
-  // --- Pot reading (PLAY only, volume) ---
   if (uiState == UI_PLAY && millis() - lastPotRead > POT_READ_MS) {
     lastPotRead = millis();
     int nextVolume = readPercent();
     if (abs(nextVolume - playVolume) >= 3) {
       playVolume = nextVolume;
-      Out.print("POT:");
-      Out.println(playVolume);
+      Serial.print("POT:");
+      Serial.println(playVolume);
       drawPlay();
     }
   }
 
-  // --- SELECT button ---
   {
     bool sel = digitalRead(BTN_SELECT_PIN) == LOW;
     if (sel && !selectDown && millis() - selectLastDebounce > DEBOUNCE_MS) {
@@ -838,7 +827,6 @@ void loop() {
     }
   }
 
-  // --- UP button ---
   {
     bool up = digitalRead(BTN_UP_PIN) == LOW;
     if (up && !upDown && millis() - upLastDebounce > DEBOUNCE_MS) {
@@ -855,7 +843,6 @@ void loop() {
     }
   }
 
-  // --- DOWN button ---
   {
     bool dn = digitalRead(BTN_DOWN_PIN) == LOW;
     if (dn && !downDown && millis() - downLastDebounce > DEBOUNCE_MS) {
@@ -872,7 +859,6 @@ void loop() {
     }
   }
 
-  // --- Indeterminate progress animation ---
   if (uiState == UI_STATUS && progressPercent < 0 &&
       millis() - lastIndeterminateAnim > 500) {
     lastIndeterminateAnim = millis();
@@ -880,7 +866,12 @@ void loop() {
     if (!displayBlank) drawStatus();
   }
 
-  // --- Standby blanking ---
+  if (uiState == UI_LOADING && millis() - lastLoadingAnim > 400) {
+    lastLoadingAnim = millis();
+    loadingDots = (loadingDots % 4) + 1;
+    if (!displayBlank) drawLoading();
+  }
+
   if (displayOk && uiState == UI_STANDBY && !displayBlank &&
       (long)(millis() - standbyStartTime) >= STANDBY_BLANK_MS) {
     display.ssd1306_command(0xAE);
@@ -891,13 +882,11 @@ void loop() {
     digitalWrite(LED_POWER_PIN, HIGH);
   }
 
-  // --- PING timeout (disconnected) ---
   if (uiState != UI_DISCONNECTED &&
       (long)(millis() - lastMsgTime) >= PING_TIMEOUT_MS) {
     drawDisconnected();
   }
 
-  // --- Activity LED ---
   {
     bool ledOn = false;
     if (uiState == UI_BURN_READY || uiState == UI_PLAY || uiState == UI_WAITING || uiState == UI_IP) {
@@ -913,7 +902,7 @@ void loop() {
       } else {
         ledOn = true;
       }
-    } else if (uiState == UI_HOME || uiState == UI_STANDBY) {
+    } else if (uiState == UI_HOME || uiState == UI_STANDBY || uiState == UI_LOADING) {
       ledOn = false;
     } else if (uiState == UI_DISCONNECTED) {
       ledOn = true;

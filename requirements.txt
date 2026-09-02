@@ -1,0 +1,5 @@
+# Core DiscStation host dependencies — must install.
+pyserial>=3.5
+mutagen>=1.45
+requests>=2.28
+yt-dlp>=2024.1.1

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f0ede4">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="stylesheet" href="/static/style.css">
+  <title>DiscStation // Physical Media</title>
+</head>
+<body>
+  <div class="page-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="DiscStation home">
+        <span class="brand-mark">DS</span>
+        <span>DISCSTATION</span>
+      </a>
+      <div class="topbar-actions">
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch to dark mode">&#x263E;</button>
+        <div class="connection" aria-live="polite">
+          <span id="connection-dot" class="connection-dot checking"></span>
+          <span id="connection-label">LINK: CHECKING</span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="capability-strip section-rule">
+        <div><strong>01</strong><span>VIDEO DVD</span></div>
+        <div><strong>02</strong><span>DATA DVD</span></div>
+        <div><strong>03</strong><span>AUDIO CD</span></div>
+        <div><strong>04</strong><span>RIP / PLAY</span></div>
+      </section>
+
+      <section class="burn-panel section-rule" aria-labelledby="burn-title">
+        <div class="panel-heading">
+          <div>
+            <div class="section-kicker">NEW BURN</div>
+            <h2 id="burn-title">LOAD THE MEDIA</h2>
+          </div>
+          <span class="panel-index">DISCSTN-01</span>
+        </div>
+
+        <div class="tabs" role="tablist" aria-label="Burn source">
+          <button class="tab active" type="button" data-tab="url" role="tab" aria-selected="true">URL / PATH</button>
+          <button class="tab" type="button" data-tab="upload" role="tab" aria-selected="false">UPLOAD FILES</button>
+        </div>
+        <div id="global-progress" class="global-progress" hidden>
+          <div><span id="progress-phase">READY</span><span id="progress-value">--</span></div>
+          <div class="progress-track"><span id="progress-fill"></span></div>
+        </div>
+
+        <div id="tab-url" class="tab-panel active" role="tabpanel">
+          <p class="field-note">YouTube URL, search term, or local path for a video DVD.</p>
+          <form id="url-form" action="/" method="post">
+            <label class="sr-only" for="url-input">URL or local path</label>
+            <input id="url-input" class="url-input" name="url" type="text" autocomplete="off" placeholder="https://... or /path/to/file" required>
+            <button class="black-button" type="submit">BURN TO DISC <span>//</span></button>
+          </form>
+        </div>
+
+        <div id="tab-upload" class="tab-panel" role="tabpanel" hidden>
+          <p class="field-note">Select files or complete folders. The folder structure is retained on a data disc.</p>
+          <div class="disc-meter" id="disc-meter" hidden>
+            <div><span id="disc-type">DISC: CHECKING</span><span id="disc-space">0.0 / 0.0 GB</span></div>
+            <div class="meter-track"><span id="disc-fill"></span></div>
+          </div>
+          <div class="dropzone" id="dropzone">
+            DROP FILES OR FOLDERS HERE
+          </div>
+          <div class="picker-row">
+            <button class="outline-button" type="button" id="file-picker">ADD FILES</button>
+            <button class="outline-button" type="button" id="folder-picker">ADD FOLDER</button>
+          </div>
+          <input id="file-input" type="file" multiple hidden>
+          <input id="folder-input" type="file" webkitdirectory directory multiple hidden>
+          <div id="selection-list" class="selection-list" aria-live="polite">
+            <div class="empty-selection">NO MEDIA SELECTED</div>
+          </div>
+          <label class="field-label" for="disc-label">DISC LABEL</label>
+          <input id="disc-label" class="text-input" type="text" maxlength="32" placeholder="DISCSTATION_ARCHIVE">
+          <div id="selection-summary" class="selection-summary">0 FILES // 0 FOLDERS</div>
+          <button class="black-button" type="button" id="upload-button" disabled>UPLOAD TO DISC <span>//</span></button>
+        </div>
+        <div id="form-message" class="form-message" role="status" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <section class="footer-note section-rule">
+      <div class="eyebrow">DISCSTATION // CONTROL SURFACE</div>
+      <div class="footer-note-title">PHYSICAL MEDIA,<br><em>ENGINEERED.</em></div>
+      <p>A compact authoring and archival instrument for discs that still deserve a place on the shelf.</p>
+      <div class="hero-specs">
+        <span>MODEL: ESP32 DEVKIT V1</span>
+        <span>REF: DISCSTN-01</span>
+        <span>REV: 001</span>
+      </div>
+    </section>
+
+    <footer class="footer-stamp section-rule">
+      <div><span class="stamp-label">SYSTEM:</span> <span id="live-status">READY</span></div>
+      <div>DISCSTATION // REV 001</div>
+    </footer>
+  </div>
+  <div id="install-slot"></div>
+  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=5").catch(() => {});</script>
+  <script src="/static/app.js?v=5" defer></script>
+</body>
+</html>

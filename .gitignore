@@ -26,3 +26,7 @@ arduino/**/bootloader/
 # Runtime
 /tmp/
 .cache/
+
+# Mobile app
+mobile/node_modules/
+mobile/.expo/

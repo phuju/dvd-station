@@ -2,9 +2,7 @@
 import datetime
 import json
 import os
-import pwd
 import re
-import select
 import serial
 import shutil
 import subprocess
@@ -13,30 +11,156 @@ import threading
 import time
 import unicodedata
 from pathlib import Path
+from queue import Empty, Queue
+
+import discstation_host
 
 CLEANUP_DAYS = int(os.environ.get("DISC_CLEANUP_DAYS", "2"))
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return int(default)
 
 
 class CancelError(Exception):
     pass
 
 
-def reset_drive(device="/dev/sr0"):
-    for path in Path("/sys/bus/usb/devices").glob("*/authorized"):
+SERIAL_WRITE_LOCK = threading.Lock()
+
+# Shared "last time we actually heard from the ESP32" timestamp. Every place
+# that reads a line off the serial port (station_loop's main loop, eject's
+# tray-wait loop, burn/rip/play sub-loops, wait_for_burn_confirm, etc.) marks
+# this on receipt of ANY line. The main watchdog in station_loop checks the
+# age of this shared value instead of a loop-local variable, so a long
+# blocking call (e.g. waiting up to 60s for the user to close the tray)
+# can't make the watchdog think the ESP32 went silent the instant that call
+# returns, even though it was responding the whole time.
+_SERIAL_ACTIVITY_LOCK = threading.Lock()
+_last_serial_activity = time.monotonic()
+_serial_write_failed = False
+
+
+def note_serial_activity():
+    global _last_serial_activity
+    with _SERIAL_ACTIVITY_LOCK:
+        _last_serial_activity = time.monotonic()
+
+
+def serial_activity_age():
+    with _SERIAL_ACTIVITY_LOCK:
+        return time.monotonic() - _last_serial_activity
+
+
+def reset_serial_state():
+    global _serial_write_failed
+    _serial_write_failed = False
+    note_serial_activity()
+
+
+def serial_write_failed():
+    return _serial_write_failed
+
+
+_USB_OPTICAL_TOKENS = (
+    "slim", "dvd", "mediatek", "asus", "sdrw", "yzwy", "disk",
+    "ugreen", "asmedia", "ihas", "atapi", "optiarc", "lite-on", "liteon",
+    "hl-dt-st", "tsstcorp", "pioneer", "plextor", "nec", "bd-re", "blu-ray",
+    "sata bridge", "storage device", "external", "optical",
+)
+_USB_OPTICAL_VIDS = {"174c", "152d", "0480", "1c6b", "13fd", "04e8", "05e3", "357d"}
+
+
+def _read_attr(directory, name):
+    try:
+        return (directory / name).read_text().strip()
+    except OSError:
+        return ""
+
+
+def _run_usb_reset_hook(hook, device, vid, pid, busnode):
+    cmd = hook.format(dev=device, vid=vid, pid=pid, busnode=str(busnode))
+    print(f"reset_drive: running DISCSTATION_USB_RESET_CMD: {cmd}")
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"reset_drive: hook failed: {e}")
+        return False
+    if r.returncode != 0:
+        print(f"reset_drive: hook exited {r.returncode}: {r.stderr.strip()}")
+        return False
+    time.sleep(6)
+    return True
+
+
+def _toggle_usb_authorized(auth_path, label):
+    try:
+        with open(auth_path, "w") as f:
+            f.write("0\n")
+        time.sleep(2)
+        with open(auth_path, "w") as f:
+            f.write("1\n")
+        time.sleep(6)
+        print(f"reset_drive: re-authorized USB node {auth_path.parent} ({label})")
+        return True
+    except PermissionError:
+        user = os.environ.get("USER", "the service user")
+        print(f"reset_drive: no permission to re-authorize USB node {auth_path.parent} "
+              f"({label}); install a udev rule granting '{user}' write access to that "
+              f"node's 'authorized', or set DISCSTATION_USB_RESET_CMD to a privileged helper")
+        return False
+    except OSError as e:
+        print(f"reset_drive: failed to toggle {auth_path}: {e}")
+        return False
+
+
+def reset_drive(device=None):
+    """Power-cycle the USB optical enclosure by toggling its sysfs 'authorized'
+    flag (or via DISCSTATION_USB_RESET_CMD). Best-effort; returns True on a
+    completed toggle/hook, False otherwise."""
+    if discstation_host.system_name() != "linux":
+        return False
+    if not device:
         try:
-            target = path.parent / "product"
-            if target.is_file():
-                prod = target.read_text().strip()
-                if "Slim" in prod or "DVD" in prod or "MediaTek" in prod or "ASUS" in prod or "SDRW" in prod or "YzWy" in prod or "Disk" in prod:
-                    with open(path, "w") as f:
-                        f.write("0\n")
-                    time.sleep(2)
-                    with open(path, "w") as f:
-                        f.write("1\n")
-                    time.sleep(6)
-                    return True
-        except (OSError, PermissionError):
-            pass
+            device = disc_device()
+        except Exception:
+            device = "/dev/sr0"
+    hook = os.environ.get("DISCSTATION_USB_RESET_CMD")
+
+    # Primary: walk sysfs up from the block device to its USB device node.
+    try:
+        cur = (Path("/sys/block") / Path(device).name / "device").resolve()
+        for _ in range(12):
+            if (cur / "idVendor").is_file() and (cur / "authorized").is_file():
+                vid = _read_attr(cur, "idVendor")
+                pid = _read_attr(cur, "idProduct")
+                label = f"{vid}:{pid} {_read_attr(cur, 'product')!r}"
+                if hook:
+                    return _run_usb_reset_hook(hook, device, vid, pid, cur)
+                return _toggle_usb_authorized(cur / "authorized", label)
+            if cur.parent == cur or str(cur) in ("/sys", "/"):
+                break
+            cur = cur.parent
+    except OSError:
+        pass
+
+    # Fallback: scan every USB device, match on identity strings / known VIDs.
+    for auth in Path("/sys/bus/usb/devices").glob("*/authorized"):
+        parent = auth.parent
+        vid = _read_attr(parent, "idVendor").lower()
+        pid = _read_attr(parent, "idProduct")
+        product = _read_attr(parent, "product")
+        haystack = f"{product} {_read_attr(parent, 'manufacturer')}".lower()
+        if vid in _USB_OPTICAL_VIDS or any(tok in haystack for tok in _USB_OPTICAL_TOKENS):
+            label = f"{vid}:{pid} {product!r}"
+            if hook:
+                return _run_usb_reset_hook(hook, device, vid, pid, parent)
+            if _toggle_usb_authorized(auth, label):
+                return True
+    print("reset_drive: no matching USB optical device found to reset")
     return False
 
 def _esp32_port_from_sysfs():
@@ -54,20 +178,7 @@ def _esp32_port_from_sysfs():
 
 
 def detect_esp32_port():
-    override = os.environ.get("DISC_PORT")
-    if override:
-        return override
-
-    port = _esp32_port_from_sysfs()
-    if port:
-        return port
-
-    for pattern in ("/dev/ttyACM*", "/dev/ttyUSB*"):
-        ports = sorted(Path("/dev").glob(pattern.strip("/")))
-        if ports:
-            return str(ports[0])
-
-    return "/dev/ttyACM0"
+    return discstation_host.serial_port() or ""
 
 PORT = detect_esp32_port()
 BAUD   = 115200
@@ -77,52 +188,48 @@ def check_cancel(ser):
     try:
         if ser and ser.in_waiting:
             line = ser.readline().decode(errors="ignore").strip()
+            note_serial_activity()
             return line in ("CANCEL", "PLAY_STOP")
-    except OSError:
+    except (serial.SerialException, OSError):
         pass
     return False
 
 
 def iter_proc_or_cancel(proc, ser):
-    proc_fd = proc.stdout.fileno()
-    ser_fd = ser.fileno()
-    buffer = ""
-    last_ping = time.time()
+    lines = Queue()
+    finished = object()
 
-    while proc.poll() is None:
+    def read_output():
+        try:
+            for line in proc.stdout:
+                lines.put(line.rstrip("\r\n"))
+        finally:
+            lines.put(finished)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    last_ping = time.time()
+    output_done = False
+    while proc.poll() is None or not output_done:
         if time.time() - last_ping >= 5:
             last_ping = time.time()
             send(ser, "PING")
 
-        ready, _, _ = select.select([proc_fd, ser_fd], [], [], 0.5)
-
-        if ser_fd in ready and check_cancel(ser):
+        if check_cancel(ser):
             stop_process(proc)
             return
-
-        if proc_fd in ready:
-            try:
-                chunk = os.read(proc_fd, 4096).decode(errors="ignore")
-            except OSError:
-                break
-            if not chunk:
-                break
-            for char in chunk:
-                if char in "\r\n":
-                    if buffer:
-                        yield buffer
-                        buffer = ""
-                else:
-                    buffer += char
-
-    if buffer:
-        yield buffer
-
-    for line in proc.stdout:
-        yield line.rstrip("\r\n")
+        try:
+            line = lines.get(timeout=0.2)
+        except Empty:
+            continue
+        if line is finished:
+            output_done = True
+        else:
+            yield line
+    reader.join(timeout=1)
 
 
-DVD_DEVICE = os.environ.get("DVD_DEVICE")
+DVD_DEVICE = os.environ.get("DISC_DEVICE") or os.environ.get("DVD_DEVICE")
 DISC_SPEED = os.environ.get("DISC_SPEED")
 DISC_DISC_BYTES = 4_700_000_000
 DVD_DL_BYTES = 8_500_000_000
@@ -132,7 +239,31 @@ AUDIO_BITRATE_K = int(os.environ.get("DVD_AUDIO_KBPS", "192"))
 MIN_VIDEO_BITRATE_K = 500
 MAX_VIDEO_BITRATE_K = 7150
 MAX_VIDEO_PEAK_K = 9000
-YTDLP_FORMAT = "bv*+ba/b"
+YTDLP_FORMAT = os.environ.get(
+    "YTDLP_FORMAT",
+    "bestvideo[height<=720][vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a][ext=m4a]/"
+    "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/"
+    "best[height<=720][ext=mp4]/best[ext=mp4]/bv*+ba/b",
+)
+YTDLP_PLAYER_CLIENTS = tuple(
+    client.strip()
+    for client in os.environ.get("YTDLP_PLAYER_CLIENTS", "web_embedded,android_vr").split(",")
+    if client.strip()
+)
+YTDLP_HTTP_CHUNK_SIZE = os.environ.get("YTDLP_HTTP_CHUNK_SIZE", "1M")
+YTDLP_RETRIES = os.environ.get("YTDLP_RETRIES", "3")
+YTDLP_FRAGMENT_RETRIES = os.environ.get("YTDLP_FRAGMENT_RETRIES", "3")
+YTDLP_COOKIES = os.environ.get("YTDLP_COOKIES")
+YTDLP_COOKIES_FROM_BROWSER = os.environ.get("YTDLP_COOKIES_FROM_BROWSER")
+YTDLP_USER_AGENT = os.environ.get("YTDLP_USER_AGENT")
+YTDLP_PO_TOKEN = os.environ.get("YTDLP_PO_TOKEN")
+YTDLP_EXTRACTOR_ARGS = os.environ.get("YTDLP_EXTRACTOR_ARGS")
+DISC_OUTPUT_LIMIT_BYTES = int(
+    os.environ.get("DISC_OUTPUT_LIMIT_BYTES", str(DISC_TARGET_BYTES))
+)
+DISC_DL_OUTPUT_LIMIT_BYTES = int(
+    os.environ.get("DISC_DL_OUTPUT_LIMIT_BYTES", "8000000000")
+)
 MODE_SETTINGS = {
     "AUTO": {
         "target_bytes": DISC_TARGET_BYTES,
@@ -172,14 +303,8 @@ MODE_SETTINGS = {
     },
 }
 
-def user_home():
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user and sudo_user != "root":
-        return Path(pwd.getpwnam(sudo_user).pw_dir)
-    return Path.home()
-
-USER_HOME = user_home()
-WORK = USER_HOME / ".cache" / "discstation"
+USER_HOME = discstation_host.user_home()
+WORK = discstation_host.cache_dir()
 
 def cleanup_old_jobs():
     cutoff = time.time() - CLEANUP_DAYS * 86400
@@ -199,19 +324,13 @@ def cleanup_old_jobs():
         print(f"Cleaned up {removed} old job(s) (> {CLEANUP_DAYS}d)")
 
 def tool(name):
-    local = USER_HOME / ".local" / "bin" / name
-    if local.exists():
-        return str(local)
-    found = shutil.which(name)
-    if found:
-        return found
-    raise FileNotFoundError(f"{name} not found")
+    return discstation_host.tool(name)
 
 def js_runtime_arg():
     override = os.environ.get("YTDLP_JS_RUNTIME")
     if override:
         return ["--js-runtimes", override]
-    for name in ("node", "/usr/bin/node", "/bin/node"):
+    for name in ("node", "/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node", "/bin/node"):
         path = shutil.which(name) if not name.startswith("/") else name
         if path and Path(path).exists():
             return ["--js-runtimes", f"node:{path}"]
@@ -223,26 +342,54 @@ def remote_components_arg():
         return []
     return ["--remote-components", value]
 
-def ytdlp_base_args():
-    return [tool('yt-dlp'), "--no-playlist", *js_runtime_arg(), *remote_components_arg()]
+def ffmpeg_location_arg():
+    try:
+        return ["--ffmpeg-location", str(Path(tool("ffmpeg")).parent)]
+    except FileNotFoundError:
+        return []
+
+def ytdlp_base_args(player_client=None):
+    args = [tool('yt-dlp'), "--no-playlist", *js_runtime_arg(), *remote_components_arg(), *ffmpeg_location_arg()]
+    if player_client or YTDLP_PO_TOKEN or YTDLP_EXTRACTOR_ARGS:
+        extractor_args = []
+        if player_client:
+            extractor_args.append(f"youtube:player_client={player_client}")
+        if YTDLP_PO_TOKEN:
+            extractor_args.append(f"youtube:po_token={YTDLP_PO_TOKEN}")
+        if YTDLP_EXTRACTOR_ARGS:
+            extractor_args.append(YTDLP_EXTRACTOR_ARGS)
+        args += ["--extractor-args", ";".join(extractor_args)]
+    if YTDLP_HTTP_CHUNK_SIZE:
+        args += ["--http-chunk-size", YTDLP_HTTP_CHUNK_SIZE]
+    args += ["--retries", YTDLP_RETRIES, "--fragment-retries", YTDLP_FRAGMENT_RETRIES]
+    if YTDLP_COOKIES:
+        args += ["--cookies", YTDLP_COOKIES]
+    elif YTDLP_COOKIES_FROM_BROWSER:
+        args += ["--cookies-from-browser", YTDLP_COOKIES_FROM_BROWSER]
+    if YTDLP_USER_AGENT:
+        args += ["--user-agent", YTDLP_USER_AGENT]
+    return args
 
 def disc_device():
-    if DVD_DEVICE:
-        return DVD_DEVICE
-    for name in ("/dev/dvd", "/dev/cdrom"):
-        path = Path(name)
-        if path.exists():
-            return str(path.resolve())
-    drives = sorted(Path("/dev").glob("sr*"))
-    if drives:
-        return str(drives[0])
-    raise FileNotFoundError("No DVD drive found")
+    return discstation_host.disc_device()
 
 def _udevadm_props(device):
-    r = subprocess.run(
-        ["udevadm", "info", "--query=property", "--name", device],
-        capture_output=True, text=True, timeout=2,
-    )
+    # Prefer the shared implementation in discstation (pyudev-backed, with a
+    # cdrom_id refresh). Lazy import to avoid the import cycle with discstation.
+    try:
+        from discstation import udev_cdrom_properties
+        return udev_cdrom_properties(device)
+    except Exception:
+        pass
+    if discstation_host.system_name() != "linux":
+        return discstation_host.media_properties(device)
+    try:
+        r = subprocess.run(
+            ["udevadm", "info", "--query=property", "--name", device],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return {}
     props = {}
     for line in r.stdout.splitlines():
         if "=" in line:
@@ -259,6 +406,8 @@ def disc_capacity_bytes(device):
         except ValueError:
             pass
 
+    if discstation_host.system_name() != "linux":
+        return discstation_host.media_capacity_bytes(device)
     props = _udevadm_props(device)
     is_dl = (
         props.get("ID_CDROM_MEDIA_DVD_PLUS_R_DL") == "1" or
@@ -268,12 +417,17 @@ def disc_capacity_bytes(device):
     expected_min = 1_000_000_000
     expected_max = DVD_DL_BYTES if is_dl else DISC_DISC_BYTES
 
+    mediainfo_timeout = _env_int("DISCSTATION_PROBE_TIMEOUT_MEDIAINFO", 12)
     best = None
     for attempt in range(3):
-        r = subprocess.run(
-            ["dvd+rw-mediainfo", device],
-            capture_output=True, text=True, timeout=5,
-        )
+        try:
+            r = subprocess.run(
+                ["dvd+rw-mediainfo", device],
+                capture_output=True, text=True, timeout=mediainfo_timeout,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            time.sleep(0.5)
+            continue
         if r.returncode == 0:
             for line in r.stdout.splitlines():
                 line = line.strip()
@@ -310,6 +464,18 @@ def disc_capacity_bytes(device):
     if props.get("ID_CDROM_MEDIA_DVD_PLUS_R") == "1" or \
        props.get("ID_CDROM_MEDIA_DVD_R") == "1":
         return DISC_DISC_BYTES
+
+    # Last resort: a raw block size (works for finalized/pressed discs where
+    # dvd+rw-mediainfo reports no free blocks; 0/absent for audio CDs).
+    try:
+        r = subprocess.run(["blockdev", "--getsize64", device],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            val = int(r.stdout.strip())
+            if val >= expected_min:
+                return min(val, expected_max)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        pass
     return None
 
 def detect_disc_type(device):
@@ -342,18 +508,29 @@ def detect_disc_type(device):
     }
 
 def send(ser, msg):
+    global _serial_write_failed
+    if not ser:
+        return False
     try:
-        ser.write((msg + '\n').encode())
+        with SERIAL_WRITE_LOCK:
+            ser.write((msg + '\n').encode())
+    except (serial.SerialException, OSError) as e:
+        if not _serial_write_failed:
+            print(f"serial send error ('{msg[:30]}'): {e}")
+        _serial_write_failed = True
+        return False
     except Exception as e:
         print(f"serial send error ('{msg[:30]}'): {e}")
+        return False
+    return True
 
 def safe_send(ser, msg):
     if not ser:
-        return
+        return False
     try:
-        send(ser, msg)
+        return send(ser, msg)
     except Exception:
-        pass
+        return False
 
 def stop_process(proc):
     if proc.poll() is not None:
@@ -378,17 +555,23 @@ def probe_duration(infile):
 
 
 
+def disc_output_limit_bytes(disc_bytes=None):
+    """Return the conservative payload limit used before authoring/burning."""
+    if disc_bytes and disc_bytes > 6_000_000_000:
+        return min(int(disc_bytes), DISC_DL_OUTPUT_LIMIT_BYTES)
+    if disc_bytes:
+        return min(int(disc_bytes), DISC_OUTPUT_LIMIT_BYTES)
+    return DISC_OUTPUT_LIMIT_BYTES
+
+
 def bitrate_plan(duration, mode="AUTO", disc_bytes=None):
     mode = normalize_mode(mode)
     settings = MODE_SETTINGS[mode]
 
-    # Use the actual detected disc capacity when we have it (DL vs SL),
-    # falling back to the mode's static default only when disc_bytes
-    # wasn't passed in. The existing settings["safety"] factor below
-    # still applies on top of whichever value we use, so DL discs get
-    # the same safety margin instead of being silently capped at the
-    # SL-sized default.
+    # Use detected capacity when available, but never exceed the configured
+    # conservative payload limit for the disc layer.
     target_bytes = disc_bytes if disc_bytes else settings["target_bytes"]
+    target_bytes = min(target_bytes, disc_output_limit_bytes(disc_bytes))
 
     if duration <= 0:
         return {
@@ -419,10 +602,33 @@ def bitrate_plan(duration, mode="AUTO", disc_bytes=None):
 def tree_size(path):
     return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
 
+
+def check_encoded_size(ser, mpg, disc_bytes=None):
+    size = Path(mpg).stat().st_size
+    limit = disc_output_limit_bytes(disc_bytes)
+    send(ser, f"PROGRESS:{size / 1_000_000_000:.2f}GB / {limit / 1_000_000_000:.2f}GB")
+    if size > limit:
+        raise RuntimeError(
+            f"Video output {size / 1_000_000_000:.2f}GB exceeds safe limit "
+            f"{limit / 1_000_000_000:.2f}GB"
+        )
+    return size
+
 def sanitize_disc_label(title):
     label = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
     label = re.sub(r"[^A-Za-z0-9]+", "_", label.upper()).strip("_")
     return (label or "DVD_VIDEO")[:32]
+
+
+def audio_disc_title(title):
+    label = unicodedata.normalize("NFKC", str(title or ""))
+    label = re.sub(r"[\x00-\x1f\x7f\"]", " ", label)
+    label = " ".join(label.split())
+    return label[:64] or "Audio CD"
+
+
+def cdrdao_text(value):
+    return audio_disc_title(value).replace("\\", "\\\\").replace('"', '\\"')
 
 def format_duration(seconds):
     if not seconds or seconds <= 0:
@@ -502,18 +708,27 @@ def get_video_info(source):
         return {"title": p.name.replace("_", " ").title(), "duration": total_dur, "files": videos}
     if is_local_file(source):
         return get_local_video_info(source)
-    r = subprocess.run([*ytdlp_base_args(), '--dump-single-json', '--skip-download', source],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.strip() or "Could not get video info")
-    try:
-        data = json.loads(r.stdout)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Could not parse video info: {e}") from e
-    return {
-        "title": data.get("title") or "Untitled video",
-        "duration": float(data.get("duration") or 0),
-    }
+    errors = []
+    for player_client in YTDLP_PLAYER_CLIENTS or (None,):
+        r = subprocess.run(
+            [*ytdlp_base_args(player_client), '--dump-single-json', '--skip-download', source],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            errors.append(r.stderr.strip() or f"{player_client or 'default'} client failed")
+            continue
+        try:
+            data = json.loads(r.stdout)
+        except json.JSONDecodeError as e:
+            errors.append(f"Could not parse video info: {e}")
+            continue
+        return {
+            "title": data.get("title") or "Untitled video",
+            "duration": float(data.get("duration") or 0),
+        }
+    detail = next((error for error in reversed(errors) if error), "Could not get video info")
+    raise RuntimeError(detail[:300])
 
 def _start_keepalive(ser):
     """Start a background PING sender. The ESP32 firmware treats any
@@ -632,33 +847,61 @@ def download(ser, source, job_dir):
     download_dir = job_dir / "download"
     download_dir.mkdir(parents=True, exist_ok=True)
     out = str(download_dir / "%(title)s.%(ext)s")
-    proc = subprocess.Popen(
-        [*ytdlp_base_args(), '-f', YTDLP_FORMAT, '-o', out, source],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    last_prog = 0
-    try:
-        for line in iter_proc_or_cancel(proc, ser):
-            m = re.search(r'(\d+\.\d+)%', line)
-            if m:
-                now = time.time()
-                if now - last_prog >= 0.2:
-                    send(ser, f"PROGRESS:{m.group(1)}%")
-                    last_prog = now
-            if 'Merging' in line:
-                send(ser, "INFO:Merging streams...")
-    except (KeyboardInterrupt, SystemExit):
-        stop_process(proc)
-        raise
-    if proc.wait() != 0:
+    all_lines = []
+    errors = []
+    clients = YTDLP_PLAYER_CLIENTS or (None,)
+    for attempt, player_client in enumerate(clients, start=1):
+        if attempt > 1:
+            for existing in download_dir.iterdir():
+                if existing.is_file():
+                    existing.unlink(missing_ok=True)
+
+        proc = subprocess.Popen(
+            [*ytdlp_base_args(player_client), '-f', YTDLP_FORMAT, '-o', out, source],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        last_prog = 0
+        attempt_lines = []
+        try:
+            for line in iter_proc_or_cancel(proc, ser):
+                attempt_lines.append(line)
+                print(f"yt-dlp: {line}")
+                m = re.search(r'(\d+\.\d+)%', line)
+                if m:
+                    now = time.time()
+                    if now - last_prog >= 0.2:
+                        send(ser, f"PROGRESS:{m.group(1)}%")
+                        last_prog = now
+                if 'Merging' in line:
+                    send(ser, "INFO:Merging streams...")
+        except (KeyboardInterrupt, SystemExit):
+            stop_process(proc)
+            raise
+        rc = proc.wait()
+        all_lines += [f"[player_client={player_client or 'default'}]", *attempt_lines]
+        if rc == 0:
+            files = [p for p in download_dir.iterdir()
+                     if p.is_file() and not p.name.endswith(('.part', '.ytdl'))]
+            if files:
+                (job_dir / "yt-dlp.log").write_text("\n".join(all_lines) + "\n")
+                return max(files, key=lambda p: p.stat().st_mtime)
+            errors.append("No downloaded file")
+            continue
         if proc.returncode == -15:
+            (job_dir / "yt-dlp.log").write_text("\n".join(all_lines) + "\n")
             safe_send(ser, "CANCELLED:Download cancelled")
             raise CancelError("Cancelled")
-        raise RuntimeError("Download failed")
-    files = [p for p in download_dir.iterdir()
-             if p.is_file() and not p.name.endswith(('.part', '.ytdl'))]
-    if not files:
-        raise RuntimeError("No downloaded file")
-    return max(files, key=lambda p: p.stat().st_mtime)
+        detail = next(
+            (line.strip() for line in reversed(attempt_lines)
+             if "error" in line.lower() or line.startswith("ERROR:")),
+            "yt-dlp exited unsuccessfully",
+        )
+        errors.append(f"{player_client or 'default'}: {detail[:180]}")
+
+    (job_dir / "yt-dlp.log").write_text("\n".join(all_lines) + "\n")
+    for partial in download_dir.glob("*.part"):
+        partial.unlink(missing_ok=True)
+    detail = " | ".join(errors) if errors else "yt-dlp exited unsuccessfully"
+    raise RuntimeError(f"Download failed: {detail[:300]}")
 
 
 def find_subtitle_files(video_path):
@@ -787,8 +1030,8 @@ def convert(ser, infile, job_dir, mode, disc_bytes=None):
     total = probe_duration(infile)
     plan = bitrate_plan(total, mode, disc_bytes)
     print(f"Convert: mode={mode} dur={total:.0f}s video_k={plan['video_k']}k "
-          f"peak_k={plan['peak_video_k']}k audio_k={plan['audio_k']}k "
-          f"target_bytes={MODE_SETTINGS[mode]['target_bytes']}", flush=True)
+           f"peak_k={plan['peak_video_k']}k audio_k={plan['audio_k']}k "
+           f"target_bytes={disc_output_limit_bytes(disc_bytes)}", flush=True)
     send(ser, f"PROGRESS:{plan['mode']} {plan['video_k']}k")
     send(ser, f"INFO:AC3 {plan['audio_k']}k audio")
     aspect = probe_aspect(infile)
@@ -814,7 +1057,7 @@ def convert(ser, infile, job_dir, mode, disc_bytes=None):
         '-packetsize', '2048',
     ]
     pass1 = base + ['-pass', '1', '-passlogfile', logfile,
-                    '-an', '-f', 'null', '/dev/null']
+                    '-an', '-f', 'null', discstation_host.null_device()]
     pass2 = base + ['-pass', '2', '-passlogfile', logfile,
                     '-c:a', 'ac3', '-b:a', f"{plan['audio_k']}k", str(out)]
     _run_ffmpeg_pass(ser, pass1, total, "Pass 1/2 (analyze)")
@@ -866,27 +1109,34 @@ def author(ser, mpg, job_dir, aspect="4:3"):
 def check_dvd_size(ser, dvd_dir, disc_bytes=None):
     send(ser, "STATUS:Checking size...")
     size = tree_size(dvd_dir)
-    limit = disc_bytes if disc_bytes and disc_bytes > 0 else DISC_DISC_BYTES
-    send(ser, f"PROGRESS:{size / 1_000_000_000:.2f}GB / {limit / 1_000_000_000:.1f}GB")
+    limit = disc_output_limit_bytes(disc_bytes)
+    send(ser, f"PROGRESS:{size / 1_000_000_000:.2f}GB / {limit / 1_000_000_000:.2f}GB")
     if size > limit:
-        raise RuntimeError("Output too large for disc")
+        raise RuntimeError(
+            f"DVD output {size / 1_000_000_000:.2f}GB exceeds safe limit "
+            f"{limit / 1_000_000_000:.2f}GB"
+        )
     return size
 
 def wait_for_burn_confirm(ser, dvd_dir, disc_capacity):
     data_size = tree_size(dvd_dir)
-    actual_cap = disc_capacity_bytes(disc_device()) or disc_capacity or DISC_TARGET_BYTES
+    detected_capacity = disc_capacity_bytes(disc_device())
+    actual_cap = disc_output_limit_bytes(detected_capacity or disc_capacity)
     cap_gb = actual_cap / 1_000_000_000
     data_gb = data_size / 1_000_000_000
     line = f"WAITING:{data_gb:.2f}GB / {cap_gb:.1f}GB"
     send(ser, line)
     last_ping = time.time()
     while True:
+        if serial_write_failed():
+            raise serial.SerialException("ESP32 serial link lost before burn confirmation")
         if time.time() - last_ping >= 5:
             last_ping = time.time()
             send(ser, "PING")
         try:
             if ser and ser.in_waiting:
                 resp = ser.readline().decode(errors="ignore").strip()
+                note_serial_activity()
                 if resp == "CONFIRM" or resp == "START":
                     return True
                 if resp == "CANCEL":
@@ -895,49 +1145,127 @@ def wait_for_burn_confirm(ser, dvd_dir, disc_capacity):
             raise RuntimeError("Serial error during burn confirm")
         time.sleep(0.05)
 
-def _run_growisofs(ser, growisofs_cmd, log_path):
-    """Shared growisofs runner — Popen, progress, cancel, error handling."""
+def _is_dvd_plus_rw(device):
+    if discstation_host.system_name() != "linux":
+        return False
+    props = _udevadm_props(device)
+    if props.get("ID_CDROM_MEDIA_DVD_PLUS_RW") == "1":
+        return True
+    try:
+        result = subprocess.run(
+            ["dvd+rw-mediainfo", device],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return bool(re.search(r"mounted media:.*dvd\+rw", result.stdout + result.stderr, re.IGNORECASE))
+
+
+def _format_dvd_plus_rw(ser, device):
+    if not _is_dvd_plus_rw(device):
+        return False
+    send(ser, "STATUS:Preparing rewritable disc...")
     proc = subprocess.Popen(
-        growisofs_cmd,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        [tool("dvd+rw-format"), "-force", device],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
     out_lines = []
-    last_prog = 0
     try:
         for line in iter_proc_or_cancel(proc, ser):
             out_lines.append(line)
-            m = re.search(r'(\d+\.\d+)%', line)
-            if m:
-                now = time.time()
-                if now - last_prog >= 0.2:
-                    send(ser, f"PROGRESS:{m.group(1)}%")
-                    last_prog = now
+            print(f"dvd+rw-format: {line}")
     except (KeyboardInterrupt, SystemExit):
         stop_process(proc)
         raise
     rc = proc.wait()
+    if rc == -15:
+        safe_send(ser, "CANCELLED:Burn cancelled")
+        raise CancelError("Cancelled")
     if rc != 0:
+        detail = next((line for line in reversed(out_lines) if line.strip()), "dvd+rw-format failed")
+        raise RuntimeError(f"DVD+RW preparation failed: {detail[:120]}")
+    return True
+
+
+def _run_growisofs(ser, growisofs_cmd, log_path, device=None):
+    """Shared growisofs runner — unmount, format old DVD+RW media, then write."""
+    write_device = device or disc_device()
+    out_lines = []
+    rc = 1
+    for attempt in range(2):
+        if discstation_host.system_name() == "linux":
+            discstation_host.unmount_device(write_device)
+        proc = subprocess.Popen(
+            growisofs_cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        out_lines = []
+        last_prog = 0
+        try:
+            for line in iter_proc_or_cancel(proc, ser):
+                out_lines.append(line)
+                m = re.search(r'(\d+\.\d+)%', line)
+                if m:
+                    now = time.time()
+                    if now - last_prog >= 0.2:
+                        send(ser, f"PROGRESS:{m.group(1)}%")
+                        last_prog = now
+        except (KeyboardInterrupt, SystemExit):
+            stop_process(proc)
+            raise
+        rc = proc.wait()
+        output_text = "\n".join(out_lines)
+        if rc == 0:
+            break
+        if attempt == 0 and "already carries isofs" in output_text.lower():
+            if _format_dvd_plus_rw(ser, write_device):
+                continue
+        break
+
+    if rc != 0:
+        output_text = "\n".join(out_lines)
         with open(log_path, 'w') as f:
-            f.write('\n'.join(out_lines))
+            f.write(output_text)
         for line in out_lines[-10:]:
             print(f"growisofs: {line}")
         if rc == -15:
             safe_send(ser, "CANCELLED:Burn cancelled")
             raise CancelError("Cancelled")
-        if "unable to reload tray" in "\n".join(out_lines):
+        if "no such device" in output_text.lower() or "unable to test unit ready" in output_text.lower():
+            raise RuntimeError("Optical drive disconnected during burn; check USB cable/hub")
+        if "already carries isofs" in output_text.lower():
+            raise RuntimeError("Optical disc still contains an ISO filesystem after preparation")
+        if "unable to reload tray" in output_text:
             safe_send(ser, "INFO:Disc written OK (tray reload skipped)")
             print("growisofs: tray reload failed after successful write — disc is fine")
             return
-        else:
-            safe_send(ser, "INFO:Burn failed, check log")
-            raise RuntimeError("Disc burn failed")
-    subprocess.run(["eject", disc_device()], timeout=10, capture_output=True)
+        safe_send(ser, "INFO:Burn failed, check log")
+        raise RuntimeError("Disc burn failed")
+    try:
+        discstation_host.eject_device(write_device)
+    except Exception as e:
+        print(f"Disc eject skipped: {e}")
 
 
 def burn(ser, dvd_dir, disc_label, speed=None, is_dual_layer=False):
+    if discstation_host.system_name() != "linux":
+        WORK.mkdir(parents=True, exist_ok=True)
+        image_path = WORK / f"video_{time.strftime('%Y%m%d_%H%M%S')}.iso"
+        try:
+            discstation_host.build_data_image([dvd_dir], image_path, disc_label, video=True)
+            burn_iso(ser, image_path, speed, is_dual_layer)
+        finally:
+            image_path.unlink(missing_ok=True)
+        return
     send(ser, "STATUS:Burning disc...")
     send(ser, "PROGRESS:Starting burn")
     send(ser, f"INFO:Label {disc_label[:13]}")
-    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', disc_device()]
+    device = disc_device()
+    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', device]
     speed = speed or DISC_SPEED
     if speed and speed.lower() != "auto":
         if is_dual_layer:
@@ -947,14 +1275,24 @@ def burn(ser, dvd_dir, disc_label, speed=None, is_dual_layer=False):
                 send(ser, "INFO:Capped DL speed to 4x")
         growisofs_cmd += ['-speed', speed.rstrip('x')]
     growisofs_cmd += ['-V', disc_label, '-dvd-video', str(dvd_dir)]
-    _run_growisofs(ser, growisofs_cmd, dvd_dir.parent / "growisofs.log")
+    _run_growisofs(ser, growisofs_cmd, dvd_dir.parent / "growisofs.log", device)
 
 def burn_data(ser, source_paths, disc_label, speed=None, is_dual_layer=False):
     """Burn files as a data DVD — no conversion, no authoring, original quality."""
+    if discstation_host.system_name() != "linux":
+        WORK.mkdir(parents=True, exist_ok=True)
+        image_path = WORK / f"data_{time.strftime('%Y%m%d_%H%M%S')}.iso"
+        try:
+            discstation_host.build_data_image(source_paths, image_path, disc_label)
+            burn_iso(ser, image_path, speed, is_dual_layer)
+        finally:
+            image_path.unlink(missing_ok=True)
+        return
     send(ser, "STATUS:Burning data disc...")
     send(ser, "PROGRESS:Starting")
     send(ser, f"INFO:Label {disc_label[:13]}")
-    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', disc_device()]
+    device = disc_device()
+    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', device]
     speed = speed or DISC_SPEED
     if speed and speed.lower() != "auto":
         if is_dual_layer:
@@ -965,7 +1303,7 @@ def burn_data(ser, source_paths, disc_label, speed=None, is_dual_layer=False):
         growisofs_cmd += ['-speed', speed.rstrip('x')]
     growisofs_cmd += ['-R', '-J', '-joliet-long', '-allow-limited-size', '-V', disc_label]
     growisofs_cmd += [str(p) for p in source_paths]
-    _run_growisofs(ser, growisofs_cmd, source_paths[0].parent / "growisofs.log")
+    _run_growisofs(ser, growisofs_cmd, source_paths[0].parent / "growisofs.log", device)
 
 def burn_audio_cd(ser, audio_files, disc_label, speed=None):
     """Convert audio files to CD-DA WAV and burn via cdrdao with CD-TEXT."""
@@ -1004,7 +1342,9 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
             pass
         track_meta.append((artist, title))
     album_artist = album_artist or "Unknown Artist"
-    album_title = album_title or disc_label
+    # Keep the album name read from the file tags; only fall back to the
+    # folder/disc label when the tags had nothing.
+    album_title = album_title or audio_disc_title(disc_label)
 
     send(ser, "STATUS:Converting audio...")
     send(ser, "PROGRESS:0%")
@@ -1022,43 +1362,60 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
         send(ser, f"PROGRESS:{pct}%")
 
     send(ser, "STATUS:Writing TOC...")
+    # CD-TEXT LANGUAGE 0 is EN (single-byte). Fold to ASCII and cap at the
+    # 160-char CD-TEXT field limit so cdrdao/the drive don't reject the pack.
+    def _cdt(value):
+        text = cdrdao_text(value)
+        text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+        return text.strip()[:160]
+
+    album_t = _cdt(album_title) or "Audio CD"
+    album_p = _cdt(album_artist) or "Unknown Artist"
     toc_lines = ["CD_DA"]
     toc_lines.append("CD_TEXT {")
     toc_lines.append("  LANGUAGE_MAP { 0: EN }")
     toc_lines.append("  LANGUAGE 0 {")
-    toc_lines.append(f'    TITLE "{album_title}"')
-    toc_lines.append(f'    PERFORMER "{album_artist}"')
+    toc_lines.append(f'    TITLE "{album_t}"')
+    toc_lines.append(f'    PERFORMER "{album_p}"')
     toc_lines.append("  }")
     toc_lines.append("}")
     toc_lines.append("")
     for i, (artist, title) in enumerate(track_meta):
         wav = tmp_dir / f"track_{i + 1:02d}.wav"
+        track_t = _cdt(title) or f"Track {i + 1:02d}"
+        track_p = _cdt(artist) or album_p
         toc_lines.append("TRACK AUDIO")
         toc_lines.append("CD_TEXT {")
         toc_lines.append("  LANGUAGE 0 {")
-        if title:
-            toc_lines.append(f'    TITLE "{title}"')
-        if artist:
-            toc_lines.append(f'    PERFORMER "{artist}"')
+        toc_lines.append(f'    TITLE "{track_t}"')
+        toc_lines.append(f'    PERFORMER "{track_p}"')
         toc_lines.append("  }")
         toc_lines.append("}")
         toc_lines.append(f'FILE "{wav}" 0')
         toc_lines.append("")
     toc_path = tmp_dir / "disc.toc"
     toc_path.write_text("\n".join(toc_lines) + "\n")
-    send(ser, f"PROGRESS:35%")
-
+    print(f"CD-TEXT: album={album_t!r} performer={album_p!r}, "
+          f"{len(track_meta)} track titles")
     send(ser, "PROGRESS:35%")
 
     send(ser, "STATUS:Burning audio CD...")
+    # The cooked generic-mmc writer does NOT lay down the CD-TEXT lead-in on most
+    # ATAPI drives; the raw writer does. Override with DISCSTATION_CDRDAO_DRIVER
+    # (set it empty to let cdrdao auto-pick).
     cdrdao_cmd = [tool('cdrdao'), 'write', '--buffers', '64',
-                  '--device', disc_device(), str(toc_path)]
+                  '--device', discstation_host.cdrdao_device(disc_device())]
+    driver = os.environ.get("DISCSTATION_CDRDAO_DRIVER", "generic-mmc-raw")
+    if driver:
+        cdrdao_cmd += ['--driver', driver]
     speed_ = speed or DISC_SPEED
     if speed_ and speed_.lower() != "auto":
         cdrdao_cmd += ['--speed', speed_.rstrip('x')]
+    cdrdao_cmd.append(str(toc_path))  # toc-file must come after all options
 
     proc = subprocess.Popen(cdrdao_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     out_lines = []
+    log_path = WORK / "cdrdao.log"
     last_prog = 0
     try:
         for line in iter_proc_or_cancel(proc, ser):
@@ -1079,22 +1436,32 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
         toc_path.unlink(missing_ok=True)
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
     rc = proc.wait()
+    log_path.write_text("\n".join(out_lines) + "\n")
     if rc != 0:
         for line in out_lines[-10:]:
             print(f"cdrdao: {line}")
         if rc == -15:
             safe_send(ser, "CANCELLED:Burn cancelled")
             raise CancelError("Cancelled")
-        safe_send(ser, "INFO:Burn failed, check log")
-        raise RuntimeError("Disc burn failed")
-    subprocess.run(["eject", disc_device()], timeout=10, capture_output=True)
+        detail = next((line.strip() for line in reversed(out_lines) if line.strip()), "cdrdao failed")
+        safe_send(ser, f"INFO:CD burn failed; see {log_path.name}")
+        raise RuntimeError(f"Disc burn failed: {detail[:80]}")
+    try:
+        discstation_host.eject_device(disc_device())
+    except Exception as e:
+        print(f"CD eject skipped: {e}")
 
 
 def burn_iso(ser, iso_path, speed=None, is_dual_layer=False):
     """Burn a pre-built ISO directly to disc — no filesystem building."""
+    if discstation_host.system_name() != "linux":
+        send(ser, "STATUS:Burning image...")
+        _run_growisofs(ser, discstation_host.iso_burn_command(disc_device(), iso_path), iso_path.parent / "discstation-burn.log")
+        return
     send(ser, "STATUS:Burning ISO...")
     send(ser, "PROGRESS:Starting")
-    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', f"{disc_device()}={iso_path}"]
+    device = disc_device()
+    growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', f"{device}={iso_path}"]
     speed = speed or DISC_SPEED
     if speed and speed.lower() != "auto":
         if is_dual_layer:
@@ -1103,7 +1470,7 @@ def burn_iso(ser, iso_path, speed=None, is_dual_layer=False):
                 speed = "4x"
                 send(ser, "INFO:Capped DL speed to 4x")
         growisofs_cmd += ['-speed', speed.rstrip('x')]
-    _run_growisofs(ser, growisofs_cmd, iso_path.parent / "growisofs.log")
+    _run_growisofs(ser, growisofs_cmd, iso_path.parent / "growisofs.log", device)
 
 def remux_and_author(ser, mpg, disc_label, disc_capacity, dvd_aspect=None):
     """Remux an existing DVD-compliant .mpg to fix mux-rate/timestamp
@@ -1121,6 +1488,7 @@ def remux_and_author(ser, mpg, disc_label, disc_capacity, dvd_aspect=None):
     any CLI entry point all call this (via remux_and_burn below, or
     directly), so a fix here only has to happen once.
     """
+    check_encoded_size(ser, mpg, disc_capacity)
     send(ser, f"TITLE:{disc_label}")
     send(ser, f"INFO:Burning {mpg.parent.name}")
 
@@ -1155,6 +1523,7 @@ def remux_and_author(ser, mpg, disc_label, disc_capacity, dvd_aspect=None):
             if f.exists():
                 f.unlink()
 
+    check_encoded_size(ser, fixed, disc_capacity)
     dvd_out = fixed.parent / "dvd_out"
     if dvd_out.exists():
         shutil.rmtree(dvd_out)
@@ -1186,6 +1555,7 @@ def main():
     ser = None
     try:
         ser = serial.Serial(PORT, BAUD, timeout=1)
+        reset_serial_state()
         time.sleep(2)
         print("Connected to DiscStation")
         print("Running preflight...")
@@ -1226,6 +1596,7 @@ def main():
         while True:
             if ser.in_waiting:
                 resp = ser.readline().decode(errors='ignore').strip()
+                note_serial_activity()
                 if resp == "CANCEL":
                     print("Cancelled by user")
                     safe_send(ser, "CANCELLED:Cancelled")
@@ -1251,8 +1622,7 @@ def main():
             plan = bitrate_plan(duration, selected_mode, disc_bytes)
             video  = download(ser, url, job_dir)
             mpg, dvd_aspect = convert(ser, video, job_dir, selected_mode, disc_bytes)
-            dvd    = author(ser, mpg, job_dir, dvd_aspect)
-            check_dvd_size(ser, dvd, disc_bytes)
+            dvd    = remux_and_author(ser, mpg, disc_label, disc_bytes, dvd_aspect)
             if plan["burn"]:
                 burn(ser, dvd, disc_label, burn_speed, dl_info["is_dual_layer"])
                 send(ser, "DONE:Disc complete!")

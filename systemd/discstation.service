@@ -1,0 +1,13 @@
+[Unit]
+Description=DiscStation physical media appliance
+After=network.target
+
+[Service]
+EnvironmentFile=-%h/.local/share/discstation/discstation.env
+ExecStart=%h/.local/share/discstation/venv/bin/python -u %h/.local/share/discstation/app/discstation.py
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGKILL
+
+[Install]
+WantedBy=default.target
