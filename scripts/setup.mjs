@@ -28,6 +28,9 @@ Linux script uses sudo for apt + group membership.
 Env vars (forwarded): DISCSTATION_APP_DIR, DISCSTATION_VENV_DIR,
 DISCSTATION_CONFIG_DIR, DISCSTATION_HTTP_PORT, DISC_DEVICE, DISC_PORT.
 
+On success it opens the web UI (a PWA — install it from the browser for an app
+window). Re-open it any time with the "discstation" command.
+
 Any extra arguments are passed straight to the platform script.
 `
   );
@@ -39,6 +42,15 @@ function run(cmd, cmdArgs) {
   if (r.error) {
     console.error(`\n${cmd}: ${r.error.message}`);
     process.exit(1);
+  }
+  if ((r.status ?? 1) === 0) {
+    const port = process.env.DISCSTATION_HTTP_PORT || '8081';
+    console.log(
+      `\nDiscStation is installed and running.\n` +
+      `  Web UI:  http://localhost:${port}/   (run "discstation" to open it any time)\n` +
+      `  Install it as an app from the browser menu, or the in-page INSTALL APP button.\n`,
+    );
+    spawnSync(process.execPath, [join(ROOT, 'scripts', 'open.mjs')], { stdio: 'ignore' });
   }
   process.exit(r.status ?? 1);
 }

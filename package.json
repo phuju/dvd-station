@@ -1,9 +1,10 @@
 {
   "name": "discstation",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "DiscStation optical-media appliance host — one cross-OS installer",
   "bin": {
-    "discstation-setup": "scripts/setup.mjs"
+    "discstation-setup": "scripts/setup.mjs",
+    "discstation": "scripts/open.mjs"
   },
   "scripts": {
     "setup": "node scripts/setup.mjs"

@@ -47,8 +47,15 @@ playback, ripping, phone uploads, and ESP32 remote control.
 
 ```bash
 npm install -g discstation
-discstation-setup          # dispatches to the installer for your OS
+discstation-setup          # dispatches to the installer for your OS, then opens the UI
 ```
+
+The host runs as a background service; the UI is the built-in web app at
+`http://localhost:8081`. `discstation-setup` opens it when it finishes, and the
+`discstation` command re-opens it any time. It's a PWA — use your browser's
+**Install DiscStation** (or the in-page **INSTALL APP** button on Chromium) to
+get a standalone app window with a dock/taskbar icon on macOS, Linux, and
+Windows.
 
 `discstation-setup --help` lists the forwarded env vars. From a git clone,
 `npm run setup` does the same thing. Support by OS:
