@@ -513,8 +513,18 @@ def detect_disc_type(device):
         "capacity": capacity,
     }
 
+# discstation.py sets this to _record_web_status so every serial line the burn
+# pipeline emits also updates the web/SSE status in real time.
+status_sink = None
+
+
 def send(ser, msg):
     global _serial_write_failed
+    if status_sink is not None:
+        try:
+            status_sink(msg)
+        except Exception:
+            pass
     if not ser:
         return False
     try:
@@ -532,6 +542,11 @@ def send(ser, msg):
 
 def safe_send(ser, msg):
     if not ser:
+        if status_sink is not None:
+            try:
+                status_sink(msg)
+            except Exception:
+                pass
         return False
     try:
         return send(ser, msg)

@@ -23,7 +23,7 @@ import tempfile
 import time
 import datetime
 from pathlib import Path
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 import http.server
 import socketserver
 try:
@@ -73,6 +73,8 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             }), "application/json")
         elif path == '/disc-info':
             self._serve_disc_info()
+        elif path == '/events':
+            self._serve_sse()
         elif path == '/sw.js':
             self._serve_sw()
         elif path == '/manifest.json':
@@ -163,6 +165,38 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             print(f"Disc info error: {e}")
         self._respond(200, json.dumps(info), "application/json")
 
+    def _serve_sse(self):
+        """Server-Sent Events stream: pushes status/progress snapshots and a
+        'disc-changed' nudge the moment anything changes. Keepalive comment every
+        15s so proxies don't drop the idle connection."""
+        q = Queue(maxsize=64)
+        with _sse_lock:
+            if len(_sse_subs) >= 32:
+                self.send_error(503)
+                return
+            _sse_subs.add(q)
+        try:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Accel-Buffering', 'no')
+            self.end_headers()
+            self.wfile.write(b"retry: 3000\n\n")
+            self.wfile.write(("data: " + json.dumps(_status_snapshot()) + "\n\n").encode())
+            self.wfile.flush()
+            while True:
+                try:
+                    payload = q.get(timeout=15)
+                    self.wfile.write(("data: " + payload + "\n\n").encode())
+                except Empty:
+                    self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            pass
+        finally:
+            with _sse_lock:
+                _sse_subs.discard(q)
+
     def _handle_set_label(self):
         global _last_upload_label
         length = int(self.headers.get('Content-Length', 0))
@@ -178,19 +212,20 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('discstation-v6').then(c => c.addAll(['/','/static/style.css?v=6','/static/app.js?v=6']));
+  caches.open('discstation-v7').then(c => c.addAll(['/','/static/style.css?v=7','/static/app.js?v=7']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
   const path = new URL(e.request.url).pathname;
+  if (path === '/events') return;            // never intercept the SSE stream
   if (path === '/' || path.startsWith('/static/')) {
     e.respondWith(fetch(e.request).then(r => {
       const copy = r.clone();
-      caches.open('discstation-v6').then(c => c.put(e.request, copy));
+      caches.open('discstation-v7').then(c => c.put(e.request, copy));
       return r;
     }).catch(() => caches.match(e.request)));
   } else {
-    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+    e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
   }
 });'''
         self._respond(200, sw, 'application/javascript')
@@ -300,6 +335,7 @@ def start_web_server(port=8080):
     _web_port = port
     server = socketserver.ThreadingTCPServer(('', port), _WebHandler, bind_and_activate=False)
     server.allow_reuse_address = True
+    server.daemon_threads = True  # don't let an open SSE connection wedge shutdown
     server.server_bind()
     server.server_activate()
 
@@ -326,8 +362,11 @@ def start_web_server(port=8080):
         http_port = 8081
     if http_port and http_port != port:
         try:
-            plain = socketserver.ThreadingTCPServer(('', http_port), _WebHandler)
-            plain.allow_reuse_address = True
+            plain = socketserver.ThreadingTCPServer(('', http_port), _WebHandler, bind_and_activate=False)
+            plain.allow_reuse_address = True  # must be set before bind, or a restart hits TIME_WAIT
+            plain.daemon_threads = True
+            plain.server_bind()
+            plain.server_activate()
             threading.Thread(target=plain.serve_forever, daemon=True).start()
             print(f"Plain HTTP (mobile app) on http://0.0.0.0:{http_port}")
         except OSError as e:
@@ -476,6 +515,25 @@ def ensure_text(value):
     return str(value)
 
 
+# --- Server-Sent Events: push status/progress to browsers the instant it changes
+_sse_subs = set()          # of Queue
+_sse_lock = threading.Lock()
+
+
+def _status_snapshot():
+    return {"status": _web_status or "READY", "progress": _web_progress, "active": _web_progress_active}
+
+
+def _sse_publish(event):
+    payload = json.dumps(event)
+    with _sse_lock:
+        for q in list(_sse_subs):
+            try:
+                q.put_nowait(payload)
+            except Full:
+                _sse_subs.discard(q)
+
+
 def _set_web_progress(phase, percent=-1):
     global _web_status, _web_progress, _web_progress_active
     _web_status = phase
@@ -485,10 +543,14 @@ def _set_web_progress(phase, percent=-1):
         discstation_burn.safe_send(_active_ser, f"STATUS:{phase}")
         if _web_progress >= 0:
             discstation_burn.safe_send(_active_ser, f"PROGRESS:{_web_progress}%")
+    _sse_publish(_status_snapshot())
 
 
 def _record_web_status(msg):
     global _web_status, _web_progress, _web_progress_active
+    if msg.startswith("DISC:"):
+        _sse_publish({"type": "disc-changed"})
+        return
     if msg.startswith("STATUS:"):
         _web_status = msg[7:].strip() or "READY"
         _web_progress_active = True
@@ -509,16 +571,21 @@ def _record_web_status(msg):
     elif msg.startswith("CANCELLED:"):
         _web_status = msg[10:].strip() or "CANCELLED"
         _web_progress_active = False
+    else:
+        return
+    _sse_publish(_status_snapshot())
 
 
 def send(ser, msg):
-    _record_web_status(msg)
     discstation_burn.send(ser, msg)
 
 
 def safe_send(ser, msg):
-    _record_web_status(msg)
     discstation_burn.safe_send(ser, msg)
+
+
+# Route every serial line the burn/rip pipeline emits into the web/SSE status.
+discstation_burn.status_sink = _record_web_status
 
 
 def run_as_desktop_user(cmd):

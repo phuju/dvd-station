@@ -254,9 +254,34 @@
   setupTabs();
   loadDiscInfo();
   pollStatus();
-  setInterval(pollStatus, 2000);
+  startEventStream();
 
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=4").catch(() => {});
+  function startEventStream() {
+    if (typeof EventSource === "undefined") { setInterval(pollStatus, 2000); return; }
+    let es;
+    try { es = new EventSource("/events"); }
+    catch (_) { setInterval(pollStatus, 2000); return; }
+    es.addEventListener("message", (ev) => {
+      let d;
+      try { d = JSON.parse(ev.data); } catch (_) { return; }
+      if (d.type === "disc-changed") { loadDiscInfo(); return; }
+      setConnection(true);
+      setLiveStatus(d.status);
+      setProgress(d.status, Number(d.progress), d.active);
+    });
+    es.addEventListener("open", () => { setConnection(true); loadDiscInfo(); });
+    es.addEventListener("error", () => {
+      // EventSource reconnects on its own; reflect the gap meanwhile.
+      setConnection(false);
+      setLiveStatus("OFFLINE");
+      setProgress("OFFLINE", -1, false);
+    });
+    // Backstops: catch a zombie SSE connection, and refresh disc state slowly.
+    setInterval(() => { if (!es || es.readyState !== 1) pollStatus(); }, 8000);
+    setInterval(loadDiscInfo, 15000);
+  }
+
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=7").catch(() => {});
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
     const button = document.createElement("button");
