@@ -53,6 +53,8 @@ _last_upload_label = None
 _web_status = "READY"
 _web_progress = -1
 _web_progress_active = False
+_operation_active = False  # a burn/rip/play flow is holding the drive
+_last_disc_info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
 _active_ser = None
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -146,6 +148,10 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         self._respond(200, f'{len(files)} file(s) uploaded ({size_str}). Select BURN DATA on remote.')
 
     def _serve_disc_info(self):
+        if _operation_active:
+            # a burn/rip/play holds the drive — don't probe it, serve last-known.
+            self._respond(200, json.dumps({**_last_disc_info, "busy": True}), "application/json")
+            return
         info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
         try:
             device = discstation_burn.disc_device()
@@ -163,6 +169,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             info["label"] = di.label
         except Exception as e:
             print(f"Disc info error: {e}")
+        _last_disc_info.update(info)
         self._respond(200, json.dumps(info), "application/json")
 
     def _serve_sse(self):
@@ -212,7 +219,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('discstation-v7').then(c => c.addAll(['/','/static/style.css?v=7','/static/app.js?v=7']));
+  caches.open('discstation-v8').then(c => c.addAll(['/','/static/style.css?v=8','/static/app.js?v=8']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
@@ -221,7 +228,7 @@ self.addEventListener('fetch', e => {
   if (path === '/' || path.startsWith('/static/')) {
     e.respondWith(fetch(e.request).then(r => {
       const copy = r.clone();
-      caches.open('discstation-v7').then(c => c.put(e.request, copy));
+      caches.open('discstation-v8').then(c => c.put(e.request, copy));
       return r;
     }).catch(() => caches.match(e.request)));
   } else {
@@ -3731,7 +3738,7 @@ def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
 
 
 def station_loop(ser, url, artist_hint=None, album_hint=None):
-    global _last_burn_result, _last_burn_result_time, _tray_open, _tray_open_since
+    global _last_burn_result, _last_burn_result_time, _tray_open, _tray_open_since, _operation_active
     discstation_burn.cleanup_old_jobs()
     try:
         device = discstation_burn.disc_device()
@@ -3934,6 +3941,7 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
         # The user picked a mode — they want to act on a disc, so the drive is
         # fair game again even if it was ejected from the OLED earlier.
         _tray_open = False
+        _operation_active = True  # stop /disc-info probing the drive during the flow
         try:
             if mode == "BURN":
                 burn_flow(ser, url)
@@ -3964,6 +3972,8 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
             _last_burn_result = f"ERROR: {e}"
             print(f"Error in {mode}: {e}")
             time.sleep(4)
+        finally:
+            _operation_active = False
 
         _last_burn_result_time = time.time()
         refresh_main_menu(ser)

@@ -77,6 +77,7 @@
     try {
       const response = await fetch("/disc-info", { cache: "no-store" });
       const info = await response.json();
+      if (info.busy) return;               // burn/rip in progress — keep current
       state.discBytes = Number(info.capacity_bytes || 0);
       state.discType = info.type || "none";
       renderSelection();
@@ -281,7 +282,7 @@
     setInterval(loadDiscInfo, 15000);
   }
 
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=7").catch(() => {});
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=8").catch(() => {});
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
     const button = document.createElement("button");

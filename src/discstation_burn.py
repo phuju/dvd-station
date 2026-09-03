@@ -1274,22 +1274,31 @@ def _run_growisofs(ser, growisofs_cmd, log_path, device=None):
 
 def _run_hdiutil_burn(ser, image_path, device=None):
     """Burn a pre-built ISO on macOS via `hdiutil burn -puppetstrings`, streaming
-    its PERCENT: lines to the ESP32."""
+    its PERCENT: lines to the ESP32 for both the write and verify passes."""
     send(ser, "STATUS:Burning image...")
     send(ser, "PROGRESS:0%")
     cmd = discstation_host.iso_burn_command(device or disc_device(), image_path)
+    if discstation_host.system_name() == "darwin":
+        # hdiutil block-buffers stdout to a pipe -> no progress until it exits.
+        # Run it under a pty (script relays the child's exit status verbatim).
+        cmd = ["/usr/bin/script", "-q", "/dev/null", *cmd]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     out_lines = []
     last_pct = -1
+    phase = "burn"
     try:
         for line in iter_proc_or_cancel(proc, ser):
             out_lines.append(line)
-            m = re.search(r"PERCENT:([\d.]+)", line)
-            if m:
-                pct = int(float(m.group(1)))
-                if 0 <= pct <= 100 and pct != last_pct:
-                    last_pct = pct
-                    send(ser, f"PROGRESS:{min(pct, 99)}%")
+            low = line.lower()
+            m = re.search(r"PERCENT:(-?[\d.]+)", line)
+            pct = int(float(m.group(1))) if m else None
+            if phase == "burn" and ("verif" in low or (pct is not None and last_pct > 90 and pct < 5)):
+                phase = "verify"
+                last_pct = -1
+                send(ser, "STATUS:Verifying...")
+            if pct is not None and 0 <= pct <= 100 and pct != last_pct:
+                last_pct = pct
+                send(ser, f"PROGRESS:{min(pct, 99)}%")
     except (KeyboardInterrupt, SystemExit):
         stop_process(proc)
         raise
@@ -1300,8 +1309,11 @@ def _run_hdiutil_burn(ser, image_path, device=None):
     safe_send(ser, "PROGRESS:100%")
     try:
         discstation_host.eject_device(device or disc_device())
-    except Exception as e:
-        print(f"Disc eject skipped: {e}")
+    except Exception:
+        try:
+            discstation_host.eject_device(None)  # device-less `drutil eject`
+        except Exception as e:
+            print(f"Disc eject skipped: {e}")
 
 
 def burn(ser, dvd_dir, disc_label, speed=None, is_dual_layer=False):
