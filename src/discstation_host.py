@@ -295,12 +295,16 @@ def can_use_linux_optical_backend():
 
 def build_data_image(source_paths, output_path, label, video=False):
     system = system_name()
-    if system == "darwin":
-        command = [tool("hdiutil"), "makehybrid", "-o", str(output_path), "-iso", "-joliet", "-udf"]
-        command += ["-default-volume-name", label, *[str(path) for path in source_paths]]
-    elif system == "windows":
-        command = [tool("xorriso"), "-as", "mkisofs", "-iso-level", "3", "-J", "-R", "-V", label, "-o", str(output_path)]
-        command += [str(path) for path in source_paths]
+    if system in ("darwin", "windows"):
+        # xorriso's mkisofs emulation is the same lineage as Linux's
+        # genisoimage/growisofs; -dvd-video gives a set-top-compatible
+        # VIDEO_TS layout (the arg is the dir *containing* VIDEO_TS).
+        command = [tool("xorriso"), "-as", "mkisofs", "-V", label, "-o", str(output_path)]
+        if video:
+            command += ["-dvd-video", "-udf", str(source_paths[0])]
+        else:
+            command += ["-iso-level", "3", "-J", "-R", "-udf",
+                        *[str(path) for path in source_paths]]
     else:
         raise RuntimeError("Image building is only used by non-Linux optical backends")
     subprocess.run(command, check=True, capture_output=True, text=True)
@@ -310,7 +314,8 @@ def build_data_image(source_paths, output_path, label, video=False):
 def iso_burn_command(device, image_path):
     system = system_name()
     if system == "darwin":
-        return [tool("hdiutil"), "burn", str(image_path)]
+        # -puppetstrings emits machine-readable PERCENT: / MESSAGE: lines.
+        return [tool("hdiutil"), "burn", "-puppetstrings", str(image_path)]
     if system == "windows":
         return [tool("isoburn.exe"), "/Q", device, str(image_path)]
     raise RuntimeError("ISO command requested on Linux; use growisofs backend")

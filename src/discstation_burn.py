@@ -121,6 +121,12 @@ def reset_drive(device=None):
     """Power-cycle the USB optical enclosure by toggling its sysfs 'authorized'
     flag (or via DISCSTATION_USB_RESET_CMD). Best-effort; returns True on a
     completed toggle/hook, False otherwise."""
+    if discstation_host.system_name() == "darwin":
+        # ponytail: no USB re-enumeration on macOS; an eject/reload is the only
+        # soft reset available and it drops whatever disc is loaded.
+        for cmd in (["/usr/bin/drutil", "eject"], ["/usr/bin/drutil", "tray", "close"]):
+            subprocess.run(cmd, capture_output=True, timeout=15, check=False)
+        return True
     if discstation_host.system_name() != "linux":
         return False
     if not device:
@@ -1251,6 +1257,38 @@ def _run_growisofs(ser, growisofs_cmd, log_path, device=None):
         print(f"Disc eject skipped: {e}")
 
 
+def _run_hdiutil_burn(ser, image_path, device=None):
+    """Burn a pre-built ISO on macOS via `hdiutil burn -puppetstrings`, streaming
+    its PERCENT: lines to the ESP32."""
+    send(ser, "STATUS:Burning image...")
+    send(ser, "PROGRESS:0%")
+    cmd = discstation_host.iso_burn_command(device or disc_device(), image_path)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    out_lines = []
+    last_pct = -1
+    try:
+        for line in iter_proc_or_cancel(proc, ser):
+            out_lines.append(line)
+            m = re.search(r"PERCENT:([\d.]+)", line)
+            if m:
+                pct = int(float(m.group(1)))
+                if 0 <= pct <= 100 and pct != last_pct:
+                    last_pct = pct
+                    send(ser, f"PROGRESS:{min(pct, 99)}%")
+    except (KeyboardInterrupt, SystemExit):
+        stop_process(proc)
+        raise
+    rc = proc.wait()
+    if rc != 0:
+        detail = next((l for l in reversed(out_lines) if l.strip()), "hdiutil burn failed")
+        raise RuntimeError(f"Disc burn failed: {detail[:120]}")
+    safe_send(ser, "PROGRESS:100%")
+    try:
+        discstation_host.eject_device(device or disc_device())
+    except Exception as e:
+        print(f"Disc eject skipped: {e}")
+
+
 def burn(ser, dvd_dir, disc_label, speed=None, is_dual_layer=False):
     if discstation_host.system_name() != "linux":
         WORK.mkdir(parents=True, exist_ok=True)
@@ -1403,8 +1441,15 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
     # The cooked generic-mmc writer does NOT lay down the CD-TEXT lead-in on most
     # ATAPI drives; the raw writer does. Override with DISCSTATION_CDRDAO_DRIVER
     # (set it empty to let cdrdao auto-pick).
+    try:
+        cdrdao_write_dev = discstation_host.cdrdao_device(disc_device())
+    except RuntimeError:
+        if discstation_host.system_name() == "darwin":
+            raise RuntimeError("Audio CD burning is not supported on this Mac "
+                               "(cdrdao cannot access the optical drive)")
+        raise
     cdrdao_cmd = [tool('cdrdao'), 'write', '--buffers', '64',
-                  '--device', discstation_host.cdrdao_device(disc_device())]
+                  '--device', cdrdao_write_dev]
     driver = os.environ.get("DISCSTATION_CDRDAO_DRIVER", "generic-mmc-raw")
     if driver:
         cdrdao_cmd += ['--driver', driver]
@@ -1454,6 +1499,9 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
 
 def burn_iso(ser, iso_path, speed=None, is_dual_layer=False):
     """Burn a pre-built ISO directly to disc — no filesystem building."""
+    if discstation_host.system_name() == "darwin":
+        _run_hdiutil_burn(ser, iso_path)
+        return
     if discstation_host.system_name() != "linux":
         send(ser, "STATUS:Burning image...")
         _run_growisofs(ser, discstation_host.iso_burn_command(disc_device(), iso_path), iso_path.parent / "discstation-burn.log")
@@ -1493,8 +1541,9 @@ def remux_and_author(ser, mpg, disc_label, disc_capacity, dvd_aspect=None):
     send(ser, f"INFO:Burning {mpg.parent.name}")
 
     send(ser, "STATUS:Remuxing to fix timestamps...")
-    v_es = Path(f"/tmp/video_{os.getpid()}.m2v")
-    a_es = Path(f"/tmp/audio_{os.getpid()}.ac3")
+    WORK.mkdir(parents=True, exist_ok=True)
+    v_es = WORK / f"video_{os.getpid()}.m2v"
+    a_es = WORK / f"audio_{os.getpid()}.ac3"
     fixed = mpg.parent / "movie_fixed.mpg"
     if fixed.exists():
         fixed.unlink()

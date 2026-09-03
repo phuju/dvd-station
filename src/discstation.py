@@ -2933,15 +2933,16 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
         pass
 
     env = os.environ.copy()
-    if "DISPLAY" not in env:
-        env["DISPLAY"] = ":0"
-    try:
-        uid = os.getuid()
-        home_xauth = Path.home() / ".Xauthority"
-        env.setdefault("XAUTHORITY", str(home_xauth) if home_xauth.exists() else f"/run/user/{uid}/.Xauthority")
-        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
-    except Exception:
-        pass
+    if discstation_host.system_name() == "linux":
+        if "DISPLAY" not in env:
+            env["DISPLAY"] = ":0"
+        try:
+            uid = os.getuid()
+            home_xauth = Path.home() / ".Xauthority"
+            env.setdefault("XAUTHORITY", str(home_xauth) if home_xauth.exists() else f"/run/user/{uid}/.Xauthority")
+            env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
+        except Exception:
+            pass
 
     proc = subprocess.Popen(run_as_desktop_user(cmd), env=env)
 
@@ -3082,23 +3083,36 @@ def play_flow(ser):
 
     if kind == "dvd_video":
         if discstation_host.system_name() == "darwin":
-            with mounted_disc(device) as mount_dir:
-                video_ts = mount_dir / "VIDEO_TS"
-                files = sorted(
-                    path for path in video_ts.glob("VTS_01_*.VOB")
-                    if re.search(r"_\d+\.VOB$", path.name, re.IGNORECASE)
-                    and not path.name.upper().endswith("_0.VOB")
-                )
-                if not files:
-                    raise RuntimeError("No playable DVD title found")
+            try:
                 cmd = [
                     "mpv",
                     "--input-ipc-server=" + MPV_SOCKET,
                     "--force-window=yes",
                     "--idle=no",
-                    *[str(path) for path in files],
+                    "--dvd-device=" + rip_device(device),
+                    "dvdnav://",
                 ]
                 _run_mpv(ser, cmd, "Playing DVD", kind)
+            except RuntimeError:
+                # libdvdnav couldn't open the disc — fall back to playing the
+                # main title's VOBs off the mounted volume (no menus).
+                with mounted_disc(device) as mount_dir:
+                    video_ts = mount_dir / "VIDEO_TS"
+                    files = sorted(
+                        path for path in video_ts.glob("VTS_01_*.VOB")
+                        if re.search(r"_\d+\.VOB$", path.name, re.IGNORECASE)
+                        and not path.name.upper().endswith("_0.VOB")
+                    )
+                    if not files:
+                        raise RuntimeError("No playable DVD title found")
+                    cmd = [
+                        "mpv",
+                        "--input-ipc-server=" + MPV_SOCKET,
+                        "--force-window=yes",
+                        "--idle=no",
+                        *[str(path) for path in files],
+                    ]
+                    _run_mpv(ser, cmd, "Playing DVD", kind)
         else:
             cmd = [
                 "mpv",
@@ -3880,10 +3894,16 @@ def check_pidfile():
                 old_pid = int(f.read().strip())
             try:
                 os.kill(old_pid, 0)
-                with open(f"/proc/{old_pid}/cmdline") as f:
-                    if "discstation" in f.read():
-                        print(f"Already running (PID {old_pid}), exiting")
-                        sys.exit(0)
+                if sys.platform == "linux":
+                    with open(f"/proc/{old_pid}/cmdline") as f:
+                        alive = "discstation" in f.read()
+                else:
+                    ps = subprocess.run(["ps", "-p", str(old_pid), "-o", "command="],
+                                        capture_output=True, text=True)
+                    alive = "discstation" in ps.stdout
+                if alive:
+                    print(f"Already running (PID {old_pid}), exiting")
+                    sys.exit(0)
             except (OSError, IOError):
                 pass
     except (ValueError, OSError):
