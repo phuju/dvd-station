@@ -21,6 +21,7 @@
     "scripts/",
     "src/*.py",
     "src/static/",
+    "src/win/",
     "arduino/",
     "systemd/",
     "docs/",

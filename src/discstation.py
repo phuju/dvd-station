@@ -4,7 +4,10 @@ import atexit
 import collections
 import concurrent.futures
 import errno
-import fcntl
+try:
+    import fcntl  # POSIX-only; used only in drive_status()'s Linux branch
+except ImportError:
+    fcntl = None
 import json
 import mimetypes
 import os
@@ -422,7 +425,8 @@ def wait_for_web_url(ser):
             check_serial_alive(ser)
 
 
-MPV_SOCKET = str(Path(tempfile.gettempdir()) / "discstation_mpv.sock")
+MPV_SOCKET = (r"\\.\pipe\discstation-mpv" if os.name == "nt"
+              else str(Path(tempfile.gettempdir()) / "discstation_mpv.sock"))
 RIP_ROOT = discstation_burn.USER_HOME / "dvd_rips"
 USER_AGENT = "DVDStation/0.1 (local appliance; phuju)"
 DISC_POLL_SECONDS = 6
@@ -649,12 +653,26 @@ def chown_to_sudo_user(path):
                 pass
 
 
+def _mpv_ipc(payload, timeout=None):
+    """Send one JSON line to mpv's IPC endpoint. Windows = named pipe, POSIX =
+    AF_UNIX socket. Returns the raw reply bytes (b"" if not read), or raises OSError."""
+    if os.name == "nt":
+        with open(MPV_SOCKET, "r+b", buffering=0) as pipe:
+            pipe.write(payload)
+            if timeout is None:
+                return b""
+            return pipe.read(4096) or b""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        if timeout is not None:
+            sock.settimeout(timeout)
+        sock.connect(MPV_SOCKET)
+        sock.sendall(payload)
+        return sock.recv(4096) if timeout is not None else b""
+
+
 def mpv_command(command):
     try:
-        payload = json.dumps({"command": command}).encode() + b"\n"
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.connect(MPV_SOCKET)
-            sock.sendall(payload)
+        _mpv_ipc(json.dumps({"command": command}).encode() + b"\n")
     except OSError:
         return False
     return True
@@ -663,11 +681,7 @@ def mpv_command(command):
 def mpv_query(command):
     try:
         payload = json.dumps({"command": command, "request_id": 1}).encode() + b"\n"
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.5)
-            sock.connect(MPV_SOCKET)
-            sock.sendall(payload)
-            response = json.loads(sock.recv(4096).decode(errors="ignore"))
+        response = json.loads(_mpv_ipc(payload, timeout=0.5).decode(errors="ignore"))
         return response.get("data")
     except (OSError, ValueError, json.JSONDecodeError):
         return None
@@ -678,14 +692,11 @@ def wait_for_socket(path, proc, timeout=8):
     while time.time() < deadline:
         if proc.poll() is not None:
             return False
-        if Path(path).exists():
-            try:
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                    sock.settimeout(0.25)
-                    sock.connect(path)
-                return True
-            except OSError:
-                pass
+        try:
+            _mpv_ipc(b'{"command":["get_property","idle-active"]}\n', timeout=0.25)
+            return True
+        except OSError:
+            pass
         time.sleep(0.1)
     return False
 
@@ -1627,6 +1638,11 @@ class mounted_disc:
         self.owned_mount = False
 
     def __enter__(self):
+        if discstation_host.system_name() == "windows":
+            # the optical disc is already mounted by the OS as its drive letter
+            letter = str(self.device).rstrip("\\/").rstrip(":") + ":\\"
+            self.mount_path = Path(letter)
+            return self.mount_path
         if discstation_host.system_name() == "darwin":
             properties = discstation_host.media_properties(self.device)
             existing_mount = properties.get("ID_MOUNT_POINT")
@@ -3017,7 +3033,7 @@ def _iter_proc_lines(proc, ser):
 def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
     try:
         os.unlink(MPV_SOCKET)
-    except FileNotFoundError:
+    except OSError:
         pass
 
     env = os.environ.copy()
@@ -3157,7 +3173,7 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
             discstation_burn.stop_process(proc)
         try:
             os.unlink(MPV_SOCKET)
-        except FileNotFoundError:
+        except OSError:
             pass
 
 
@@ -3979,7 +3995,7 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
         refresh_main_menu(ser)
 
 
-PIDFILE = "/tmp/discstation.pid"
+PIDFILE = os.path.join(tempfile.gettempdir(), "discstation.pid")
 
 
 def check_pidfile():
@@ -3992,6 +4008,10 @@ def check_pidfile():
                 if sys.platform == "linux":
                     with open(f"/proc/{old_pid}/cmdline") as f:
                         alive = "discstation" in f.read()
+                elif os.name == "nt":
+                    tl = subprocess.run(["tasklist", "/FI", f"PID eq {old_pid}", "/FO", "CSV", "/NH"],
+                                        capture_output=True, text=True)
+                    alive = "python" in tl.stdout.lower()
                 else:
                     ps = subprocess.run(["ps", "-p", str(old_pid), "-o", "command="],
                                         capture_output=True, text=True)

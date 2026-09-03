@@ -98,6 +98,44 @@ def _mac_optical_device():
 
 _last_disc_device = None
 
+# --- Windows: IMAPI2 / WMI probes via bundled PowerShell helpers ---------------
+_WIN_DIR = Path(__file__).resolve().parent / "win"
+_win_info_cache = (0.0, None)
+
+
+def _run_ps(script_name, *args, timeout=25):
+    """Run src/win/<script_name> and return (returncode, stdout, stderr)."""
+    import time
+    cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+           "-File", str(_WIN_DIR / script_name), *[str(a) for a in args]]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout, r.stderr
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, "", ""
+
+
+def _win_disc_info(force=False):
+    """Cached (~2s) dict from src/win/disc-info.ps1, or {} on failure."""
+    import json as _json
+    import time
+    global _win_info_cache
+    ts, cached = _win_info_cache
+    if not force and cached is not None and time.time() - ts < 2.0:
+        return cached
+    override = os.environ.get("DISC_DEVICE") or os.environ.get("DVD_DEVICE") or ""
+    rc, out, _ = _run_ps("disc-info.ps1", *([override] if override else []), timeout=20)
+    info = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                info = _json.loads(line)
+            except ValueError:
+                pass
+    _win_info_cache = (time.time(), info)
+    return info
+
 
 def disc_device():
     global _last_disc_device
@@ -140,13 +178,22 @@ def disc_device():
             if "/dev/disk" in line and ("CD" in line or "DVD" in line or "optical" in line.lower()):
                 return line.strip().split()[0]
     elif system == "windows":
-        raise RuntimeError("Set DISC_DEVICE to the optical drive letter on Windows")
+        info = _win_disc_info()
+        if info.get("drive"):
+            return info["drive"]
+        if override:
+            return override
     raise FileNotFoundError("No optical disc drive found; set DISC_DEVICE explicitly")
 
 
 def drive_status():
     """Non-Linux equivalent of the CDROM_DRIVE_STATUS ioctl.
-    Returns 'disc' | 'no_disc' | 'unknown'. macOS: parse `drutil status`."""
+    Returns 'disc' | 'no_disc' | 'unknown'. macOS: `drutil status`; Windows: IMAPI2/WMI."""
+    if system_name() == "windows":
+        info = _win_disc_info()
+        if not info:
+            return "unknown"
+        return "disc" if info.get("media_loaded") else "no_disc"
     if system_name() != "darwin":
         return "unknown"
     try:
@@ -244,10 +291,35 @@ def media_properties(device):
             props["ID_CDROM_MEDIA_DVD_PLUS_R"] = "1"
         _tag_rewritable(props, optical)
         return props
+    if system_name() == "windows":
+        info = _win_disc_info()
+        if not info.get("media_loaded"):
+            return {}
+        props = {"ID_CDROM": "1", "ID_CDROM_MEDIA": "1"}
+        if info.get("label"):
+            props["ID_FS_LABEL"] = info["label"]
+        if info.get("fs") in ("udf", "iso9660"):
+            props["ID_FS_TYPE"] = info["fs"]
+        mtype = (info.get("media_type") or "").lower()
+        if mtype == "audio_cd" or (not info.get("fs") and not info.get("blank") and mtype.startswith("cd")):
+            props["ID_CDROM_MEDIA_TYPE"] = "audio"
+        elif mtype.startswith("dvd") or mtype.startswith("bd"):
+            props["ID_CDROM_MEDIA_TYPE"] = "dvd"
+        if info.get("blank"):
+            props["ID_CDROM_MEDIA_STATE"] = "blank"
+        if "dvd+r dl" in mtype or "dvd-r dl" in mtype:
+            props["ID_CDROM_MEDIA_DVD_PLUS_R_DL"] = "1"
+        elif ("dvd+r" in mtype or "dvd-r" in mtype) and "rw" not in mtype:
+            props["ID_CDROM_MEDIA_DVD_PLUS_R"] = "1"
+        if info.get("rewritable"):
+            _tag_rewritable(props, mtype)
+        return props
     return {}
 
 
 def media_capacity_bytes(device):
+    if system_name() == "windows":
+        return _win_disc_info().get("capacity_bytes") or None
     if system_name() == "darwin":
         try:
             result = subprocess.run(["/usr/sbin/diskutil", "info", device], capture_output=True, text=True, check=False, timeout=3)
@@ -451,6 +523,12 @@ def eject_device(device, close=False):
             except (OSError, subprocess.TimeoutExpired):
                 pass
         return False
+    elif system == "windows":
+        args = [device] if device else []
+        if close:
+            args.append("-Close")
+        rc, _, _ = _run_ps("eject.ps1", *args, timeout=20)
+        return rc == 0
     else:
-        raise RuntimeError("Automatic optical-drive eject is not implemented on Windows")
+        raise RuntimeError("Automatic optical-drive eject is not implemented on this OS")
     return subprocess.run(command, capture_output=True, text=True, timeout=10).returncode == 0
