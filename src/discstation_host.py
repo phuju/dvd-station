@@ -289,10 +289,6 @@ def null_device():
     return "NUL" if system_name() == "windows" else "/dev/null"
 
 
-def can_use_linux_optical_backend():
-    return system_name() == "linux" and all(shutil.which(name) for name in ("growisofs", "wodim", "cdrdao"))
-
-
 def build_data_image(source_paths, output_path, label, video=False):
     system = system_name()
     if system in ("darwin", "windows"):

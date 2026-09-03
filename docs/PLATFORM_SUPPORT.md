@@ -9,16 +9,23 @@ Run `./install.sh` on Debian, Ubuntu, or Raspberry Pi OS.
 
 ## macOS
 
-The Python host and web/control workflow run with Homebrew dependencies. Data
-and DVD image burning use `hdiutil`; DVD-Video discs can be mounted read-only
-for playback and VIDEO_TS ripping; audio CD burning uses cdrdao. Optical-device
-discovery and video/audio workflows are experimental; use `DISC_DEVICE`
-when automatic detection does not find the external drive. Apple Music owns
-audio CD playback and ripping on macOS, so DiscStation does not probe or access
-audio tracks for those operations. Audio burns include CD-TEXT from the source
-folder/file name and track metadata. Apple Music may still show generic track
-names when its online CD lookup has no match; CD-TEXT-capable players can read
-the embedded names. The macOS installer installs a persistent `launchd` service.
+Near-complete native support via Homebrew dependencies (`install-macos.sh`
+installs them and a persistent `launchd` agent):
+
+- **Detect** — optical device via `ioreg` / `drutil` / `diskutil`; blank and
+  rewritable media are classified, so the OLED offers the burn menu.
+- **Burn** — data and DVD-Video images are built with `xorriso -as mkisofs`
+  (`-dvd-video` for a set-top-compatible VIDEO_TS layout) and written with
+  `hdiutil burn` (progress streamed from its `-puppetstrings` output).
+- **Rip** — audio CD via `cd-paranoia` → FLAC with MusicBrainz metadata and
+  cover art; DVD-Video via `dvdbackup -M` (or HandBrake main-feature with
+  `DISCSTATION_DVD_RIP_MODE=mkv`), `libdvdcss` handling CSS.
+- **Play** — `mpv`, with `dvdnav://` menu navigation for DVD-Video and a
+  mounted-VOB fallback.
+
+Set `DISC_DEVICE` if automatic drive detection fails. The one known limitation
+is **audio-CD *burning*** — `cdrdao` is the only option and often cannot claim
+the drive on recent macOS; DiscStation reports this clearly instead of hanging.
 
 ## Windows
 
@@ -32,8 +39,8 @@ instead of silently attempting Linux commands.
 - DiscStation workflows and web UI
 - ESP32 serial protocol
 - File upload and folder preservation
-- Video/audio metadata handling
+- Video/audio metadata handling (MusicBrainz, TMDb)
 - QR-code web URL display
 
-The optical-drive backend is the platform boundary. It should be completed per
-OS before claiming full native burning support on that platform.
+The optical-drive backend is the platform boundary. Linux and macOS are
+complete (bar macOS audio-CD burning); Windows still needs its writer backend.

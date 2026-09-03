@@ -18,7 +18,7 @@ if (args.includes('-h') || args.includes('--help')) {
 
 Runs the installer for the current OS:
   linux    install.sh          full: apt deps, venv, systemd --user service, self-signed cert
-  darwin   install-macos.sh    full: Homebrew deps, venv, launchd agent, cert (optical is experimental)
+  darwin   install-macos.sh    full: Homebrew deps, venv, launchd agent, cert (audio-CD burn is best-effort)
   windows  install-windows.ps1 files + venv only; web/serial control, no burn backend
 
 Prereqs: Node 16+, Python 3 (python3 / py on PATH), and either bash (linux/macOS)

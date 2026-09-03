@@ -17,23 +17,27 @@ playback, ripping, phone uploads, and ESP32 remote control.
 | **Burn Data DVD** | Any files/folders → ISO/Joliet data disc (no quality loss) |
 | **Burn MPG** | Re-burn a previously converted movie.mpg |
 | **Play** | Playback via mpv (DVD-Video, Audio CD, VCD, SVCD) |
-| **Rip** | Audio CD → FLAC with MusicBrainz metadata |
+| **Rip** | Audio CD → FLAC (MusicBrainz); DVD-Video → VIDEO_TS mirror or HandBrake MKV (TMDb naming) |
 
 ## Project Structure
 
 ```
 .
 ├── src/
-│   ├── discstation.py    # Main orchestrator, serial, web server
-│   └── discstation_burn.py       # Burn pipeline (download, convert, author, burn)
+│   ├── discstation.py        # Main orchestrator, serial, web server
+│   ├── discstation_burn.py   # Burn pipeline (download, convert, author, burn)
+│   ├── discstation_host.py   # Per-OS device/path/backend abstraction
+│   ├── discstation_meta.py   # TMDb video metadata
+│   └── static/               # Built-in web UI (index.html, app.js, style.css)
+├── mobile/                   # Expo (React Native) companion app
 ├── arduino/
-│   ├── c6/               # ESP32-C6 firmware
-│   └── v1/               # ESP32 DevKit firmware
-├── docs/                 # Platform support notes
-├── install.sh            # Linux host installer
-├── install-macos.sh      # macOS host bootstrap
-├── install-windows.ps1   # Windows host bootstrap
-├── systemd/              # Linux auto-start unit
+│   ├── c6/                   # ESP32-C6 firmware
+│   └── v1/                   # ESP32 DevKit firmware
+├── scripts/setup.mjs         # `discstation-setup` — cross-OS installer dispatch
+├── docs/                     # Platform support notes
+├── install.sh / install-macos.sh / install-windows.ps1
+├── requirements.txt / requirements-optional.txt
+├── systemd/                  # Linux auto-start unit
 └── README.md
 ```
 
@@ -52,7 +56,7 @@ discstation-setup          # dispatches to the installer for your OS
 | OS | What runs | Optical support |
 |----|-----------|-----------------|
 | Linux | `install.sh` — apt deps, venv, systemd `--user` service, self-signed cert | full burn / rip / play |
-| macOS | `install-macos.sh` — Homebrew deps, venv, launchd agent, cert | experimental (set `DISC_DEVICE` if detection fails) |
+| macOS | `install-macos.sh` — Homebrew deps, venv, launchd agent, cert | burn / rip / play (audio-CD *burning* is best-effort; set `DISC_DEVICE` if detection fails) |
 | Windows | `install-windows.ps1` — files + venv | web / serial control only, no burn backend |
 
 ### Or run the platform script directly
@@ -75,9 +79,10 @@ PowerShell -ExecutionPolicy Bypass -File .\install-windows.ps1
 
 ## Platform Support
 
-Linux currently supports the complete optical workflow. macOS and Windows use
-the shared Python/web workflows, but their native optical burning backends are
-still being implemented. See `docs/PLATFORM_SUPPORT.md`.
+Linux and macOS both run the complete optical workflow (burn, rip, play) —
+macOS via `xorriso` / `hdiutil` / `cd-paranoia` / `dvdbackup` / HandBrake, with
+audio-CD *burning* the one best-effort area. Windows runs the shared Python/web
+workflow only; it has no burn backend yet. See `docs/PLATFORM_SUPPORT.md`.
 
 ## Web Interface
 
@@ -102,6 +107,11 @@ Built-in web server on port 8080 (HTTPS with self-signed cert):
 | `DISC_CLEANUP_DAYS` | 2 | Auto-cleanup old job directories |
 | `DISC_OUTPUT_LIMIT_BYTES` | 4300000000 | Conservative DVD5 payload limit |
 | `DISC_DL_OUTPUT_LIMIT_BYTES` | 8000000000 | Conservative DVD9 payload limit |
+| `DISC_DEVICE` | auto | Optical drive node override (required on Windows) |
+| `DISC_PORT` | auto | ESP32 serial port override |
+| `DISCSTATION_HTTP_PORT` | 8081 | Plain-HTTP port for the mobile app (`0` disables) |
+| `DISCSTATION_DVD_RIP_MODE` | mirror | `mkv` = HandBrake main-feature transcode instead of a full VIDEO_TS mirror |
+| `DISC_AUDIO_DEVICE` | auto | mpv audio-output device override |
 
 ### YouTube Download Configuration
 
