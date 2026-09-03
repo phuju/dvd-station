@@ -295,23 +295,30 @@ def build_data_image(source_paths, output_path, label, video=False):
         # xorriso's mkisofs emulation is the same lineage as Linux's
         # genisoimage/growisofs; -dvd-video gives a set-top-compatible
         # VIDEO_TS layout (the arg is the dir *containing* VIDEO_TS).
+        # xorriso's mkisofs emulation does NOT accept `-udf`; -dvd-video alone
+        # gives a DVD-Video-compliant ISO9660 layout set-top players read.
         command = [tool("xorriso"), "-as", "mkisofs", "-V", label, "-o", str(output_path)]
         if video:
-            command += ["-dvd-video", "-udf", str(source_paths[0])]
+            command += ["-dvd-video", str(source_paths[0])]
         else:
-            command += ["-iso-level", "3", "-J", "-R", "-udf",
-                        *[str(path) for path in source_paths]]
+            command += ["-iso-level", "3", "-J", "-R", *[str(path) for path in source_paths]]
     else:
         raise RuntimeError("Image building is only used by non-Linux optical backends")
-    subprocess.run(command, check=True, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        lines = [ln.strip() for ln in (result.stderr or result.stdout).splitlines() if ln.strip()]
+        tail = next((ln for ln in reversed(lines) if "FAILURE" in ln.upper()),
+                    lines[-1] if lines else f"exit {result.returncode}")
+        raise RuntimeError(f"xorriso: {tail[:200]}")
     return output_path
 
 
 def iso_burn_command(device, image_path):
     system = system_name()
     if system == "darwin":
-        # -puppetstrings emits machine-readable PERCENT: / MESSAGE: lines.
-        return [tool("hdiutil"), "burn", "-puppetstrings", str(image_path)]
+        # -puppetstrings emits machine-readable PERCENT: / MESSAGE: lines;
+        # -nosynth writes the image verbatim so a bootable ISO stays bootable.
+        return [tool("hdiutil"), "burn", "-puppetstrings", "-nosynth", str(image_path)]
     if system == "windows":
         return [tool("isoburn.exe"), "/Q", device, str(image_path)]
     raise RuntimeError("ISO command requested on Linux; use growisofs backend")

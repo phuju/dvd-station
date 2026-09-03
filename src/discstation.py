@@ -2752,6 +2752,13 @@ def burn_data_flow(ser):
         if not files_to_burn:
             raise RuntimeError("No files to burn")
 
+        # A single .iso (loose, a local path, or an upload folder holding just
+        # the .iso) is written verbatim as a bootable image, not repackaged.
+        if len(files_to_burn) == 1 and files_to_burn[0].is_dir():
+            inner = [p for p in files_to_burn[0].iterdir() if p.is_file()]
+            if len(inner) == 1 and inner[0].suffix.lower() == ".iso":
+                files_to_burn = inner
+
         total_bytes = sum(f.stat().st_size for f in files_to_burn if f.is_file())
         for d in files_to_burn:
             if d.is_dir():
