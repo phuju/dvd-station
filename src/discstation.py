@@ -1461,8 +1461,6 @@ def disc_title(device):
                     if t:
                         return t
     elif kind == "audio_cd":
-        if discstation_host.system_name() == "darwin":
-            return "Apple Music"
         try:
             toc = audio_cd_toc(device)
             if toc and toc.get("track_count"):
@@ -1533,8 +1531,6 @@ def menu_items_for_disc(device):
         had = discstation_burn.WORK.rglob("movie.mpg")
         if any(True for _ in had):
             items.append("BURN MPG")
-    elif kind == "audio_cd" and discstation_host.system_name() == "darwin":
-        items = ["APPLE MUSIC"]
     elif kind in ("dvd_video", "audio_cd", "vcd", "svcd", "video_data", "data_disc", "data_cd"):
         items = ["PLAY", "RIP"]
     else:
@@ -1612,47 +1608,38 @@ def disc_video_files(mount_dir):
 
 def audio_cd_toc(device):
     if discstation_host.system_name() == "darwin":
-        toc_path = discstation_burn.WORK / "mac_audio_read.toc"
+        paranoia = None
+        for name in ("cd-paranoia", "cdparanoia"):
+            try:
+                paranoia = discstation_burn.tool(name)
+                break
+            except FileNotFoundError:
+                continue
+        if not paranoia:
+            raise RuntimeError("cd-paranoia not installed (brew install libcdio-paranoia)")
         result = subprocess.run(
-            [discstation_burn.tool("cdrdao"), "read-toc", "--fast-toc",
-             "--device", discstation_host.cdrdao_device(device), str(toc_path)],
+            [paranoia, "-Q", "-d", rip_device(device)],
             capture_output=True, text=True, timeout=30,
         )
         text = ensure_text(result.stdout) + ensure_text(result.stderr)
-        toc_text = toc_path.read_text(errors="replace") if toc_path.exists() else ""
-        toc_path.unlink(missing_ok=True)
-        if result.returncode != 0:
-            detail = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "cdrdao failed")
+        # "  1.    18288 [04:03.63]        0 [00:00.00]    no   no  2"
+        begins, lengths = [], []
+        for line in text.splitlines():
+            match = re.match(r"\s*(\d+)\.\s+(\d+)\s+\[[\d:.]+\]\s+(\d+)\s+\[", line)
+            if match:
+                lengths.append(int(match.group(2)))
+                begins.append(int(match.group(3)))
+        if not begins:
+            detail = next((l.strip() for l in reversed(text.splitlines()) if l.strip()), "cd-paranoia -Q failed")
             raise RuntimeError(f"Could not read macOS CD TOC: {detail[:100]}")
-
-        durations = []
-        for block in re.split(r"(?m)^\s*//\s*Track\s+\d+\s*$", toc_text)[1:]:
-            file_lines = re.findall(r"(?m)^\s*FILE\b.*$", block)
-            file_times = re.findall(r"\d+:\d+:\d+", file_lines[-1]) if file_lines else []
-            pregap_times = re.findall(r"(?m)^\s*SILENCE\s+(\d+:\d+:\d+)", block)
-            if file_times:
-                duration = _msf_frames(file_times[-1])
-                duration += sum(_msf_frames(value) for value in pregap_times)
-                durations.append(duration)
-        if not durations:
-            for line in text.splitlines():
-                match = re.match(r"\s*(\d+)\s+AUDIO.*?\((\d+)\).*?\((\d+)\)", line)
-                if match:
-                    durations.append(int(match.group(3)) - int(match.group(2)))
-        if not durations:
-            raise RuntimeError("Could not read macOS CD TOC")
-        tracks = []
-        position = 150
-        for duration in durations:
-            tracks.append(position)
-            position += duration
-        leadout = position
+        tracks = [begin + 150 for begin in begins]           # LBA -> MB frame offset
+        leadout = begins[-1] + lengths[-1] + 150
         return {
             "first_track": 1,
-            "track_count": len(durations),
+            "track_count": len(tracks),
             "leadout": leadout,
             "tracks": tracks,
-            "toc": "+".join(map(str, [1, len(durations), leadout, *tracks])),
+            "toc": "+".join(map(str, [1, len(tracks), leadout, *tracks])),
         }
     if _libdiscid is not None:
         try:
@@ -1696,11 +1683,6 @@ def audio_cd_toc(device):
         "tracks": tracks,
         "toc": toc_string,
     }
-
-
-def _msf_frames(value):
-    minutes, seconds, frames = (int(part) for part in value.split(":"))
-    return (minutes * 60 + seconds) * 75 + frames
 
 
 def audio_cd_chapters(device):
@@ -2319,7 +2301,19 @@ def iter_process_events(proc, idle_seconds=1.0, ser=None):
     reader.join(timeout=1)
 
 
+def rip_device(device):
+    """The node a ripper should read. macOS libdvdread/HandBrake/cd-paranoia
+    want the raw char node (/dev/rdiskN); Linux and others use `device` as-is."""
+    if device and discstation_host.system_name() == "darwin":
+        name = Path(device).name
+        if name.startswith("disk"):
+            return f"/dev/r{name}"
+    return device
+
+
 def device_size_bytes(device):
+    if discstation_host.system_name() != "linux":
+        return discstation_host.media_capacity_bytes(device) or 0
     result = run_probe(["blockdev", "--getsize64", device], timeout=3)
     try:
         return int(ensure_text(result.stdout).strip() or "0")
@@ -3083,8 +3077,6 @@ def play_flow(ser):
     kind = disc_kind(device)
     print(f"Disc type: {kind}")
 
-    if kind == "audio_cd" and discstation_host.system_name() == "darwin":
-        raise RuntimeError("Apple Music handles audio CD playback on macOS")
     if not shutil.which("mpv"):
         raise RuntimeError("mpv not found")
 
@@ -3125,7 +3117,7 @@ def play_flow(ser):
             "--input-ipc-server=" + MPV_SOCKET,
             "--force-window=no",
             "--idle=no",
-            "--cdrom-device=" + device,
+            "--cdrom-device=" + rip_device(device),
             "--cdda-cdtext=yes",
             "cdda://",
         ]
@@ -3294,8 +3286,6 @@ def rip_flow(ser, artist_hint=None, album_hint=None):
     device = discstation_burn.disc_device()
     kind = disc_kind(device)
 
-    if kind == "audio_cd" and discstation_host.system_name() == "darwin":
-        raise RuntimeError("Apple Music handles audio CD ripping on macOS")
     if kind == "audio_cd":
         rip_audio_cd(ser, device, artist_hint, album_hint)
         return
@@ -3304,12 +3294,13 @@ def rip_flow(ser, artist_hint=None, album_hint=None):
         rip_video_disc(ser, device, kind)
         return
 
-    if kind == "dvd_video" and discstation_host.system_name() == "darwin":
-        rip_dvd_video_macos(ser, device)
-        return
-
     if kind != "dvd_video":
         raise RuntimeError(f"Unsupported disc: {kind}")
+
+    # libdvdread / HandBrake / dvdbackup want the raw node on macOS and the
+    # auto-mounted UDF/ISO volume released first (no-ops on Linux).
+    device = rip_device(device)
+    discstation_host.unmount_device(device)
 
     out_dir = RIP_ROOT / time.strftime("rip_%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -3404,45 +3395,6 @@ def remux_or_copy_video(src, dest):
         shutil.copy2(src, dest.with_suffix(src.suffix.lower()))
 
 
-def rip_dvd_video_macos(ser, device):
-    out_dir = RIP_ROOT / f"dvd_video_{time.strftime('%Y%m%d_%H%M%S')}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    send(ser, "STATUS:Ripping DVD")
-    send(ser, "INFO:Copying VIDEO_TS")
-    send(ser, "PROGRESS:0%")
-
-    with mounted_disc(device) as mount_dir:
-        source_dir = mount_dir / "VIDEO_TS"
-        if not source_dir.is_dir():
-            raise RuntimeError("VIDEO_TS directory not found")
-        files = sorted(path for path in source_dir.rglob("*") if path.is_file())
-        total_bytes = sum(path.stat().st_size for path in files)
-        copied_bytes = 0
-        for source in files:
-            relative = source.relative_to(source_dir)
-            destination = out_dir / "VIDEO_TS" / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            span = (source.stat().st_size / total_bytes * 100) if total_bytes else 0
-            discstation_burn.copy_with_keepalive(
-                ser,
-                source,
-                destination,
-                base_pct=(copied_bytes / total_bytes * 100) if total_bytes else 0,
-                pct_span=span,
-            )
-            copied_bytes += source.stat().st_size
-
-    (out_dir / "disc_info.json").write_text(
-        json.dumps({"kind": "dvd_video", "files": [str(path.relative_to(out_dir)) for path in (out_dir / "VIDEO_TS").rglob("*") if path.is_file()]}, indent=2),
-    )
-    safe_send(ser, "PROGRESS:100%")
-    safe_send(ser, "DONE:Rip complete!")
-    print(f"DVD rip complete: {out_dir}")
-    out_dir = _finalize_video_rip(ser, out_dir, device, "dvd_video")
-    chown_to_sudo_user(out_dir)
-    time.sleep(3)
-
-
 def rip_video_disc(ser, device, kind):
     out_dir = RIP_ROOT / f"{kind}_{time.strftime('%Y%m%d_%H%M%S')}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -3477,10 +3429,17 @@ def _rip_audio_cd_macos(ser, device, chapters, metadata, cover_path, out_dir):
         raise RuntimeError("No audio CD tracks found")
     wav_dir = out_dir / ".wav"
     wav_dir.mkdir(parents=True, exist_ok=True)
-    command = [
-        discstation_burn.tool("cdda2wav"), "-D",
-        discstation_host.cdrdao_device(device), "-B", "-O", "wav", "-x",
-    ]
+    paranoia = None
+    for name in ("cd-paranoia", "cdparanoia"):
+        try:
+            paranoia = discstation_burn.tool(name)
+            break
+        except FileNotFoundError:
+            continue
+    if not paranoia:
+        raise RuntimeError("cd-paranoia not installed (brew install libcdio-paranoia)")
+    # -B batch mode writes track01.cdda.wav, track02.cdda.wav, ... in cwd.
+    command = [paranoia, "-B", "-d", rip_device(device), "1-"]
     send(ser, "STATUS:RIPPING AUDIO CD")
     send(ser, "PROGRESS:0%")
     proc = subprocess.Popen(
@@ -3502,7 +3461,7 @@ def _rip_audio_cd_macos(ser, device, chapters, metadata, cover_path, out_dir):
         raise
     proc.wait()
     if proc.returncode != 0:
-        detail = next((line.strip() for line in reversed(output) if line.strip()), "cdda2wav failed")
+        detail = next((line.strip() for line in reversed(output) if line.strip()), "cd-paranoia failed")
         raise RuntimeError(f"Audio CD rip failed: {detail[:80]}")
 
     wav_files = sorted(wav_dir.glob("*.wav"))
@@ -3882,9 +3841,6 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
                 _last_burn_result = "Burn complete"
             elif mode == "PLAY":
                 play_flow(ser)
-            elif mode == "APPLE MUSIC":
-                safe_send(ser, "STATUS:Apple Music handles this audio CD")
-                time.sleep(2)
             elif mode == "RIP":
                 rip_flow(ser, artist_hint, album_hint)
                 _last_burn_result = "Rip complete"

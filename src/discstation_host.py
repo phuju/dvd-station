@@ -353,8 +353,20 @@ def cdrdao_device(device):
 
 
 def unmount_device(device):
-    """Unmount Linux optical media before handing the device to a writer."""
-    if system_name() != "linux" or not device:
+    """Release an auto-mounted optical volume before handing the raw device to a
+    writer or ripper. Media stays loaded."""
+    if not device:
+        return True
+
+    if system_name() == "darwin":
+        disk = re.sub(r"^/dev/r", "/dev/", device)  # diskutil wants the block node
+        subprocess.run(
+            ["/usr/sbin/diskutil", "unmountDisk", "force", disk],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        return True
+
+    if system_name() != "linux":
         return True
 
     udisksctl = shutil.which("udisksctl")

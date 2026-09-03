@@ -27,7 +27,8 @@ if ! command -v brew >/dev/null 2>&1; then
   exit 1
 fi
 
-brew install python ffmpeg cdrdao dvdauthor node yt-dlp xorriso mpv libdiscid handbrake
+brew install python ffmpeg cdrdao dvdauthor node yt-dlp xorriso mpv libdiscid handbrake \
+  libdvdcss dvdbackup libcdio-paranoia
 mkdir -p "$APP_DIR" "$VENV_DIR" "$CONFIG_DIR"
 cp -R "$ROOT_DIR/src/." "$APP_DIR/"
 python3 -m venv "$VENV_DIR"
