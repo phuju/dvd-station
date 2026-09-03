@@ -424,6 +424,7 @@ def eject_device(device, close=False):
             command.append("-t")
         command.append(device)
     elif system == "darwin":
+        global _last_disc_device
         # `drutil tray open` is a no-op on slot-load drives; `drutil eject`
         # works on both. `diskutil eject` is the fallback for a mounted disc.
         if close:
@@ -435,6 +436,10 @@ def eject_device(device, close=False):
         for command in commands:
             try:
                 if subprocess.run(command, capture_output=True, text=True, timeout=10).returncode == 0:
+                    if not close:
+                        # the /dev/diskN node is gone now — don't let disc_device()
+                        # hand back this stale node when the next disc goes in.
+                        _last_disc_device = None
                     return True
             except (OSError, subprocess.TimeoutExpired):
                 pass

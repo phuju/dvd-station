@@ -571,6 +571,13 @@ def _record_web_status(msg):
     elif msg.startswith("CANCELLED:"):
         _web_status = msg[10:].strip() or "CANCELLED"
         _web_progress_active = False
+    elif msg.startswith(("STANDBY:", "HOME:")):
+        # idle again (tray open, insert disc, back to the menu) — clear any
+        # lingering "Ejecting..." / progress state on the web UI.
+        text = msg.split(":", 1)[1].strip()
+        _web_status = "READY" if text in ("", "DiscStation", "Select mode", "Starting...") else text
+        _web_progress = -1
+        _web_progress_active = False
     else:
         return
     _sse_publish(_status_snapshot())
@@ -3829,9 +3836,13 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
                         apply_disc_line("Disc: reading...")
                 elif st == "disc":
                     _tray_open = False
+                    transient_words = ["none", "checking", "reading", "tray open"]
+                    if discstation_host.system_name() == "darwin":
+                        # macOS slot drives take a few seconds to mount; "unknown"
+                        # is a not-ready read, not a settled answer — keep re-polling.
+                        transient_words.append("unknown")
                     have_line = last_disc_line and not any(
-                        w in last_disc_line.lower()
-                        for w in ("none", "checking", "reading", "tray open"))
+                        w in last_disc_line.lower() for w in transient_words)
                     if not have_line and _disc_poll_future is None:
                         _disc_poll_start = now
                         last_disc_poll = now
