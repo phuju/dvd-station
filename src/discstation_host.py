@@ -163,6 +163,19 @@ def drive_status():
     return "unknown"
 
 
+def _tag_rewritable(props, media_type):
+    """Set the ID_CDROM_MEDIA_*_RW key that discstation.is_rewritable_disc reads,
+    from a lowercased media-type string (drutil 'Type:' or diskutil 'Optical
+    Media Type'). ponytail: substring match — same heuristic as the rest of this
+    module."""
+    if "cd-rw" in media_type or "cdrw" in media_type:
+        props["ID_CDROM_MEDIA_CD_RW"] = "1"
+    elif "dvd-rw" in media_type or "dvd-ram" in media_type:
+        props["ID_CDROM_MEDIA_DVD_RW"] = "1"
+    elif "dvd+rw" in media_type or "bd-re" in media_type:
+        props["ID_CDROM_MEDIA_DVD_PLUS_RW"] = "1"
+
+
 def _drutil_media_properties():
     result = subprocess.run(["/usr/bin/drutil", "status"], capture_output=True, text=True, check=False, timeout=3)
     text = result.stdout + result.stderr
@@ -170,12 +183,16 @@ def _drutil_media_properties():
     if result.returncode != 0 or "no media" in lowered:
         return {}
     props = {"ID_CDROM": "1", "ID_CDROM_MEDIA": "1"}
-    if "space used:" in lowered and "00:00:00" in lowered.split("space used:", 1)[1][:24]:
+    blank = "space used:" in lowered and "00:00:00" in lowered.split("space used:", 1)[1][:24]
+    if blank:
         props["ID_CDROM_MEDIA_STATE"] = "blank"
-    if "type: cd" in lowered:
-        props["ID_CDROM_MEDIA_TYPE"] = "audio"
-    elif "type: dvd" in lowered:
+    match = re.search(r"type:\s*([a-z0-9+\-]+)", lowered)
+    media_type = match.group(1) if match else ""
+    if media_type.startswith("dvd") or media_type.startswith("bd"):
         props["ID_CDROM_MEDIA_TYPE"] = "dvd"
+    elif media_type.startswith("cd") and not blank and "-r" not in media_type:
+        props["ID_CDROM_MEDIA_TYPE"] = "audio"
+    _tag_rewritable(props, media_type)
     return props
 
 
@@ -187,7 +204,7 @@ def media_properties(device):
         except subprocess.TimeoutExpired:
             return _drutil_media_properties()
         if disk.returncode != 0:
-            return {}
+            return _drutil_media_properties()
         fields = {}
         for line in disk.stdout.splitlines():
             if ":" in line:
@@ -195,7 +212,7 @@ def media_properties(device):
                 fields[key.strip()] = value.strip()
         optical = fields.get("Optical Media Type", "")
         if not optical and not fields.get("Device / Media Name"):
-            return {}
+            return _drutil_media_properties()
         props = {"ID_CDROM": "1", "ID_CDROM_MEDIA": "1"}
         label = fields.get("Volume Name", "")
         filesystem = fields.get("Type (Bundle)") or fields.get("File System Personality")
@@ -223,8 +240,9 @@ def media_properties(device):
         optical = optical.lower()
         if "dvd+r dl" in optical or "dvd-r dl" in optical:
             props["ID_CDROM_MEDIA_DVD_PLUS_R_DL"] = "1"
-        elif "dvd+r" in optical or "dvd-r" in optical:
+        elif ("dvd+r" in optical or "dvd-r" in optical) and "rw" not in optical:
             props["ID_CDROM_MEDIA_DVD_PLUS_R"] = "1"
+        _tag_rewritable(props, optical)
         return props
     return {}
 

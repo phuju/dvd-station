@@ -1046,6 +1046,9 @@ def is_rewritable_disc(device):
             "",
         )
         return "rw" in media_line
+    # Non-Linux: the RW signal comes from the ID_CDROM_MEDIA_*_RW keys above,
+    # which discstation_host.media_properties() tags from the drutil/diskutil
+    # media type.
     return False
 
 
@@ -1248,6 +1251,12 @@ def _classify_disc(device, props, failed, deadline):
                 print(f"Disc inspection failed: {e}")
             kind = kind or "data_disc"
             return _disc_info(True, kind, web_type=_web_type_for(kind, 0))
+        if props.get("ID_CDROM_MEDIA_STATE") == "blank":
+            try:
+                cap = discstation_burn.disc_capacity_bytes(device) or 0
+            except Exception:
+                cap = 0
+            return _disc_info(True, "blank", capacity_bytes=cap, web_type="BLANK")
         return _disc_info(True, "unknown", web_type="UNKNOWN", failed_probes=failed)
 
     # Fast path for a blank disc: cdrom_id reports this reliably in ~20ms, and
