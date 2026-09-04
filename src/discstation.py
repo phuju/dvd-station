@@ -2519,7 +2519,7 @@ def burn_flow(ser, url):
     job_dir.mkdir()
 
     send(ser, "STATUS:Preflight...")
-    info = discstation_burn.get_video_info(url)
+    info = discstation_burn.get_video_info(url, ser)
     title = info["title"]
     duration = info["duration"]
     duration_line, fit_line, can_fit = discstation_burn.preflight_lines(duration, disc_bytes)
@@ -2776,7 +2776,7 @@ def burn_data_flow(ser):
         title = local_path.name if local_path.is_dir() else local_path.stem
     else:
         send(ser, "STATUS:Probing source...")
-        info = discstation_burn.get_video_info(url)
+        info = discstation_burn.get_video_info(url, ser)
         title = info["title"]
 
     if _last_upload_label:

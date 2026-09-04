@@ -721,7 +721,7 @@ def get_local_video_info(path):
     return {"title": stem, "duration": dur}
 
 
-def get_video_info(source):
+def get_video_info(source, ser=None):
     p = Path(source)
     if p.is_dir():
         videos = find_video_files(source)
@@ -733,6 +733,11 @@ def get_video_info(source):
         return get_local_video_info(source)
     errors = []
     for player_client in YTDLP_PLAYER_CLIENTS or (None,):
+        # This yt-dlp metadata fetch can take a while (retries, slow network) -
+        # without a PING during the wait, the ESP32's 30s silence watchdog
+        # flips the OLED to "disconnected" while the host is still alive and
+        # just blocked on subprocess.run. Same keepalive download() uses.
+        stop_ping, pt = _start_keepalive(ser) if ser else (None, None)
         try:
             r = subprocess.run(
                 [*ytdlp_base_args(player_client), '--dump-single-json', '--skip-download', source],
@@ -743,6 +748,10 @@ def get_video_info(source):
         except subprocess.TimeoutExpired:
             errors.append(f"{player_client or 'default'} client timed out")
             continue
+        finally:
+            if stop_ping:
+                stop_ping.set()
+                pt.join(timeout=1)
         if r.returncode != 0:
             errors.append(r.stderr.strip() or f"{player_client or 'default'} client failed")
             continue
@@ -1722,7 +1731,7 @@ def main():
         print("Connected to DiscStation")
         print("Running preflight...")
         send(ser, "STATUS:Preflight...")
-        info = get_video_info(url)
+        info = get_video_info(url, ser)
         title = info["title"]
         duration = info["duration"]
         duration_line, fit_line, can_fit = preflight_lines(duration)
