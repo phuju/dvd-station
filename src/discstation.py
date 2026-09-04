@@ -3399,11 +3399,13 @@ def _handbrake_json_blocks(text):
 def handbrake_scan(device):
     """Return {'main_feature': int|None, 'titles': [{index,duration_s,chapters}]}
     or None. Uses HandBrakeCLI, which does real main-feature detection."""
-    if not shutil.which("HandBrakeCLI"):
+    try:
+        handbrake_cli = discstation_burn.tool("HandBrakeCLI")
+    except FileNotFoundError:
         return None
     try:
         r = subprocess.run(
-            ["HandBrakeCLI", "--json", "--scan", "-i", device, "-t", "0"],
+            [handbrake_cli, "--json", "--scan", "-i", device, "-t", "0"],
             capture_output=True, text=True, timeout=180,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -3435,7 +3437,7 @@ def handbrake_rip_main_feature(ser, device, out_dir, title_index):
     send(ser, f"INFO:HandBrake title {title_index}")
     send(ser, "PROGRESS:0%")
     proc = subprocess.Popen(
-        ["HandBrakeCLI", "--json", "-i", device, "-o", str(dest),
+        [discstation_burn.tool("HandBrakeCLI"), "--json", "-i", device, "-o", str(dest),
          "-t", str(title_index), "-e", "x264", "-q", "20",
          "--all-audio", "--all-subtitles"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -3482,6 +3484,50 @@ def rip_flow(ser, artist_hint=None, album_hint=None):
 
     out_dir = RIP_ROOT / time.strftime("rip_%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if discstation_host.system_name() == "windows":
+        # Neither dvdbackup nor HandBrakeCLI's libdvdread reliably reads this
+        # drive on Windows (the latter hangs rather than erroring) - skip
+        # both and just mirror the drive with robocopy, a plain recursive
+        # file copy. Same real byte-count progress technique as the
+        # dvdbackup path below (accurate, not an estimate - directory size
+        # vs. known disc size).
+        send(ser, "STATUS:Ripping disc...")
+        send(ser, "INFO:Full VIDEO_TS copy")
+        send(ser, "PROGRESS:0%")
+        source = str(device).rstrip("\\/").rstrip(":") + ":\\"
+        print(f"Ripping {source} to {out_dir}")
+        proc = subprocess.Popen(
+            ["robocopy", source, str(out_dir), "/E", "/R:1", "/W:1"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        disc_bytes = device_size_bytes(device)
+        last_pct = -1
+        try:
+            for event in iter_process_events(proc, ser=ser):
+                if event is None and disc_bytes > 0:
+                    pct = min(int(directory_size_bytes(out_dir) / disc_bytes * 100), 99)
+                    if pct > last_pct:
+                        last_pct = pct
+                        send(ser, f"PROGRESS:{pct}%")
+        except CancelError:
+            safe_send(ser, "CANCELLED:Rip cancelled")
+            print("Rip cancelled by user")
+            return
+        except (KeyboardInterrupt, SystemExit):
+            discstation_burn.stop_process(proc)
+            safe_send(ser, "CANCELLED:Rip stopped")
+            raise
+        rc = proc.wait()
+        if rc >= 8:  # robocopy: 0-7 are success variants, only 8+ is a real failure
+            raise RuntimeError(f"robocopy failed (exit {rc})")
+        safe_send(ser, "PROGRESS:100%")
+        safe_send(ser, "DONE:Rip complete!")
+        print(f"Rip complete: {out_dir}")
+        out_dir = _finalize_video_rip(ser, out_dir, device, "dvd_video")
+        chown_to_sudo_user(out_dir)
+        time.sleep(3)
+        return
 
     scan = handbrake_scan(device)
     if scan:

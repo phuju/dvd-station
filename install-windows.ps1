@@ -73,6 +73,13 @@ if ($winget -and -not $IsWin7) {
             if ($mpvAsset) { Get-Zip $mpvAsset.browser_download_url (Join-Path $tools "mpv") | Out-Null }
         } catch { Write-Host "  mpv fetch skipped" }
     }
+    if (-not (Have "HandBrakeCLI")) {
+        try {
+            $hbRelease = Invoke-RestMethod "https://api.github.com/repos/HandBrake/HandBrake/releases/latest" -UseBasicParsing -TimeoutSec 25
+            $hbAsset = $hbRelease.assets | Where-Object { $_.name -match "^HandBrakeCLI-.*-win-x86_64\.zip$" } | Select-Object -First 1
+            if ($hbAsset) { Get-Zip $hbAsset.browser_download_url (Join-Path $tools "handbrake") | Out-Null }
+        } catch { Write-Host "  HandBrakeCLI fetch skipped" }
+    }
     # dvdauthor + spumux (DVD-Video authoring/subtitles) have no winget package;
     # this VideoHelp-hosted plain .zip (no rar/unrar needed) is the only
     # reliable direct-download source found.
