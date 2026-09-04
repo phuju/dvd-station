@@ -23,11 +23,18 @@ try {
 if (-not $out.media_loaded) { Write-Output (ConvertTo-JsonCompat $out); exit 0 }
 
 # Volume label + filesystem (WMI logical disk).
+$isAudioCd = $false
 try {
     $ld = Get-WmiObject Win32_LogicalDisk -Filter ("DeviceID='" + $out.drive + "'")
     if ($ld) {
         if ($ld.VolumeName) { $out.label = $ld.VolumeName }
-        if ($ld.FileSystem) {
+        # Windows presents a synthetic CDFS view (fixed volume name "Audio
+        # CD") for audio discs, purely so Explorer can browse track01.cda
+        # files - it's not a real filesystem. Treating it as one made every
+        # audio CD misclassify as a data disc.
+        if ($ld.VolumeName -eq "Audio CD" -and "$($ld.FileSystem)" -ieq "CDFS") {
+            $isAudioCd = $true
+        } elseif ($ld.FileSystem) {
             $fs = $ld.FileSystem.ToLower()
             if ($fs -match "udf") { $out.fs = "udf" }
             elseif ($fs -match "cdfs|iso9660") { $out.fs = "iso9660" }
@@ -64,13 +71,11 @@ try {
     }
 } catch {}
 
-# An audio CD has readable media, no filesystem, and (usually) no IMAPI type.
-if (-not $out.fs -and -not $out.blank -and ($out.media_type -eq "" -or $out.media_type -match "^cd")) {
-    try {
-        $ld2 = Get-WmiObject Win32_CDROMDrive -Filter ("Drive='" + $out.drive + "'")
-        # Win32_CDROMDrive has no track info; treat "media loaded, no FS, not blank" as audio.
-        $out.media_type = "audio_cd"
-    } catch {}
+# $isAudioCd (Windows' own synthetic "Audio CD" CDFS view, detected above) is
+# authoritative - overrides whatever IMAPI2's physical-media-type guess said,
+# since a finalized audio CD-R still reports as generic "cd-rom" there.
+if ($isAudioCd) {
+    $out.media_type = "audio_cd"
 }
 
 Write-Output (ConvertTo-JsonCompat $out)
