@@ -19,7 +19,10 @@ except ImportError:
 import re
 import shutil
 import socket
-import ssl
+try:
+    import ssl  # optional: HTTPS on :8080. The plain-HTTP :8081 listener works without it.
+except ImportError:
+    ssl = None
 import subprocess
 import sys
 import tempfile
@@ -352,13 +355,17 @@ def start_web_server(port=8080):
     cert_dir = discstation_host.config_dir()
     cert = cert_dir / 'server.crt'
     key = cert_dir / 'server.key'
-    if cert.exists() and key.exists():
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(str(cert), str(key))
-        server.socket = ctx.wrap_socket(server.socket, server_side=True)
-        print(f"Web interface on https://0.0.0.0:{port}")
+    if ssl is not None and cert.exists() and key.exists():
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(str(cert), str(key))
+            server.socket = ctx.wrap_socket(server.socket, server_side=True)
+            print(f"Web interface on https://0.0.0.0:{port}")
+        except (ssl.SSLError, OSError) as e:
+            print(f"TLS disabled ({e}); serving plain HTTP on {port}")
     else:
-        print(f"Web interface on http://0.0.0.0:{port}")
+        print(f"Web interface on http://0.0.0.0:{port}"
+              + ("" if ssl is not None else " (ssl module unavailable)"))
 
     _web_server = server
     t = threading.Thread(target=server.serve_forever, daemon=True)
