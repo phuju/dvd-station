@@ -54,7 +54,6 @@ _web_port = 8080
 _web_server = None
 _last_burn_result = None
 _last_burn_result_time = 0
-_last_upload_dir = None
 _last_upload_label = None
 _web_status = "READY"
 _web_progress = -1
@@ -117,7 +116,6 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             self._respond(400, 'Missing URL')
 
     def _handle_upload(self):
-        global _last_upload_dir
         _set_web_progress("UPLOADING", 0)
         files = self._parse_multipart(lambda percent: _set_web_progress("UPLOADING", percent))
         if not files:
@@ -148,13 +146,15 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
             total += len(data)
-        _last_upload_dir = str(upload_dir)
         # wait_for_web_url() (already running on the OLED side once a burn
         # mode is selected first - the normal flow: scan the QR code, then
         # upload) only ever reads from _burn_url_queue, same as a pasted
-        # URL. Without this, an upload landing while that loop is already
-        # waiting was invisible to it - stuck on both the web page and the
-        # OLED until the wait timed out on its own with nothing to show.
+        # URL - this is the one and only signal an upload sends. (A second,
+        # separate _last_upload_dir global used to exist alongside this;
+        # removed - having two mechanisms for the same event meant one
+        # could consume its half while the other's copy sat undrained in
+        # the queue forever, waiting to wrongly satisfy a later, unrelated
+        # burn attempt.)
         _burn_url_queue.put(str(upload_dir))
         size_str = f"{total / 1e6:.1f}MB" if total > 1e6 else f"{total / 1e3:.0f}KB"
         _set_web_progress("UPLOAD READY", 100)
@@ -2745,12 +2745,9 @@ def _copy_to_job(ser, src, dst_dir):
 
 
 def burn_data_flow(ser):
-    global _last_upload_dir, _last_upload_label
+    global _last_upload_label
 
-    if _last_upload_dir and Path(_last_upload_dir).exists():
-        url = _last_upload_dir
-        _last_upload_dir = None
-    elif _stdin_is_tty():
+    if _stdin_is_tty():
         safe_send(ser, "STATUS:Enter URL or file path in terminal")
         print("=== Enter URL or file path below, then press Enter ===")
         try:
