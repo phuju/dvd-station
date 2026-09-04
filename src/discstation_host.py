@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from serial.tools import list_ports
@@ -102,6 +103,7 @@ _last_disc_device = None
 # --- Windows: IMAPI2 / WMI probes via bundled PowerShell helpers ---------------
 _WIN_DIR = Path(__file__).resolve().parent / "win"
 _win_info_cache = (0.0, None)
+_win_info_lock = threading.Lock()
 
 
 def ps_cmd(script_name, *args):
@@ -127,25 +129,34 @@ def _run_ps(script_name, *args, timeout=25):
 
 
 def _win_disc_info(force=False):
-    """Cached (~2s) dict from src/win/disc-info.ps1, or {} on failure."""
+    """Cached (~2s) dict from src/win/disc-info.ps1, or {} on failure.
+
+    Locked: disc-info.ps1's IMAPI2 calls appear to serialize on the physical
+    drive, so a burst of concurrent callers (multiple web UI tabs, the HTTP
+    /disc-info endpoint racing station_loop's own poll) each missing the
+    cache at once used to spawn a pile of concurrent powershell.exe
+    processes that queued up behind each other and blew past the timeout -
+    reporting a false "no disc". One in-flight refresh, shared by whoever's
+    waiting, instead of one per caller."""
     import json as _json
     import time
     global _win_info_cache
-    ts, cached = _win_info_cache
-    if not force and cached is not None and time.time() - ts < 2.0:
-        return cached
-    override = os.environ.get("DISC_DEVICE") or os.environ.get("DVD_DEVICE") or ""
-    rc, out, _ = _run_ps("disc-info.ps1", *([override] if override else []), timeout=20)
-    info = {}
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                info = _json.loads(line)
-            except ValueError:
-                pass
-    _win_info_cache = (time.time(), info)
-    return info
+    with _win_info_lock:
+        ts, cached = _win_info_cache
+        if not force and cached is not None and time.time() - ts < 2.0:
+            return cached
+        override = os.environ.get("DISC_DEVICE") or os.environ.get("DVD_DEVICE") or ""
+        rc, out, _ = _run_ps("disc-info.ps1", *([override] if override else []), timeout=20)
+        info = {}
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    info = _json.loads(line)
+                except ValueError:
+                    pass
+        _win_info_cache = (time.time(), info)
+        return info
 
 
 def disc_device():
