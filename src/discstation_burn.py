@@ -733,11 +733,16 @@ def get_video_info(source):
         return get_local_video_info(source)
     errors = []
     for player_client in YTDLP_PLAYER_CLIENTS or (None,):
-        r = subprocess.run(
-            [*ytdlp_base_args(player_client), '--dump-single-json', '--skip-download', source],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            r = subprocess.run(
+                [*ytdlp_base_args(player_client), '--dump-single-json', '--skip-download', source],
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+        except subprocess.TimeoutExpired:
+            errors.append(f"{player_client or 'default'} client timed out")
+            continue
         if r.returncode != 0:
             errors.append(r.stderr.strip() or f"{player_client or 'default'} client failed")
             continue

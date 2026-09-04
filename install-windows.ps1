@@ -65,12 +65,16 @@ if ($winget -and -not $IsWin7) {
     }
     if (-not (Have "ffmpeg")) { Get-Zip "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" $tools | Out-Null }
     if (-not (Have "mpv")) { Get-Zip "https://sourceforge.net/projects/mpv-player-windows/files/latest/download" $tools | Out-Null }
+    # dvdauthor + spumux (DVD-Video authoring/subtitles) have no winget package;
+    # this VideoHelp-hosted plain .zip (no rar/unrar needed) is the only
+    # reliable direct-download source found.
+    if (-not (Have "dvdauthor")) { Get-Zip "https://download.videohelp.com/gfd/edcounter.php?file=download/dvdauthor_winbin.zip" (Join-Path $tools "dvdauthor") | Out-Null }
     if (Test-Path $tools) {
         $env:Path = $env:Path + ";" + $tools + ";" +
             ((Get-ChildItem $tools -Recurse -Filter "ffmpeg.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName)
     }
     Write-Host "xorriso and HandBrakeCLI have no simple direct-download URL - install manually if you need"
-    Write-Host "video-DVD authoring / DVD ripping (see the plan's Windows setup notes)."
+    Write-Host "video-DVD ISO packaging / DVD ripping (see the plan's Windows setup notes)."
 } else {
     Write-Host "winget unavailable (Windows 7). ISO + data + audio burn work via IMAPI2."
     Write-Host "For rip/play/video-DVD install manually: xorriso, HandBrakeCLI 1.5.1, ffmpeg, mpv, yt-dlp."

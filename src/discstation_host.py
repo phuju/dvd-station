@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from serial.tools import list_ports
@@ -349,9 +350,28 @@ def tool(name):
     local = user_home() / ".local" / "bin" / name
     if local.exists():
         return str(local)
+    # pip-installed console scripts (yt-dlp, etc. from requirements.txt) land
+    # in the venv's own Scripts/bin dir, which isn't necessarily on PATH -
+    # e.g. the Windows Scheduled Task runs pythonw.exe directly, no shell
+    # activation. sys.exec_prefix is the venv root we're actually running in.
+    venv_bin = Path(sys.exec_prefix) / ("Scripts" if system_name() == "windows" else "bin")
+    for candidate_name in ((name + ".exe", name) if system_name() == "windows" else (name,)):
+        candidate = venv_bin / candidate_name
+        if candidate.exists():
+            return str(candidate)
     path = shutil.which(name)
     if path:
         return path
+    if system_name() == "windows":
+        # install-windows.ps1's no-winget fallback downloads ffmpeg/yt-dlp
+        # into config_dir()/tools (e.g. an extracted "ffmpeg-9.0-essentials
+        # build\bin\"), and only puts it on the *installer script's own*
+        # session PATH - gone the moment the installer exits. Search that
+        # tree directly instead of relying on PATH.
+        exe = name if name.lower().endswith(".exe") else name + ".exe"
+        match = next((config_dir() / "tools").rglob(exe), None) if (config_dir() / "tools").exists() else None
+        if match:
+            return str(match)
     if system_name() == "darwin":
         candidates = [
             Path("/opt/homebrew/bin") / name,
