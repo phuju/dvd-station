@@ -1335,6 +1335,11 @@ def _classify_disc(device, props, failed, deadline):
     (blkid -> lsdvd -> wodim -toc -> fs fallback -> blank) but records which
     probes timed out / were missing so the caller can retry."""
     if discstation_host.system_name() != "linux":
+        if not props.get("ID_CDROM_MEDIA"):
+            # media_properties() returned nothing -> no disc loaded (this is the
+            # only "no media" signal on a platform like Windows where the drive
+            # letter/device path exists whether or not media is present).
+            return _disc_info(False, "none")
         if props.get("ID_CDROM_MEDIA_TYPE") == "audio":
             return _disc_info(True, "audio_cd", web_type="AUDIO_CD")
         if props.get("ID_FS_TYPE") in ("udf", "iso9660"):
@@ -1711,6 +1716,24 @@ def disc_video_files(mount_dir):
 
 
 def audio_cd_toc(device):
+    if discstation_host.system_name() == "windows":
+        rc, out, err = discstation_host._run_ps("audio-toc.ps1", device, timeout=25)
+        info = {}
+        for line in out.splitlines():
+            if line.strip().startswith("{"):
+                try:
+                    info = json.loads(line)
+                except ValueError:
+                    pass
+        tracks = info.get("tracks") or []
+        if not tracks:
+            raise RuntimeError(f"Could not read CD TOC: {(err or out)[:120]}")
+        n = int(info["track_count"])
+        return {
+            "first_track": 1, "track_count": n, "leadout": int(info["leadout"]),
+            "tracks": tracks,
+            "toc": "+".join(map(str, [1, n, int(info["leadout"]), *tracks])),
+        }
     if discstation_host.system_name() == "darwin":
         paranoia = None
         for name in ("cd-paranoia", "cdparanoia"):
@@ -1790,7 +1813,7 @@ def audio_cd_toc(device):
 
 
 def audio_cd_chapters(device):
-    if discstation_host.system_name() == "darwin":
+    if discstation_host.system_name() in ("darwin", "windows"):
         toc = audio_cd_toc(device)
         tracks = toc["tracks"]
         first = tracks[0]

@@ -1,5 +1,5 @@
 # Build a data-disc filesystem image from a folder (or single file) and burn it
-# via IMAPI2 — no external mkisofs needed. Streams "PROGRESS:<pct>".
+# via IMAPI2 - no external mkisofs needed. Streams "PROGRESS:<pct>".
 # Usage: burn-data.ps1 <drive e.g. D:> <source folder-or-file> <label> [speed]
 param(
     [Parameter(Mandatory = $true)] [string] $Drive,

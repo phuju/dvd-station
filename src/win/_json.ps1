@@ -1,4 +1,4 @@
-# Minimal JSON emitter — works on PowerShell 2.0 (Win7) and up.
+# Minimal JSON emitter - works on PowerShell 2.0 (Win7) and up.
 function ConvertTo-JsonCompat {
     param([Parameter(ValueFromPipeline = $true)] $obj)
     if ($null -eq $obj) { return 'null' }

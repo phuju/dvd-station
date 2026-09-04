@@ -15,7 +15,9 @@ try {
     if ($cd.Count -eq 0) { Write-Output (ConvertTo-JsonCompat $out); exit 0 }
     $d = $cd[0]
     $out.drive = $d.Drive
-    $out.media_loaded = [bool]$d.MediaLoaded
+    # NOTE: [bool]"False" is $true in PowerShell (any non-empty string casts
+    # truthy) -- compare explicitly instead of casting.
+    $out.media_loaded = ($d.MediaLoaded -eq $true) -or ("$($d.MediaLoaded)" -eq "True")
 } catch { Write-Output (ConvertTo-JsonCompat $out); exit 0 }
 
 if (-not $out.media_loaded) { Write-Output (ConvertTo-JsonCompat $out); exit 0 }
@@ -48,7 +50,7 @@ try {
         if (-not $fmt.IsRecorderSupported($rec)) { break }
         $fmt.Recorder = $rec
         $fmt.ClientName = "DiscStation"
-        try { $out.blank = [bool]$fmt.MediaHeuristicallyBlank } catch {}
+        try { $out.blank = ($fmt.MediaHeuristicallyBlank -eq $true) } catch {}
         try { if ($fmt.MediaPhysicallyBlank) { $out.blank = $true } } catch {}
         try { $out.capacity_bytes = [int64]$fmt.TotalSectorsOnMedia * 2048 } catch {}
         $t = 0; try { $t = [int]$fmt.CurrentPhysicalMediaType } catch {}
