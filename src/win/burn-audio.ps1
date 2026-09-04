@@ -44,14 +44,28 @@ foreach ($w in $wavs) {
             $offset = $i + 8; break
         }
     }
-    $raw = New-Object byte[] ($bytes.Length - $offset)
-    [Array]::Copy($bytes, $offset, $raw, 0, $raw.Length)
+    $rawLen = $bytes.Length - $offset
+    # Red Book requires each track's byte length to be an exact multiple of
+    # the 2352-byte CD-DA sector - real-world track lengths essentially
+    # never land on that boundary naturally. AddAudioTrack rejects anything
+    # else outright ("The provided audio stream is not valid."). Pad with
+    # silence up to the next sector boundary (and up to the 4-second/
+    # 300-sector minimum a track must have) rather than trim real audio.
+    $sectorSize = 2352
+    $minLen = 300 * $sectorSize
+    $paddedLen = [Math]::Ceiling([Math]::Max($rawLen, $minLen) / $sectorSize) * $sectorSize
+    $raw = New-Object byte[] $paddedLen
+    [Array]::Copy($bytes, $offset, $raw, 0, $rawLen)
     $prepared += ,@{ name = $w.Name; data = $raw }
 }
 
 $total = $prepared.Count
 $done = 0
 try {
+    # AddAudioTrack throws E_IMAPI_DF2TAO_MEDIA_IS_NOT_PREPARED ("only valid
+    # when media has been prepared") without this - PrepareMedia locks the
+    # drive for the write session, ReleaseMedia below hands it back.
+    $fmt.PrepareMedia()
     foreach ($t in $prepared) {
         $stream = New-Object -ComObject "ADODB.Stream"
         $stream.Type = 1; $stream.Open()
@@ -62,11 +76,12 @@ try {
         $done++
         Write-Output ("PROGRESS:" + [int]([math]::Min(99, $done * 100.0 / $total)))
     }
-    $fmt.Close()
+    $fmt.ReleaseMedia()
     $fmt.Recorder.EjectMedia()
     Write-Output "PROGRESS:100"
     exit 0
 } catch {
+    try { $fmt.ReleaseMedia() } catch {}
     Write-Error ("audio burn failed: " + $_.Exception.Message)
     exit 1
 }
