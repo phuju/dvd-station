@@ -149,6 +149,13 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             dest.write_bytes(data)
             total += len(data)
         _last_upload_dir = str(upload_dir)
+        # wait_for_web_url() (already running on the OLED side once a burn
+        # mode is selected first - the normal flow: scan the QR code, then
+        # upload) only ever reads from _burn_url_queue, same as a pasted
+        # URL. Without this, an upload landing while that loop is already
+        # waiting was invisible to it - stuck on both the web page and the
+        # OLED until the wait timed out on its own with nothing to show.
+        _burn_url_queue.put(str(upload_dir))
         size_str = f"{total / 1e6:.1f}MB" if total > 1e6 else f"{total / 1e3:.0f}KB"
         _set_web_progress("UPLOAD READY", 100)
         self._respond(200, f'{len(files)} file(s) uploaded ({size_str}). Select BURN DATA on remote.')
