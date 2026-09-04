@@ -510,7 +510,13 @@ void parseMessage(String msg) {
     line1 = msg.substring(7);
     line2 = "";
     line3 = "";
-    progressPercent = -1;
+    // Don't reset progressPercent here - a STATUS: label change (e.g.
+    // "Copying files..." -> "Converting...") is often immediately
+    // followed by a fresh PROGRESS: for the same ongoing operation.
+    // Wiping it every time flipped the bar to the indeterminate dots
+    // and back on every single label update, flickering between the
+    // two. DONE:/CANCELLED:/ERROR:/NO_DISC: still reset it below - those
+    // really are the end of an operation.
     drawStatus();
 
   } else if (msg.startsWith("PROGRESS:")) {

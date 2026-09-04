@@ -535,7 +535,10 @@ void parseMessage(String msg) {
     line1 = msg.substring(7);
     line2 = "";
     line3 = "";
-    progressPercent = -1;
+    // Don't reset progressPercent here - see arduino/c6/DiscStation_C6.ino's
+    // matching comment: STATUS: label changes mid-operation are usually
+    // immediately followed by a fresh PROGRESS:, so wiping it every time
+    // flickered the bar to the indeterminate dots and back.
     drawStatus();
 
   } else if (msg.startsWith("PROGRESS:")) {
