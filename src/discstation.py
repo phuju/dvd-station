@@ -2476,9 +2476,18 @@ def directory_size_bytes(path):
     return total
 
 
+def _stdin_is_tty():
+    """sys.stdin is None under pythonw.exe (no console) - plain .isatty() would
+    AttributeError. Also guards a closed/redirected stdin under systemd/launchd."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def burn_flow(ser, url):
     if not url:
-        if sys.stdin.isatty():
+        if _stdin_is_tty():
             safe_send(ser, "STATUS:Enter URL or file path in terminal")
             print("=== Enter URL or file path below, then press Enter ===")
             try:
@@ -2734,7 +2743,7 @@ def burn_data_flow(ser):
     if _last_upload_dir and Path(_last_upload_dir).exists():
         url = _last_upload_dir
         _last_upload_dir = None
-    elif sys.stdin.isatty():
+    elif _stdin_is_tty():
         safe_send(ser, "STATUS:Enter URL or file path in terminal")
         print("=== Enter URL or file path below, then press Enter ===")
         try:
@@ -2899,7 +2908,7 @@ def burn_data_flow(ser):
 
 
 def burn_audio_flow(ser):
-    if sys.stdin.isatty():
+    if _stdin_is_tty():
         safe_send(ser, "STATUS:Enter path to audio files in terminal")
         print("=== Enter path to audio files/folder, then press Enter ===")
         try:
