@@ -1586,10 +1586,11 @@ def _stage_dir(paths):
 
 def _estimate_burn_seconds(source):
     """Rough total write time for the synthetic progress fallback below,
-    assuming a conservative ~2x DVD write speed (2.77MB/s)."""
+    assuming a ~4x DVD write speed (5.54MB/s) - real speed varies by drive
+    and media, so this is a ceiling to tune if it drifts, not a promise."""
     p = Path(source)
     size = tree_size(p) if p.is_dir() else (p.stat().st_size if p.is_file() else 0)
-    return max(size / (2.77 * 1024 * 1024), 1.0)
+    return max(size / (5.54 * 1024 * 1024), 1.0)
 
 
 def _run_windows_burn(ser, script, *script_args):

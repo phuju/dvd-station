@@ -3243,6 +3243,28 @@ def play_flow(ser):
     except FileNotFoundError:
         raise RuntimeError("mpv not found")
 
+    def play_vob_fallback():
+        # No DVD-menu engine available (libdvdnav missing, or on Windows
+        # where the plain mpv build never has it) - play the main title's
+        # VOBs directly off the mounted volume instead (no menus).
+        with mounted_disc(device) as mount_dir:
+            video_ts = mount_dir / "VIDEO_TS"
+            files = sorted(
+                path for path in video_ts.glob("VTS_01_*.VOB")
+                if re.search(r"_\d+\.VOB$", path.name, re.IGNORECASE)
+                and not path.name.upper().endswith("_0.VOB")
+            )
+            if not files:
+                raise RuntimeError("No playable DVD title found")
+            cmd = [
+                mpv,
+                "--input-ipc-server=" + MPV_SOCKET,
+                "--force-window=yes",
+                "--idle=no",
+                *[str(path) for path in files],
+            ]
+            _run_mpv(ser, cmd, "Playing DVD", kind)
+
     if kind == "dvd_video":
         if discstation_host.system_name() == "darwin":
             try:
@@ -3256,34 +3278,14 @@ def play_flow(ser):
                 ]
                 _run_mpv(ser, cmd, "Playing DVD", kind)
             except RuntimeError:
-                # libdvdnav couldn't open the disc — fall back to playing the
-                # main title's VOBs off the mounted volume (no menus).
-                with mounted_disc(device) as mount_dir:
-                    video_ts = mount_dir / "VIDEO_TS"
-                    files = sorted(
-                        path for path in video_ts.glob("VTS_01_*.VOB")
-                        if re.search(r"_\d+\.VOB$", path.name, re.IGNORECASE)
-                        and not path.name.upper().endswith("_0.VOB")
-                    )
-                    if not files:
-                        raise RuntimeError("No playable DVD title found")
-                    cmd = [
-                        mpv,
-                        "--input-ipc-server=" + MPV_SOCKET,
-                        "--force-window=yes",
-                        "--idle=no",
-                        *[str(path) for path in files],
-                    ]
-                    _run_mpv(ser, cmd, "Playing DVD", kind)
+                # libdvdnav couldn't open the disc.
+                play_vob_fallback()
         else:
-            cmd = [
-                mpv,
-                "--input-ipc-server=" + MPV_SOCKET,
-                "--force-window=yes",
-                "--idle=no",
-                device,
-            ]
-            _run_mpv(ser, cmd, "Playing DVD", kind)
+            # Windows' only reliably-fetchable mpv build (a plain .zip, no
+            # 7z/rar tooling needed) has no libdvdnav - --dvd-device isn't
+            # even a recognized option in it, so don't waste a doomed
+            # attempt; go straight to the VOB fallback.
+            play_vob_fallback()
 
     elif kind == "audio_cd":
         _, track_titles, track_starts = audio_track_metadata(device)
