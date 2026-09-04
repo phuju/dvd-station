@@ -129,11 +129,15 @@ try {
         # S4U: runs headlessly for this user without needing an active interactive
         # desktop session (Interactive logon type only fires while one exists, so
         # e.g. Start-ScheduledTask over SSH/no console session would silently no-op).
-        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Highest
+        # RunLevel Limited (standard, non-elevated): nothing here needs admin -
+        # IMAPI2 burning, WMI reads, and binding ports >1024 all work as a normal
+        # user, and elevation is what put "Administrator" on the flashing console
+        # windows this used to spawn.
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
         Register-ScheduledTask -TaskName "DiscStation" -Action $action -Trigger $trigger -Settings $set -Principal $principal -Force | Out-Null
         Start-ScheduledTask -TaskName "DiscStation"
     } else {
-        schtasks /create /tn "DiscStation" /sc onlogon /rl highest /f /tr "`"$pyw`" `"$target`"" | Out-Null
+        schtasks /create /tn "DiscStation" /sc onlogon /f /tr "`"$pyw`" `"$target`"" | Out-Null
         schtasks /run /tn "DiscStation" | Out-Null
     }
 } catch { Write-Host "Auto-start task not created: $_" }

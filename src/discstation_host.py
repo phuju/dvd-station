@@ -108,8 +108,12 @@ def _run_ps(script_name, *args, timeout=25):
     import time
     cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
            "-File", str(_WIN_DIR / script_name), *[str(a) for a in args]]
+    # The host runs as pythonw.exe (no console); without this, Windows pops a
+    # brand-new visible console window for every one of these - and disc
+    # detection polls every ~1.5s, so it would flash constantly.
+    kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if hasattr(subprocess, "CREATE_NO_WINDOW") else {}
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kwargs)
         return r.returncode, r.stdout, r.stderr
     except (OSError, subprocess.TimeoutExpired):
         return 1, "", ""

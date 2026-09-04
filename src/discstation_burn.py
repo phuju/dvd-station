@@ -1571,7 +1571,8 @@ def _run_windows_burn(ser, script, *script_args):
     send(ser, "PROGRESS:0%")
     cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
            "-File", str(discstation_host._WIN_DIR / script), *[str(a) for a in script_args]]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if hasattr(subprocess, "CREATE_NO_WINDOW") else {}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kwargs)
     out_lines, last_pct = [], -1
     try:
         for line in iter_proc_or_cancel(proc, ser):
