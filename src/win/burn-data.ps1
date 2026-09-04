@@ -44,7 +44,11 @@ $fsi.FreeMediaBlocks = -1            # -1 = use the whole disc
 
 $item = Get-Item -LiteralPath $Source
 if ($item.PSIsContainer) {
-    foreach ($child in Get-ChildItem -LiteralPath $Source) { $fsi.Root.AddTree($child.FullName, $false) }
+    # AddTree's 2nd arg is IncludeBaseDirectory: $false flattens a folder
+    # child into just its contents at the disc root (dropping the folder
+    # name entirely) - wrong for VIDEO_TS/AUDIO_TS or any subfolder, which
+    # need to keep their own name. $true preserves it as a real subfolder.
+    foreach ($child in Get-ChildItem -LiteralPath $Source) { $fsi.Root.AddTree($child.FullName, $true) }
 } else {
     $fsi.Root.AddTree($item.FullName, $false)
 }
