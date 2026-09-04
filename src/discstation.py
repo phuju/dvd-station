@@ -4075,7 +4075,10 @@ def check_pidfile():
                 if alive:
                     print(f"Already running (PID {old_pid}), exiting")
                     sys.exit(0)
-            except (OSError, IOError):
+            except (OSError, IOError, SystemError):
+                # os.kill(pid, 0) on Windows raises SystemError (not OSError)
+                # for some stale/reused PIDs ("WinError 87: The parameter is
+                # incorrect") instead of just saying the process is gone.
                 pass
     except (ValueError, OSError):
         pass
