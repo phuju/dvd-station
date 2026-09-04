@@ -1323,6 +1323,14 @@ def burn(ser, dvd_dir, disc_label, speed=None, is_dual_layer=False):
         try:
             discstation_host.build_data_image([dvd_dir], image_path, disc_label, video=True)
             burn_iso(ser, image_path, speed, is_dual_layer)
+        except (RuntimeError, FileNotFoundError) as e:
+            if discstation_host.system_name() != "windows":
+                raise
+            # no xorriso -> burn the VIDEO_TS tree as a plain data disc (plays on
+            # modern players; not guaranteed on old set-tops).
+            print(f"xorriso unavailable ({e}); burning VIDEO_TS as a data disc")
+            _run_windows_burn(ser, "burn-data.ps1", disc_device(), str(dvd_dir),
+                              disc_label, re.sub(r"\D", "", speed or ""))
         finally:
             image_path.unlink(missing_ok=True)
         return
@@ -1350,6 +1358,13 @@ def burn_data(ser, source_paths, disc_label, speed=None, is_dual_layer=False):
         try:
             discstation_host.build_data_image(source_paths, image_path, disc_label)
             burn_iso(ser, image_path, speed, is_dual_layer)
+        except (RuntimeError, FileNotFoundError) as e:
+            if discstation_host.system_name() != "windows":
+                raise
+            print(f"xorriso unavailable ({e}); using IMAPI2 data burn")
+            src = str(source_paths[0]) if len(source_paths) == 1 else _stage_dir(source_paths)
+            _run_windows_burn(ser, "burn-data.ps1", disc_device(), src, disc_label,
+                              re.sub(r"\D", "", speed or ""))
         finally:
             image_path.unlink(missing_ok=True)
         return
@@ -1464,6 +1479,17 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
           f"{len(track_meta)} track titles")
     send(ser, "PROGRESS:35%")
 
+    if discstation_host.system_name() == "windows":
+        # No cdrdao on Windows — burn the prepared WAVs via IMAPI2 Track-At-Once.
+        send(ser, "STATUS:Burning audio CD...")
+        _run_windows_burn(ser, "burn-audio.ps1", disc_device(), str(tmp_dir),
+                          re.sub(r"\D", "", (speed or DISC_SPEED) or ""))
+        for w in tmp_dir.glob("*.wav"):
+            w.unlink(missing_ok=True)
+        toc_path.unlink(missing_ok=True)
+        safe_send(ser, "DONE:Audio CD complete!")
+        return
+
     send(ser, "STATUS:Burning audio CD...")
     # The cooked generic-mmc writer does NOT lay down the CD-TEXT lead-in on most
     # ATAPI drives; the raw writer does. Override with DISCSTATION_CDRDAO_DRIVER
@@ -1524,10 +1550,64 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
         print(f"CD eject skipped: {e}")
 
 
+def _stage_dir(paths):
+    """Copy several loose paths into one temp folder (IMAPI2 burn-data takes one)."""
+    staging = WORK / f"stage_{time.strftime('%Y%m%d_%H%M%S')}"
+    staging.mkdir(parents=True, exist_ok=True)
+    for p in paths:
+        p = Path(p)
+        dest = staging / p.name
+        if p.is_dir():
+            shutil.copytree(p, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(p, dest)
+    return str(staging)
+
+
+def _run_windows_burn(ser, script, *script_args):
+    """Run a src/win/<script> IMAPI2 burn helper, streaming its PROGRESS:<pct>
+    lines to the ESP32. Raises RuntimeError on a non-zero exit."""
+    send(ser, "STATUS:Burning...")
+    send(ser, "PROGRESS:0%")
+    cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+           "-File", str(discstation_host._WIN_DIR / script), *[str(a) for a in script_args]]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    out_lines, last_pct = [], -1
+    try:
+        for line in iter_proc_or_cancel(proc, ser):
+            out_lines.append(line)
+            m = re.search(r"PROGRESS:(-?\d+)", line)
+            if m:
+                pct = int(m.group(1))
+                if 0 <= pct <= 100 and pct != last_pct:
+                    last_pct = pct
+                    send(ser, f"PROGRESS:{min(pct, 99)}%")
+    except (KeyboardInterrupt, SystemExit):
+        stop_process(proc)
+        raise
+    if proc.wait() != 0:
+        detail = next((l for l in reversed(out_lines) if l.strip()), "burn failed")
+        raise RuntimeError(f"Disc burn failed: {detail[:150]}")
+    safe_send(ser, "PROGRESS:100%")
+
+
 def burn_iso(ser, iso_path, speed=None, is_dual_layer=False):
     """Burn a pre-built ISO directly to disc — no filesystem building."""
     if discstation_host.system_name() == "darwin":
         _run_hdiutil_burn(ser, iso_path)
+        return
+    if discstation_host.system_name() == "windows":
+        drive = disc_device()
+        spd = re.sub(r"\D", "", speed or "")
+        try:
+            _run_windows_burn(ser, "burn-image.ps1", drive, str(iso_path), spd)
+        except RuntimeError:
+            isoburn = shutil.which("isoburn") or os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"), "System32", "isoburn.exe")
+            send(ser, "STATUS:Burning image (isoburn)...")
+            if subprocess.run([isoburn, "/Q", drive, str(iso_path)]).returncode != 0:
+                raise
+            safe_send(ser, "PROGRESS:100%")
         return
     if discstation_host.system_name() != "linux":
         send(ser, "STATUS:Burning image...")
