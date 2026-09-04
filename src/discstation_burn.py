@@ -1115,7 +1115,11 @@ def author(ser, mpg, job_dir, aspect="4:3"):
     send(ser, "PROGRESS:Building IFO/VOB")
     dvd_dir = job_dir / "dvd_out"
     dvd_dir.mkdir(parents=True, exist_ok=True)
-    xml = f"""<dvdauthor dest={chr(34) + str(dvd_dir) + chr(34)} format="pal">
+    # Format is conveyed via the VIDEO_FORMAT env var below, not this XML
+    # attribute - some dvdauthor builds (the Windows one) reject a `format`
+    # attribute on <dvdauthor> outright ("Cannot match attribute 'format'"),
+    # which would fail authoring on every single burn.
+    xml = f"""<dvdauthor dest={chr(34) + str(dvd_dir) + chr(34)}>
   <vmgm />
   <titleset>
     <titles>
