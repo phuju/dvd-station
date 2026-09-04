@@ -1016,11 +1016,28 @@ _tray_open = False
 _tray_open_since = 0.0  # time.monotonic() of the last OLED-initiated eject
 
 
+def _device_present(device):
+    """Is `device` still a live drive node? On Linux/macOS that's a real
+    filesystem path that can disappear (e.g. after an eject) - Path.exists()
+    answers that correctly. On Windows `device` is a bare drive letter ("D:");
+    Path("D:").exists() raises OSError (WinError 1) instead of returning False,
+    and the drive letter is stable regardless of media state anyway (the real
+    presence signal is ID_CDROM_MEDIA, checked downstream via media_properties())."""
+    if not device:
+        return False
+    if discstation_host.system_name() == "windows":
+        return True
+    try:
+        return Path(device).exists()
+    except OSError:
+        return False
+
+
 def _tray_closed_with_disc(device):
     if not device:
         return False
     global _tray_open
-    if not Path(device).exists():
+    if not _device_present(device):
         return False
     properties = udev_cdrom_properties(device)
     if properties.get("ID_CDROM_MEDIA") == "1":
@@ -1039,7 +1056,7 @@ def disc_present(device):
         return True
     if _tray_open:
         return False
-    if not Path(device).exists():
+    if not _device_present(device):
         return False
     if discstation_host.system_name() != "linux":
         properties = udev_cdrom_properties(device)
@@ -1073,7 +1090,7 @@ def disc_present(device):
 def is_blank_disc(device):
     if not device:
         return False
-    if not Path(device).exists():
+    if not _device_present(device):
         return False
 
     properties = udev_cdrom_properties(device, refresh=True)
@@ -1125,7 +1142,7 @@ def is_rewritable_disc(device):
     if not device:
         return False
     """Return whether the inserted medium can be overwritten."""
-    if not Path(device).exists():
+    if not _device_present(device):
         return False
 
     properties = udev_cdrom_properties(device)
@@ -1245,7 +1262,7 @@ def _media_quick_state(device, props):
         return "unsure"
     # st == "unknown": fall through to the legacy probes below
     try:
-        if not Path(device).exists():
+        if not _device_present(device):
             return "empty"
     except OSError:
         return "empty"
