@@ -28,6 +28,9 @@ $fmt = New-Object -ComObject "IMAPI2.MsftDiscFormat2Data"
 if (-not $fmt.IsRecorderSupported($rec)) { Write-Error "recorder not supported"; exit 3 }
 $fmt.Recorder = $rec
 $fmt.ClientName = "DiscStation"
+# Without this the disc session never finalizes - the drive reports the
+# disc as still blank afterward even though the data is physically there.
+try { $fmt.ForceMediaToBeClosed = $true } catch {}
 if ($Speed -and $Speed -match '^\d+') {
     try { $fmt.SetWriteSpeed([int]($Speed -replace '\D',''), $false) } catch {}
 }
@@ -49,14 +52,19 @@ if ($item.PSIsContainer) {
 $result = $fsi.CreateResultImage()
 $stream = $result.ImageStream
 
-Register-ObjectEvent -InputObject $fmt -EventName "Update" -SourceIdentifier "burn" -Action {
-    $s = $EventArgs
-    try {
-        $done = [double]$s.LastWrittenLba
-        $tot  = [double]$s.SectorCount
-        if ($tot -gt 0) { Write-Output ("PROGRESS:" + [int]([math]::Min(99, $done * 100.0 / $tot))) }
-    } catch {}
-} | Out-Null
+# Not fatal if registration fails (seen on some setups: "Cannot register
+# for the specified event... does not exist") - the burn itself doesn't
+# need it, just no live PROGRESS lines.
+try {
+    Register-ObjectEvent -InputObject $fmt -EventName "Update" -SourceIdentifier "burn" -Action {
+        $s = $EventArgs
+        try {
+            $done = [double]$s.LastWrittenLba
+            $tot  = [double]$s.SectorCount
+            if ($tot -gt 0) { Write-Output ("PROGRESS:" + [int]([math]::Min(99, $done * 100.0 / $tot))) }
+        } catch {}
+    } | Out-Null
+} catch {}
 
 try {
     $fmt.Write($stream)

@@ -31,19 +31,23 @@ if ($Speed -and $Speed -match '^\d+') {
     try { $fmt.SetWriteSpeed([int]($Speed -replace '\D',''), $false) } catch {}
 }
 
-# Progress: IMAPI2 raises an Update event with sector counts.
-$script:total = 1
-Register-ObjectEvent -InputObject $fmt -EventName "Update" -SourceIdentifier "burn" -Action {
-    $s = $EventArgs
-    try {
-        $done = [double]$s.LastWrittenLba
-        $tot  = [double]$s.SectorCount
-        if ($tot -gt 0) {
-            $pct = [int]([math]::Min(99, $done * 100.0 / $tot))
-            Write-Output "PROGRESS:$pct"
-        }
-    } catch {}
-} | Out-Null
+# Progress: IMAPI2 raises an Update event with sector counts. Not fatal if
+# registration fails (seen on some setups: "Cannot register for the
+# specified event... does not exist") - the burn itself doesn't need it,
+# just no live PROGRESS lines.
+try {
+    Register-ObjectEvent -InputObject $fmt -EventName "Update" -SourceIdentifier "burn" -Action {
+        $s = $EventArgs
+        try {
+            $done = [double]$s.LastWrittenLba
+            $tot  = [double]$s.SectorCount
+            if ($tot -gt 0) {
+                $pct = [int]([math]::Min(99, $done * 100.0 / $tot))
+                Write-Output "PROGRESS:$pct"
+            }
+        } catch {}
+    } | Out-Null
+} catch {}
 
 $stream = New-Object -ComObject "ADODB.Stream"
 $stream.Type = 1          # binary
