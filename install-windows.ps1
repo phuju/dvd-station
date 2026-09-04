@@ -64,7 +64,15 @@ if ($winget -and -not $IsWin7) {
         catch { Write-Host "  yt-dlp fetch skipped" }
     }
     if (-not (Have "ffmpeg")) { Get-Zip "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" $tools | Out-Null }
-    if (-not (Have "mpv")) { Get-Zip "https://sourceforge.net/projects/mpv-player-windows/files/latest/download" $tools | Out-Null }
+    if (-not (Have "mpv")) {
+        # The SourceForge "latest" mpv build is a .7z (Expand-Archive can't
+        # open it); mpv's own first-party CI release ships plain .zip builds.
+        try {
+            $mpvRelease = Invoke-RestMethod "https://api.github.com/repos/mpv-player/mpv/releases/tags/git-release" -UseBasicParsing -TimeoutSec 25
+            $mpvAsset = $mpvRelease.assets | Where-Object { $_.name -match "x86_64-w64-mingw32\.zip$" } | Select-Object -First 1
+            if ($mpvAsset) { Get-Zip $mpvAsset.browser_download_url (Join-Path $tools "mpv") | Out-Null }
+        } catch { Write-Host "  mpv fetch skipped" }
+    }
     # dvdauthor + spumux (DVD-Video authoring/subtitles) have no winget package;
     # this VideoHelp-hosted plain .zip (no rar/unrar needed) is the only
     # reliable direct-download source found.

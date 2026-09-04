@@ -3238,14 +3238,16 @@ def play_flow(ser):
     kind = disc_kind(device)
     print(f"Disc type: {kind}")
 
-    if not shutil.which("mpv"):
+    try:
+        mpv = discstation_burn.tool("mpv")
+    except FileNotFoundError:
         raise RuntimeError("mpv not found")
 
     if kind == "dvd_video":
         if discstation_host.system_name() == "darwin":
             try:
                 cmd = [
-                    "mpv",
+                    mpv,
                     "--input-ipc-server=" + MPV_SOCKET,
                     "--force-window=yes",
                     "--idle=no",
@@ -3266,7 +3268,7 @@ def play_flow(ser):
                     if not files:
                         raise RuntimeError("No playable DVD title found")
                     cmd = [
-                        "mpv",
+                        mpv,
                         "--input-ipc-server=" + MPV_SOCKET,
                         "--force-window=yes",
                         "--idle=no",
@@ -3275,7 +3277,7 @@ def play_flow(ser):
                     _run_mpv(ser, cmd, "Playing DVD", kind)
         else:
             cmd = [
-                "mpv",
+                mpv,
                 "--input-ipc-server=" + MPV_SOCKET,
                 "--force-window=yes",
                 "--idle=no",
@@ -3287,7 +3289,7 @@ def play_flow(ser):
         _, track_titles, track_starts = audio_track_metadata(device)
         audio_device = discstation_host.audio_output_device()
         cmd = [
-            "mpv",
+            mpv,
             "--input-ipc-server=" + MPV_SOCKET,
             "--force-window=no",
             "--idle=no",
@@ -3306,7 +3308,7 @@ def play_flow(ser):
             if not files:
                 raise RuntimeError("No playable video files")
             cmd = [
-                "mpv",
+                mpv,
                 "--input-ipc-server=" + MPV_SOCKET,
                 "--force-window=yes",
                 "--idle=no",

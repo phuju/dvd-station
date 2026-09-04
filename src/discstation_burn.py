@@ -1584,23 +1584,82 @@ def _stage_dir(paths):
     return str(staging)
 
 
+def _estimate_burn_seconds(source):
+    """Rough total write time for the synthetic progress fallback below,
+    assuming a conservative ~2x DVD write speed (2.77MB/s)."""
+    p = Path(source)
+    size = tree_size(p) if p.is_dir() else (p.stat().st_size if p.is_file() else 0)
+    return max(size / (2.77 * 1024 * 1024), 1.0)
+
+
 def _run_windows_burn(ser, script, *script_args):
     """Run a src/win/<script> IMAPI2 burn helper, streaming its PROGRESS:<pct>
-    lines to the ESP32. Raises RuntimeError on a non-zero exit."""
+    lines to the ESP32. Raises RuntimeError on a non-zero exit.
+
+    IMAPI2's progress event doesn't reliably reach PowerShell on every
+    setup (COM event dispatch needs the calling thread to pump messages,
+    which it can't do while blocked inside the synchronous native Write()
+    call) - so real PROGRESS lines may never arrive until the very end.
+    While waiting, synthesize a smoothly-climbing estimate from elapsed
+    time vs. the source size at a conservative write speed, capped at 95%
+    until the process actually exits; real PROGRESS lines (from scripts
+    where the event does work, e.g. burn-audio.ps1's per-track updates)
+    still take priority whenever they show up.
+    """
     send(ser, "STATUS:Burning...")
     send(ser, "PROGRESS:0%")
+    est_total = _estimate_burn_seconds(script_args[1]) if len(script_args) > 1 else None
     cmd, kwargs = discstation_host.ps_cmd(script, *script_args)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kwargs)
-    out_lines, last_pct = [], -1
+
+    lines = Queue()
+    finished = object()
+
+    def read_output():
+        try:
+            for line in proc.stdout:
+                lines.put(line.rstrip("\r\n"))
+        finally:
+            lines.put(finished)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+
+    out_lines, last_pct, last_real_progress, start = [], -1, 0.0, time.time()
+    last_ping, output_done = time.time(), False
     try:
-        for line in iter_proc_or_cancel(proc, ser):
-            out_lines.append(line)
-            m = re.search(r"PROGRESS:(-?\d+)", line)
-            if m:
-                pct = int(m.group(1))
-                if 0 <= pct <= 100 and pct != last_pct:
-                    last_pct = pct
-                    send(ser, f"PROGRESS:{min(pct, 99)}%")
+        while proc.poll() is None or not output_done:
+            if time.time() - last_ping >= 5:
+                last_ping = time.time()
+                send(ser, "PING")
+            if check_cancel(ser):
+                stop_process(proc)
+                return
+            try:
+                line = lines.get(timeout=0.2)
+            except Empty:
+                line = None
+            if line is finished:
+                output_done = True
+            elif line is not None:
+                out_lines.append(line)
+                m = re.search(r"PROGRESS:(-?\d+)", line)
+                if m:
+                    pct = int(m.group(1))
+                    if 0 <= pct <= 100 and pct != last_pct:
+                        last_pct, last_real_progress = pct, time.time()
+                        send(ser, f"PROGRESS:{min(pct, 99)}%")
+                    continue
+            # No fresh real progress recently - IMAPI2's Write() blocks the
+            # PowerShell thread the whole time, so its Update event often
+            # never gets dispatched until the call returns. Estimate from
+            # elapsed time instead of leaving the OLED stuck at 0%.
+            if est_total and time.time() - last_real_progress > 3:
+                est_pct = int(min(95, (time.time() - start) / est_total * 100))
+                if est_pct > last_pct:
+                    last_pct = est_pct
+                    send(ser, f"PROGRESS:{est_pct}%")
+        reader.join(timeout=1)
     except (KeyboardInterrupt, SystemExit):
         stop_process(proc)
         raise
