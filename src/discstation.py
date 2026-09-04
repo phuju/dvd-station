@@ -2940,8 +2940,12 @@ def burn_audio_flow(ser):
     audio_files = []
     audio_exts = {".wav", ".flac", ".mp3", ".aac", ".ogg", ".wma", ".m4a", ".opus"}
     if src_path.is_dir():
-        for f in sorted(src_path.iterdir()):
-            if f.suffix.lower() in audio_exts:
+        # rglob, not iterdir: a browser folder upload preserves the
+        # original relative paths (e.g. "Album Name/track.flac"), so the
+        # audio files usually sit one level below src_path, not at its
+        # top - a plain iterdir() only ever saw the subfolder itself.
+        for f in sorted(src_path.rglob("*")):
+            if f.is_file() and f.suffix.lower() in audio_exts:
                 audio_files.append(f)
     elif src_path.is_file():
         audio_files = [src_path]
