@@ -19,7 +19,7 @@ if (args.includes('-h') || args.includes('--help')) {
 Runs the installer for the current OS:
   linux    install.sh          full: apt deps, venv, systemd --user service, self-signed cert
   darwin   install-macos.sh    full: Homebrew deps, venv, launchd agent, cert (audio-CD burn is best-effort)
-  windows  install-windows.ps1 files + venv only; web/serial control, no burn backend
+  windows  install-windows.ps1 venv + cert + firewall + auto-start task; burn via IMAPI2 (10/11 and 7)
 
 Prereqs: Node 16+, Python 3 (python3 / py on PATH), and either bash (linux/macOS)
 or PowerShell (Windows). Homebrew is auto-installed on macOS if missing; the

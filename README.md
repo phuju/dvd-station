@@ -64,7 +64,7 @@ Windows.
 |----|-----------|-----------------|
 | Linux | `install.sh` — apt deps, venv, systemd `--user` service, self-signed cert | full burn / rip / play |
 | macOS | `install-macos.sh` — Homebrew deps, venv, launchd agent, cert | burn / rip / play (audio-CD *burning* is best-effort; set `DISC_DEVICE` if detection fails) |
-| Windows | `install-windows.ps1` — files + venv | web / serial control only, no burn backend |
+| Windows | `install-windows.ps1` — Python + venv, self-signed cert, firewall rules, auto-start Scheduled Task | burn (ISO / data / audio CD) via IMAPI2 on Windows 10/11 and 7; DVD rip (HandBrake main-feature mode) and play (mpv) use the shared cross-platform path; full VIDEO_TS mirror rip and audio-CD rip aren't implemented on Windows yet |
 
 ### Or run the platform script directly
 
@@ -80,7 +80,7 @@ arduino-cli lib install QRCode
 # macOS host
 ./install-macos.sh
 
-# Windows host (web/control workflow)
+# Windows host
 PowerShell -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
@@ -88,8 +88,10 @@ PowerShell -ExecutionPolicy Bypass -File .\install-windows.ps1
 
 Linux and macOS both run the complete optical workflow (burn, rip, play) —
 macOS via `xorriso` / `hdiutil` / `cd-paranoia` / `dvdbackup` / HandBrake, with
-audio-CD *burning* the one best-effort area. Windows runs the shared Python/web
-workflow only; it has no burn backend yet. See `docs/PLATFORM_SUPPORT.md`.
+audio-CD *burning* the one best-effort area. Windows burns (ISO / data / audio
+CD) via IMAPI2 and plays via mpv; DVD ripping works in HandBrake main-feature
+mode but not full VIDEO_TS mirror or audio-CD ripping yet. See
+`docs/PLATFORM_SUPPORT.md`.
 
 ## Web Interface
 
@@ -114,7 +116,7 @@ Built-in web server on port 8080 (HTTPS with self-signed cert):
 | `DISC_CLEANUP_DAYS` | 2 | Auto-cleanup old job directories |
 | `DISC_OUTPUT_LIMIT_BYTES` | 4300000000 | Conservative DVD5 payload limit |
 | `DISC_DL_OUTPUT_LIMIT_BYTES` | 8000000000 | Conservative DVD9 payload limit |
-| `DISC_DEVICE` | auto | Optical drive node override (required on Windows) |
+| `DISC_DEVICE` | auto | Optical drive node override |
 | `DISC_PORT` | auto | ESP32 serial port override |
 | `DISCSTATION_HTTP_PORT` | 8081 | Plain-HTTP port for the mobile app (`0` disables) |
 | `DISCSTATION_DVD_RIP_MODE` | mirror | `mkv` = HandBrake main-feature transcode instead of a full VIDEO_TS mirror |

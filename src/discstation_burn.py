@@ -520,6 +520,8 @@ status_sink = None
 
 def send(ser, msg):
     global _serial_write_failed
+    if os.environ.get("DISCSTATION_DEBUG_SERIAL"):
+        print(f"[{time.time():.3f}] SEND {msg!r}", flush=True)
     if status_sink is not None:
         try:
             status_sink(msg)
@@ -1569,9 +1571,7 @@ def _run_windows_burn(ser, script, *script_args):
     lines to the ESP32. Raises RuntimeError on a non-zero exit."""
     send(ser, "STATUS:Burning...")
     send(ser, "PROGRESS:0%")
-    cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-           "-File", str(discstation_host._WIN_DIR / script), *[str(a) for a in script_args]]
-    kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if hasattr(subprocess, "CREATE_NO_WINDOW") else {}
+    cmd, kwargs = discstation_host.ps_cmd(script, *script_args)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kwargs)
     out_lines, last_pct = [], -1
     try:

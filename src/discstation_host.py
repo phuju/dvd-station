@@ -103,15 +103,21 @@ _WIN_DIR = Path(__file__).resolve().parent / "win"
 _win_info_cache = (0.0, None)
 
 
-def _run_ps(script_name, *args, timeout=25):
-    """Run src/win/<script_name> and return (returncode, stdout, stderr)."""
-    import time
+def ps_cmd(script_name, *args):
+    """Build a `powershell -File src/win/<script_name> <args>` argv, plus the
+    Popen/run kwargs that suppress the console window. The host runs as
+    pythonw.exe (no console); without CREATE_NO_WINDOW, Windows pops a
+    brand-new visible console for every one of these - and disc detection
+    polls every ~1.5s, so it would flash constantly."""
     cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
            "-File", str(_WIN_DIR / script_name), *[str(a) for a in args]]
-    # The host runs as pythonw.exe (no console); without this, Windows pops a
-    # brand-new visible console window for every one of these - and disc
-    # detection polls every ~1.5s, so it would flash constantly.
     kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if hasattr(subprocess, "CREATE_NO_WINDOW") else {}
+    return cmd, kwargs
+
+
+def _run_ps(script_name, *args, timeout=25):
+    """Run src/win/<script_name> and return (returncode, stdout, stderr)."""
+    cmd, kwargs = ps_cmd(script_name, *args)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kwargs)
         return r.returncode, r.stdout, r.stderr

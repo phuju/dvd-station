@@ -29,10 +29,28 @@ the drive on recent macOS; DiscStation reports this clearly instead of hanging.
 
 ## Windows
 
-The Python host and web/control workflow can run from PowerShell. Optical
-burning needs a Windows IMAPI backend or a separately installed compatible
-burning tool. The Windows installer deliberately reports this limitation
-instead of silently attempting Linux commands.
+Runs the same Python host and web UI as Linux/macOS, triggered the same way
+via the ESP32 OLED remote. `install-windows.ps1` sets up Python + venv, a
+self-signed cert, firewall rules for 8080/8081, and a per-user auto-start
+Scheduled Task (headless `pythonw.exe`, no admin needed).
+
+- **Detect / eject** — WMI (`Win32_CDROMDrive`, `Win32_LogicalDisk`) + IMAPI2
+  for media type, blank/rewritable state, and capacity
+  (`src/win/disc-info.ps1`, `src/win/eject.ps1`).
+- **Burn** — data, ISO, and audio CD all go through IMAPI2
+  (`src/win/burn-{image,data,audio}.ps1`), with live progress streamed to the
+  OLED; `isoburn.exe /q` is the zero-dependency fallback for a raw ISO.
+  Works on Windows 7 SP1 and 10/11.
+- **Rip** — DVD main-feature mode via HandBrakeCLI (winget on 10/11) works;
+  a full unencrypted VIDEO_TS mirror and audio-CD ripping aren't implemented
+  yet (no Windows path for `dvdbackup`/`cd-paranoia`).
+- **Play** — `mpv`, via the same code path as Linux/macOS (device letter for
+  DVD-Video, `cdda://` for audio CD, mounted drive for data/VCD).
+
+Windows 7 (no `winget`) gets the host, detection, eject, and all three burn
+modes; rip/play need tools that don't install cleanly on 7, so those OLED
+actions report "not supported" there. Set `DISC_DEVICE` to override drive
+auto-detection.
 
 ## Shared Components
 
@@ -43,4 +61,5 @@ instead of silently attempting Linux commands.
 - QR-code web URL display
 
 The optical-drive backend is the platform boundary. Linux and macOS are
-complete (bar macOS audio-CD burning); Windows still needs its writer backend.
+complete (bar macOS audio-CD burning); Windows burns and plays, with DVD-mirror
+and audio-CD ripping still to come.
