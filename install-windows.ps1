@@ -138,14 +138,18 @@ try {
         $action    = New-ScheduledTaskAction -Execute $pyw -Argument "`"$target`"" -WorkingDirectory $App
         $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $set       = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-        # S4U: runs headlessly for this user without needing an active interactive
-        # desktop session (Interactive logon type only fires while one exists, so
-        # e.g. Start-ScheduledTask over SSH/no console session would silently no-op).
+        # Interactive: attaches to the logged-in desktop session, same
+        # lifecycle as `systemctl --user`/launchd LaunchAgents on the other
+        # two platforms - required so PLAY's mpv window actually renders
+        # somewhere visible (S4U runs headlessly with no session to render
+        # into, which silently made every mpv window invisible). Trade-off,
+        # same one Linux/macOS already accept: won't start until someone is
+        # logged into the desktop.
         # RunLevel Limited (standard, non-elevated): nothing here needs admin -
         # IMAPI2 burning, WMI reads, and binding ports >1024 all work as a normal
         # user, and elevation is what put "Administrator" on the flashing console
         # windows this used to spawn.
-        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
         Register-ScheduledTask -TaskName "DiscStation" -Action $action -Trigger $trigger -Settings $set -Principal $principal -Force | Out-Null
         Start-ScheduledTask -TaskName "DiscStation"
     } else {
