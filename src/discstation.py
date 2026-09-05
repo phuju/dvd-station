@@ -456,6 +456,7 @@ def start_web_server(port=8080):
         http_port = int(os.environ.get("DISCSTATION_HTTP_PORT", "8081"))
     except ValueError:
         http_port = 8081
+    plain_http_up = False
     if http_port and http_port != port:
         try:
             plain = socketserver.ThreadingTCPServer(('', http_port), _WebHandler, bind_and_activate=False)
@@ -465,8 +466,14 @@ def start_web_server(port=8080):
             plain.server_activate()
             threading.Thread(target=plain.serve_forever, daemon=True).start()
             print(f"Plain HTTP (mobile app) on http://0.0.0.0:{http_port}")
+            plain_http_up = True
         except OSError as e:
             print(f"Plain HTTP listener not started on {http_port}: {e}")
+
+    ip = local_ip()
+    https_up = ssl is not None and cert.exists() and key.exists()
+    shown_port, shown_protocol = (http_port, "http") if plain_http_up else (port, "https" if https_up else "http")
+    print(f"\n>>> Open {shown_protocol}://{ip}:{shown_port} in your browser or the DiscStation app <<<\n")
 
     return server
 
