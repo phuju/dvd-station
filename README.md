@@ -64,7 +64,15 @@ get a standalone app window with a dock/taskbar icon on macOS, Linux, and
 Windows.
 
 `discstation-setup --help` lists the forwarded env vars. From a git clone,
-`npm run setup` does the same thing. Support by OS:
+`npm run setup` does the same thing.
+
+**Updating:** `npm install -g discstation` alone now redeploys and restarts
+the already-running service automatically (a `postinstall` hook copies the
+updated files over and restarts it) — no need to re-run `discstation-setup`
+after every update. `discstation-setup` itself is still what performs the
+first install (system packages, venv, cert, service registration).
+
+Support by OS:
 
 | OS | What runs | Optical support |
 |----|-----------|-----------------|
