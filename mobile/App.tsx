@@ -25,6 +25,7 @@ import { DARK, DISPLAY, LIGHT, MONO, Palette } from './src/theme';
 import { makeMetrics, Metrics } from './src/responsive';
 import * as api from './src/api';
 import { get, set } from './src/storage';
+import RemoteModal from './src/RemoteModal';
 
 const HOST_KEY = 'discstation.host';
 const THEME_KEY = 'discstation.theme';
@@ -62,6 +63,7 @@ function Screen() {
   const [host, setHost] = useState('');
   const [hostInput, setHostInput] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [remoteOpen, setRemoteOpen] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState('');
 
@@ -102,6 +104,9 @@ function Screen() {
         if (!alive) return;
         setProg(p);
         setConn('online');
+        // A physical remote showing up mid-session takes over - collapse the
+        // on-screen one instead of leaving it open fighting for control.
+        setRemoteOpen((open) => (p.appliance === 'hardware' ? false : open));
       } catch {
         if (!alive) return;
         setConn('offline');
@@ -233,6 +238,9 @@ function Screen() {
               <Text style={s.brandMarkText}>DS</Text>
             </View>
             <Text style={s.brandText}>DISCSTATION</Text>
+            <Pressable onPress={() => setRemoteOpen((v) => !v)}>
+              <Text style={[s.remoteHint, remoteOpen && s.remoteHintActive]}>REMOTE</Text>
+            </Pressable>
           </View>
           <View style={s.topActions}>
             <Pressable style={s.iconBtn} onPress={toggleTheme}>
@@ -458,6 +466,15 @@ function Screen() {
           </View>
         </View>
       </Modal>
+
+      <RemoteModal
+        visible={remoteOpen}
+        onClose={() => setRemoteOpen(false)}
+        c={c}
+        m={m}
+        prog={prog}
+        disc={disc}
+      />
     </View>
   );
 }
@@ -523,6 +540,18 @@ function makeStyles(c: Palette, m: Metrics, insets: EdgeInsets) {
       fontSize: ms(12),
       letterSpacing: 1.2,
     },
+    remoteHint: {
+      color: c.muted,
+      fontFamily: MONO,
+      fontWeight: '700',
+      fontSize: ms(8),
+      letterSpacing: 1,
+      borderWidth: 1,
+      borderColor: c.softLine,
+      paddingHorizontal: sp(6),
+      paddingVertical: sp(2),
+    },
+    remoteHintActive: { color: c.ink, borderColor: c.ink },
     topActions: { flexDirection: 'row', alignItems: 'center', gap: sp(8) },
     iconBtn: {
       width: ms(30),

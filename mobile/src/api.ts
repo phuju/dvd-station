@@ -31,7 +31,14 @@ async function req(path: string, init: RequestInit = {}, timeoutMs = 6000): Prom
   }
 }
 
-export type Progress = { status: string; progress: number; active: boolean };
+export type Progress = {
+  status: string;
+  progress: number;
+  active: boolean;
+  appliance?: 'hardware' | 'software';
+  playing?: boolean;
+  tray_open?: boolean;
+};
 export type DiscInfo = {
   disc_present: boolean;
   capacity_bytes: number;
@@ -39,6 +46,8 @@ export type DiscInfo = {
   type: string; // "none" | "reading" | "AUDIO_CD" | "DVD5" | ...
   kind?: string;
   label?: string;
+  busy?: boolean;
+  appliance?: 'hardware' | 'software';
 };
 
 export async function getProgress(): Promise<Progress> {
@@ -72,6 +81,17 @@ export async function setLabel(label: string): Promise<void> {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'label=' + encodeURIComponent(label),
+  });
+}
+
+/** Same text protocol the ESP32 remote sends (SELECT:BURN DATA, PLAY_BUTTON,
+ *  CANCEL, EJECT, CONFIRM, POT:<0-100>, ...) - fed into the host's virtual
+ *  serial queue, same endpoint the web on-screen remote uses. */
+export async function postButton(cmd: string): Promise<void> {
+  await req('/remote/button', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'cmd=' + encodeURIComponent(cmd),
   });
 }
 
