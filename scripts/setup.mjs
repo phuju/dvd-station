@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { lanIp } from './lib/net.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -45,9 +46,11 @@ function run(cmd, cmdArgs) {
   }
   if ((r.status ?? 1) === 0) {
     const port = process.env.DISCSTATION_HTTP_PORT || '8081';
+    const ip = lanIp();
     console.log(
       `\nDiscStation is installed and running.\n` +
-      `  Web UI:  http://localhost:${port}/   (run "discstation" to open it any time)\n` +
+      `  Web UI:  http://${ip}:${port}/   (run "discstation" to open it any time)\n` +
+      `  Open that address from any phone/computer on your network too.\n` +
       `  Install it as an app from the browser menu, or the in-page INSTALL APP button.\n`,
     );
     spawnSync(process.execPath, [join(ROOT, 'scripts', 'open.mjs')], { stdio: 'ignore' });

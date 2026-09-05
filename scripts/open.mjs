@@ -5,6 +5,7 @@
 
 import { spawn } from 'node:child_process';
 import { get } from 'node:http';
+import { lanIp } from './lib/net.mjs';
 
 const port = process.env.DISCSTATION_HTTP_PORT || '8081';
 const url = process.argv[2] || `http://localhost:${port}/`;
@@ -24,6 +25,7 @@ function open(target) {
 // Best-effort liveness check so a stopped host gives a clear hint.
 const probe = get(url, { timeout: 1500 }, (res) => {
   res.resume();
+  console.log(`Also reachable at http://${lanIp()}:${port}/ from any phone/computer on your network.`);
   open(url);
 });
 probe.on('timeout', () => probe.destroy());
