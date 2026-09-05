@@ -13,9 +13,10 @@
 <body>
   <div class="page-shell">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="DiscStation home">
+      <a class="brand" href="/" id="brand-link" aria-label="DiscStation home / toggle remote">
         <span class="brand-mark">DS</span>
         <span>DISCSTATION</span>
+        <span id="remote-hint" class="remote-hint">REMOTE</span>
       </a>
       <div class="topbar-actions">
         <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch to dark mode">&#x263E;</button>
@@ -32,6 +33,39 @@
         <div><strong>02</strong><span>DATA DVD</span></div>
         <div><strong>03</strong><span>AUDIO CD</span></div>
         <div><strong>04</strong><span>RIP / PLAY</span></div>
+      </section>
+
+      <section id="remote-panel" class="remote-panel section-rule" hidden aria-labelledby="remote-title">
+        <div class="panel-heading">
+          <div>
+            <div class="section-kicker">ON-SCREEN REMOTE</div>
+            <h2 id="remote-title">CONTROL SURFACE</h2>
+          </div>
+          <span class="panel-index">DISCSTN-02</span>
+        </div>
+        <p id="remote-note" class="field-note"></p>
+        <div id="remote-disc-status" class="remote-disc-status">DISC: CHECKING</div>
+        <div id="remote-controls">
+          <div class="remote-grid">
+            <button class="outline-button" type="button" data-cmd="SELECT:BURN">BURN</button>
+            <button class="outline-button" type="button" data-cmd="SELECT:BURN DATA">BURN DATA</button>
+            <button class="outline-button" type="button" data-cmd="SELECT:BURN AUDIO">BURN AUDIO</button>
+            <button class="outline-button" type="button" data-cmd="SELECT:RIP">RIP</button>
+            <button class="outline-button" type="button" data-cmd="SELECT:PLAY">PLAY</button>
+            <button class="outline-button" type="button" data-cmd="CANCEL">CANCEL / HOME</button>
+            <button class="outline-button" type="button" id="remote-eject-btn" data-cmd="EJECT">EJECT</button>
+          </div>
+          <div id="remote-transport" class="remote-transport" hidden>
+            <div class="remote-grid">
+              <button class="outline-button" type="button" data-cmd="REW:BIG">&#x23EE; PREV</button>
+              <button class="outline-button" type="button" data-cmd="PLAY_BUTTON">&#x23EF; PLAY/PAUSE</button>
+              <button class="outline-button" type="button" data-cmd="FF:BIG">&#x23ED; NEXT</button>
+              <button class="outline-button" type="button" data-cmd="PLAY_STOP">&#x23F9; STOP</button>
+            </div>
+            <label class="field-label" for="remote-volume">VOLUME</label>
+            <input id="remote-volume" type="range" min="0" max="100" value="70">
+          </div>
+        </div>
       </section>
 
       <section class="burn-panel section-rule" aria-labelledby="burn-title">
@@ -105,7 +139,7 @@
     </footer>
   </div>
   <div id="install-slot"></div>
-  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=8").catch(() => {});</script>
-  <script src="/static/app.js?v=8" defer></script>
+  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=17").catch(() => {});</script>
+  <script src="/static/app.js?v=17" defer></script>
 </body>
 </html>

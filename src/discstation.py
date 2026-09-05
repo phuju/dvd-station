@@ -58,10 +58,65 @@ _last_upload_label = None
 _web_status = "READY"
 _web_progress = -1
 _web_progress_active = False
+_web_playing = False  # a play_flow is currently active (transport controls apply)
 _operation_active = False  # a burn/rip/play flow is holding the drive
 _last_disc_info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
 _active_ser = None
+_appliance_mode = "hardware"  # "hardware" (real ESP32) or "software" (web remote only)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+class VirtualSerial:
+    """Drop-in stand-in for serial.Serial when no ESP32 is attached, so
+    station_loop and every flow function (burn/rip/play) run completely
+    unchanged - fed by lines POSTed to /remote/button instead of real
+    serial bytes. send()/safe_send() already publish every status update
+    through status_sink (-> the web SSE stream) regardless of ser, and
+    already tolerate ser=None, so only the "commands in" direction needs
+    shimming here - the exact same text protocol the ESP32 already speaks
+    (SELECT:..., PLAY_BUTTON, FF:BIG, CANCEL, POT:<n>, ...) is the contract,
+    so the on-screen remote just POSTs the same strings the ESP32 sends."""
+
+    def __init__(self):
+        self._buf = b""
+        self._lock = threading.Lock()
+
+    def push_line(self, text):
+        with self._lock:
+            self._buf += text.encode(errors="ignore").strip() + b"\n"
+
+    @property
+    def in_waiting(self):
+        with self._lock:
+            return len(self._buf)
+
+    def read(self, n=1):
+        with self._lock:
+            data, self._buf = self._buf[:n], self._buf[n:]
+            return data
+
+    def readline(self):
+        with self._lock:
+            idx = self._buf.find(b"\n")
+            if idx < 0:
+                data, self._buf = self._buf, b""
+                return data
+            line, self._buf = self._buf[:idx + 1], self._buf[idx + 1:]
+            return line
+
+    def write(self, data):
+        return len(data) if data else 0
+
+    def close(self):
+        pass
+
+    def setDTR(self, value):
+        pass
+
+
+class _HardwareAttached(Exception):
+    """Raised out of station_loop when a real ESP32 appears while running on
+    a VirtualSerial, so main() can hand control over to it."""
 
 
 class _WebHandler(http.server.BaseHTTPRequestHandler):
@@ -73,11 +128,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             result = _last_burn_result
             self._respond(200, _web_status or result or 'Idle')
         elif path == '/progress':
-            self._respond(200, json.dumps({
-                "status": _web_status or "READY",
-                "progress": _web_progress,
-                "active": _web_progress_active,
-            }), "application/json")
+            self._respond(200, json.dumps(_status_snapshot()), "application/json")
         elif path == '/disc-info':
             self._serve_disc_info()
         elif path == '/events':
@@ -101,6 +152,8 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 self._handle_url()
         elif path == '/set-label':
             self._handle_set_label()
+        elif path == '/remote/button':
+            self._handle_remote_button()
         else:
             self.send_error(404)
 
@@ -160,10 +213,28 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         _set_web_progress("UPLOAD READY", 100)
         self._respond(200, f'{len(files)} file(s) uploaded ({size_str}). Select BURN DATA on remote.')
 
+    def _handle_remote_button(self):
+        """Web on-screen remote -> the exact same text-line protocol the
+        ESP32 already speaks (SELECT:BURN DATA, PLAY_BUTTON, FF:BIG, CANCEL,
+        POT:<n>, ...), fed straight into the active VirtualSerial. Only
+        works in software mode - a real ESP32 already owns the input side."""
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode()
+        params = urllib.parse.parse_qs(body)
+        cmd = params.get('cmd', [''])[0].strip()
+        if not cmd:
+            self._respond(400, 'Missing cmd')
+            return
+        if isinstance(_active_ser, VirtualSerial):
+            _active_ser.push_line(cmd)
+            self._respond(200, 'OK')
+        else:
+            self._respond(409, 'A hardware remote is attached')
+
     def _serve_disc_info(self):
         if _operation_active:
             # a burn/rip/play holds the drive — don't probe it, serve last-known.
-            self._respond(200, json.dumps({**_last_disc_info, "busy": True}), "application/json")
+            self._respond(200, json.dumps({**_last_disc_info, "busy": True, "appliance": _appliance_mode}), "application/json")
             return
         info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
         try:
@@ -182,6 +253,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             info["label"] = di.label
         except Exception as e:
             print(f"Disc info error: {e}")
+        info["appliance"] = _appliance_mode
         _last_disc_info.update(info)
         self._respond(200, json.dumps(info), "application/json")
 
@@ -232,7 +304,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('discstation-v8').then(c => c.addAll(['/','/static/style.css?v=8','/static/app.js?v=8']));
+  caches.open('discstation-v17').then(c => c.addAll(['/','/static/style.css?v=17','/static/app.js?v=17']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
@@ -241,7 +313,7 @@ self.addEventListener('fetch', e => {
   if (path === '/' || path.startsWith('/static/')) {
     e.respondWith(fetch(e.request).then(r => {
       const copy = r.clone();
-      caches.open('discstation-v8').then(c => c.put(e.request, copy));
+      caches.open('discstation-v17').then(c => c.put(e.request, copy));
       return r;
     }).catch(() => caches.match(e.request)));
   } else {
@@ -546,7 +618,9 @@ _sse_lock = threading.Lock()
 
 
 def _status_snapshot():
-    return {"status": _web_status or "READY", "progress": _web_progress, "active": _web_progress_active}
+    return {"status": _web_status or "READY", "progress": _web_progress,
+            "active": _web_progress_active, "appliance": _appliance_mode,
+            "playing": _web_playing, "tray_open": _tray_open}
 
 
 def _sse_publish(event):
@@ -572,11 +646,17 @@ def _set_web_progress(phase, percent=-1):
 
 
 def _record_web_status(msg):
-    global _web_status, _web_progress, _web_progress_active
+    global _web_status, _web_progress, _web_progress_active, _web_playing
     if msg.startswith("DISC:"):
         _sse_publish({"type": "disc-changed"})
         return
-    if msg.startswith("STATUS:"):
+    if msg.startswith("PLAY_MODE:"):
+        _web_playing = True
+        _web_status = "PLAYING"
+        _web_progress_active = True
+    elif msg.startswith("PLAY_STATUS:") or msg.startswith("PLAY:"):
+        _web_status = msg.split(":", 1)[1].strip() or "PLAYING"
+    elif msg.startswith("STATUS:"):
         _web_status = msg[7:].strip() or "READY"
         _web_progress_active = True
     elif msg.startswith("PROGRESS:"):
@@ -590,12 +670,15 @@ def _record_web_status(msg):
         _web_status = msg[5:].strip() or "DONE"
         _web_progress = 100
         _web_progress_active = False
+        _web_playing = False
     elif msg.startswith("ERROR:"):
         _web_status = msg[6:].strip() or "ERROR"
         _web_progress_active = False
+        _web_playing = False
     elif msg.startswith("CANCELLED:"):
         _web_status = msg[10:].strip() or "CANCELLED"
         _web_progress_active = False
+        _web_playing = False
     elif msg.startswith(("STANDBY:", "HOME:")):
         # idle again (tray open, insert disc, back to the menu) — clear any
         # lingering "Ejecting..." / progress state on the web UI.
@@ -603,6 +686,7 @@ def _record_web_status(msg):
         _web_status = "READY" if text in ("", "DiscStation", "Select mode", "Starting...") else text
         _web_progress = -1
         _web_progress_active = False
+        _web_playing = False
     else:
         return
     _sse_publish(_status_snapshot())
@@ -909,6 +993,24 @@ def eject_disc(ser, device):
         safe_send(ser, "STANDBY:Tray open")
     else:
         safe_send(ser, "STANDBY:Insert disc")
+    return ok
+
+
+def close_tray(ser, device):
+    """Close the tray on demand (e.g. the web remote's EJECT/CLOSE toggle,
+    clicked any time after an EJECT - unlike eject_disc's own Linux wait-
+    loop, this isn't limited to a ~60s window). eject_device(close=True) is
+    already cross-platform (eject -t / drutil tray close / eject.ps1
+    -Close), so no per-OS branching is needed here."""
+    global _tray_open
+    safe_send(ser, "STATUS:Closing tray...")
+    try:
+        ok = discstation_host.eject_device(device, close=True)
+    except Exception as e:
+        print(f"Close tray error: {e}")
+        ok = False
+    _tray_open = False
+    safe_send(ser, "STANDBY:Insert disc" if ok else "ERROR:Close failed")
     return ok
 
 
@@ -4112,7 +4214,17 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
         if now - last_ping >= 5:
             last_ping = now
             safe_send(ser, "PING")
-            check_serial_alive(ser)
+            if isinstance(ser, VirtualSerial):
+                # Safe point (no flow active) to check whether a real ESP32
+                # has appeared - hand off to it instead of the web remote.
+                try:
+                    port = discstation_host.serial_port()
+                except Exception:
+                    port = None
+                if port:
+                    raise _HardwareAttached(port)
+            else:
+                check_serial_alive(ser)
 
             # Slow full classify as a backstop (type changes, stuck "reading...").
             if (not _tray_open and _disc_poll_future is None
@@ -4168,6 +4280,24 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
                 safe_send(ser, "STANDBY:Error")
             # eject_disc talks to the OLED directly and may leave the tray in any
             # state — force station_loop to re-detect from scratch next tick.
+            last_disc_line = None
+            last_status = None
+            last_status_check = 0.0
+            _detect_cache.pop(device, None)
+            continue
+
+        if line == "CONFIRM" and _tray_open:
+            # Reached only outside eject_disc's own ~60s WAITING window (that
+            # loop consumes its own CONFIRM internally) - the web remote's
+            # EJECT/CLOSE toggle sends this any time later to close the tray.
+            try:
+                device = discstation_burn.disc_device()
+            except FileNotFoundError:
+                if discstation_host.system_name() == "darwin":
+                    device = None
+                else:
+                    raise
+            close_tray(ser, device)
             last_disc_line = None
             last_status = None
             last_status_check = 0.0
@@ -4273,7 +4403,7 @@ def parse_args():
 
 
 def main():
-    global _active_ser, _line_buf
+    global _active_ser, _line_buf, _appliance_mode
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     check_pidfile()
 
@@ -4297,18 +4427,32 @@ def main():
             try:
                 _line_buf = b""
                 port = discstation_host.serial_port()
-                if not port:
-                    raise serial.SerialException("No ESP32 serial port found")
-                print(f"Using ESP32 serial port: {port}")
-                ser = serial.Serial(port, discstation_burn.BAUD, timeout=1, write_timeout=1)
-                if discstation_host.system_name() == "linux":
-                    ser.setDTR(False)
-                    time.sleep(0.1)
-                    ser.setDTR(True)
-                time.sleep(2)
-                discstation_burn.reset_serial_state()
+                if port:
+                    print(f"Using ESP32 serial port: {port}")
+                    ser = serial.Serial(port, discstation_burn.BAUD, timeout=1, write_timeout=1)
+                    if discstation_host.system_name() == "linux":
+                        ser.setDTR(False)
+                        time.sleep(0.1)
+                        ser.setDTR(True)
+                    time.sleep(2)
+                    discstation_burn.reset_serial_state()
+                    _appliance_mode = "hardware"
+                else:
+                    # No ESP32 found - run fully useful off the on-screen web
+                    # remote instead of retrying forever (station_loop already
+                    # publishes status via status_sink regardless of ser).
+                    print("No ESP32 found - running in software-only mode (web remote).")
+                    ser = VirtualSerial()
+                    _appliance_mode = "software"
                 _active_ser = ser
+                # Nothing else publishes an SSE update purely for an appliance-
+                # mode flip (STATUS/PROGRESS/etc. events do, this doesn't) - push
+                # one now so a connected web remote learns about a newly-attached
+                # ESP32 immediately instead of only on its next reload.
+                _sse_publish(_status_snapshot())
                 station_loop(ser, args.url, args.artist, args.album)
+            except _HardwareAttached:
+                print("ESP32 detected - handing off from the web remote to hardware.")
             except (serial.SerialException, OSError, termios.error) as e:
                 print(f"Disconnected ({e}), reconnecting in 3s...")
                 time.sleep(3)

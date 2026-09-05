@@ -99,6 +99,27 @@ button { color: inherit; }
   color: var(--ink);
   text-decoration: none;
   font-weight: 700;
+  cursor: pointer;
+}
+
+.remote-hint {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border: 1px solid var(--soft-line);
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  text-shadow: none;
+  transition: color 0.2s ease, border-color 0.2s ease, text-shadow 0.2s ease;
+}
+.brand.remote-active .remote-hint {
+  color: var(--ink);
+  border-color: var(--ink);
+  text-shadow: 0 0 6px var(--accent);
 }
 
 .brand-mark {
@@ -278,6 +299,21 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
 .form-message.error { color: #9d4035; }
 .form-message.ok { color: #287346; }
 
+.remote-panel { padding: 26px 0 30px; }
+.remote-disc-status {
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--ink);
+  background: var(--surface);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.remote-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 16px; }
+#remote-controls button:disabled, #remote-controls input:disabled { cursor: not-allowed; opacity: 0.4; }
+.remote-transport { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--soft-line); }
+.remote-transport input[type="range"] { width: 100%; margin-top: 4px; accent-color: var(--accent); }
+
 .footer-stamp {
   display: flex;
   justify-content: space-between;
@@ -315,6 +351,8 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
   .capability-strip div:not(:last-child) { border-right: 1px solid var(--soft-line); }
   .capability-strip div + div { padding-left: 18px; }
   .burn-panel { width: min(100%, 720px); margin-left: auto; margin-right: auto; }
+  .remote-panel { width: min(100%, 720px); margin-left: auto; margin-right: auto; }
+  .remote-panel .remote-grid { grid-template-columns: repeat(3, 1fr); }
 }
 
 @media (max-width: 600px) {

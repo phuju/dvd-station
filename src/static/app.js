@@ -66,6 +66,7 @@
       setConnection(true);
       setLiveStatus(progress.status);
       setProgress(progress.status, Number(progress.progress), progress.active);
+      applyRemoteState(progress);
     } catch (_) {
       setConnection(false);
       setLiveStatus("OFFLINE");
@@ -73,10 +74,67 @@
     }
   }
 
+  // --- On-screen remote: the exact same text commands the ESP32 sends -----
+  // POSTed to /remote/button, which feeds a VirtualSerial standing in for a
+  // real appliance. Only usable when no hardware remote is attached.
+  const remoteKey = "discstation-remote-visible";
+
+  function setRemoteVisible(visible, persist = false) {
+    $("remote-panel").hidden = !visible;
+    $("brand-link").classList.toggle("remote-active", visible);
+    if (persist) localStorage.setItem(remoteKey, visible ? "1" : "0");
+  }
+
+  function toggleRemotePanel() {
+    setRemoteVisible($("remote-panel").hidden, true);
+  }
+
+  function applyRemoteState(progress) {
+    const hardware = progress.appliance === "hardware";
+    if (hardware && !$("remote-panel").hidden) setRemoteVisible(false, true);
+    $("remote-note").textContent = hardware
+      ? "A physical remote is attached — on-screen controls are disabled."
+      : "No physical remote detected — control DiscStation from here.";
+    $("remote-controls").querySelectorAll("button, input").forEach((el) => { el.disabled = hardware; });
+    $("remote-transport").hidden = !progress.playing;
+    const ejectBtn = $("remote-eject-btn");
+    const open = !!progress.tray_open;
+    ejectBtn.textContent = open ? "CLOSE TRAY" : "EJECT";
+    ejectBtn.dataset.cmd = open ? "CONFIRM" : "EJECT";
+  }
+
+  async function sendRemoteCmd(cmd) {
+    try {
+      await fetch("/remote/button", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ cmd })
+      });
+    } catch (_) { /* next poll/SSE tick reflects reality */ }
+  }
+
+  $("brand-link").addEventListener("click", (event) => {
+    event.preventDefault();
+    toggleRemotePanel();
+  });
+  setRemoteVisible(localStorage.getItem(remoteKey) === "1");
+
+  $("remote-controls").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-cmd]");
+    if (button && !button.disabled) sendRemoteCmd(button.dataset.cmd);
+  });
+  let volumeTimer;
+  $("remote-volume").addEventListener("input", (event) => {
+    clearTimeout(volumeTimer);
+    const value = event.target.value;
+    volumeTimer = setTimeout(() => sendRemoteCmd(`POT:${value}`), 150);
+  });
+
   async function loadDiscInfo() {
     try {
       const response = await fetch("/disc-info", { cache: "no-store" });
       const info = await response.json();
+      renderDiscStatus(info);
       if (info.busy) return;               // burn/rip in progress — keep current
       state.discBytes = Number(info.capacity_bytes || 0);
       state.discType = info.type || "none";
@@ -84,7 +142,20 @@
     } catch (_) {
       state.discBytes = 0;
       state.discType = "none";
+      renderDiscStatus(null);
     }
+  }
+
+  function renderDiscStatus(info) {
+    const el = $("remote-disc-status");
+    if (!el) return;
+    if (!info) { el.textContent = "DISC: UNKNOWN"; return; }
+    if (info.busy) { el.textContent = "DISC: BUSY (see status above)"; return; }
+    if (!info.disc_present) { el.textContent = "DISC: NONE"; return; }
+    const kind = (info.type || info.kind || "unknown").toUpperCase();
+    const label = info.label ? ` "${info.label}"` : "";
+    const size = info.capacity_gb ? ` // ${info.capacity_gb}GB` : "";
+    el.textContent = `DISC: ${kind}${label}${size}`;
   }
 
   function renderSelection() {
@@ -269,6 +340,7 @@
       setConnection(true);
       setLiveStatus(d.status);
       setProgress(d.status, Number(d.progress), d.active);
+      applyRemoteState(d);
     });
     es.addEventListener("open", () => { setConnection(true); loadDiscInfo(); });
     es.addEventListener("error", () => {
