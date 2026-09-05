@@ -1,12 +1,18 @@
 # DiscStation
 
 DiscStation is a physical-media appliance for DVD-Video, data DVDs, audio CDs,
-playback, ripping, phone uploads, and ESP32 remote control.
+playback, ripping, phone uploads, and ESP32 remote control. The ESP32 remote
+is optional — with none attached, the built-in web UI becomes a full
+on-screen remote instead, so `npm install -g discstation` alone is enough to
+use every mode.
 
 ## Hardware
 
 - **Brain:** Raspberry Pi 4/5 (or any Linux box)
-- **Remote:** ESP32-C6 with SSD1306 OLED, rotary encoder, and buttons
+- **Remote (optional):** ESP32-C6 with SSD1306 OLED, rotary encoder, and
+  buttons — or none at all; the web UI's on-screen remote covers the same
+  controls when no ESP32 is detected, and steps aside (greyed out,
+  auto-collapsing) the moment one is plugged in
 - **Drive:** ATAPI DVD writer (e.g. iHAS124) over USB
 
 ## Features
@@ -95,11 +101,19 @@ mode but not full VIDEO_TS mirror or audio-CD ripping yet. See
 
 ## Web Interface
 
-Built-in web server on port 8080 (HTTPS with self-signed cert):
+Built-in web server on port 8080 (HTTPS with self-signed cert) and a plain
+HTTP mirror on 8081 for the mobile app / any browser that balks at the
+self-signed cert. On startup the host prints the LAN URL to open
+(`>>> Open http://<ip>:8081 ... <<<`).
 
 - Upload files from any device on the LAN for data DVD burning
 - Submit YouTube URLs for video DVD burning
 - Dark theme, mobile-responsive, PWA (installable on phone)
+- **On-screen remote** — click the "REMOTE" tag next to the DiscStation
+  wordmark to reveal a full control surface (mode buttons, EJECT/CLOSE
+  toggle, live disc-status readout, playback transport). Fully functional
+  with no ESP32 attached; greys out and auto-collapses the instant a
+  physical remote is detected, so the two never fight for control.
 
 ## Disc Support
 
