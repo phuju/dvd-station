@@ -3241,15 +3241,123 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
             pass
 
 
+def _play_audio_cd_windows(ser, device, track_titles):
+    """Play an audio CD via src/win/play-audio-cd.ps1 (Windows Media
+    Player's COM control) - mpv on Windows has no libcdio, so cdda:// is
+    unavailable there. Controlled through a small command file instead of
+    mpv's JSON-IPC socket (a different player, a different protocol);
+    OLED button presses translate to PAUSE/STOP/NEXT/PREV/VOL: writes."""
+    cmd_file = Path(tempfile.gettempdir()) / "discstation_wmp_cmd.txt"
+    cmd_file.unlink(missing_ok=True)
+    cmd, kwargs = discstation_host.ps_cmd("play-audio-cd.ps1", device, str(cmd_file))
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kwargs)
+
+    lines = Queue()
+
+    def read_output():
+        try:
+            for line in proc.stdout:
+                lines.put(line.rstrip("\r\n"))
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=read_output, daemon=True).start()
+
+    def send_cmd(text):
+        cmd_file.write_text(text + "\n")
+
+    paused = False
+    current_track = -1
+    send(ser, "PLAY_MODE:AUDIO_CD")
+    send(ser, "PLAY:PLAYING")
+    print("Playing audio CD (Windows Media Player). Short press toggles pause; long press stops.")
+
+    last_ping = time.time()
+    try:
+        while proc.poll() is None:
+            now = time.time()
+            if now - last_ping >= 5:
+                last_ping = now
+                safe_send(ser, "PING")
+
+            try:
+                line = lines.get(timeout=0.1)
+            except Empty:
+                line = None
+            if line:
+                if line.startswith("TRACK:"):
+                    try:
+                        track = int(line.split(":", 1)[1])
+                    except ValueError:
+                        track = None
+                    if track is not None and track != current_track:
+                        current_track = track
+                        title = track_titles[track] if 0 <= track < len(track_titles) else ""
+                        status = f"TRACK {track + 1:02d}"
+                        if title:
+                            status += f" // {title}"
+                        send(ser, f"PLAY_STATUS:{status}")
+                elif line == "DONE":
+                    break
+                elif line.startswith("ERROR:"):
+                    raise RuntimeError(line[6:])
+
+            if ser.in_waiting:
+                btn = ser.readline().decode(errors="ignore").strip()
+                discstation_burn.note_serial_activity()
+
+                if btn == "PLAY_BUTTON":
+                    paused = not paused
+                    send_cmd("PAUSE")
+                    send(ser, "PLAY_STATUS:PAUSED" if paused else "PLAY_STATUS:PLAYING")
+
+                elif btn == "PLAY_STOP":
+                    send(ser, "STATUS:Stopping play")
+                    send_cmd("STOP")
+                    break
+
+                elif btn == "FF:BIG" or btn.startswith("FF:"):
+                    send_cmd("NEXT")
+                    send(ser, "PLAY_STATUS:Next track")
+
+                elif btn == "REW:BIG" or btn.startswith("REW:"):
+                    send_cmd("PREV")
+                    send(ser, "PLAY_STATUS:Prev track")
+
+                elif btn.startswith("POT:"):
+                    try:
+                        volume = int(btn.split(":", 1)[1])
+                        send_cmd(f"VOL:{volume}")
+                    except (ValueError, OSError):
+                        pass
+
+            time.sleep(0.02)
+    finally:
+        try:
+            send_cmd("STOP")
+        except OSError:
+            pass
+        time.sleep(0.3)
+        if proc.poll() is None:
+            discstation_burn.stop_process(proc)
+        cmd_file.unlink(missing_ok=True)
+    safe_send(ser, "DONE:Playback stopped")
+    time.sleep(3)
+
+
 def play_flow(ser):
     device = discstation_burn.disc_device()
     kind = disc_kind(device)
     print(f"Disc type: {kind}")
 
-    try:
-        mpv = discstation_burn.tool("mpv")
-    except FileNotFoundError:
-        raise RuntimeError("mpv not found")
+    mpv = None
+    if not (discstation_host.system_name() == "windows" and kind == "audio_cd"):
+        # The Windows audio_cd path plays via Windows Media Player's own COM
+        # control, not mpv - no reason to require mpv just for that.
+        try:
+            mpv = discstation_burn.tool("mpv")
+        except FileNotFoundError:
+            raise RuntimeError("mpv not found")
 
     def play_vob_fallback():
         # No DVD-menu engine available (libdvdnav missing, or on Windows
@@ -3297,20 +3405,26 @@ def play_flow(ser):
 
     elif kind == "audio_cd":
         _, track_titles, track_starts = audio_track_metadata(device)
-        audio_device = discstation_host.audio_output_device()
-        cmd = [
-            mpv,
-            "--input-ipc-server=" + MPV_SOCKET,
-            "--force-window=no",
-            "--idle=no",
-            "--cdrom-device=" + rip_device(device),
-            "--cdda-cdtext=yes",
-            "cdda://",
-        ]
-        if audio_device:
-            cmd.insert(1, "--audio-device=" + audio_device)
-            print(f"Audio CD output: {audio_device}")
-        _run_mpv(ser, cmd, "Playing audio CD", kind, track_titles, track_starts)
+        if discstation_host.system_name() == "windows":
+            # mpv on Windows has no libcdio - cdda:// is unavailable there
+            # ("disabled at compile-time"). Windows Media Player's own COM
+            # control plays it fine via Windows' native CD-audio support.
+            _play_audio_cd_windows(ser, device, track_titles)
+        else:
+            audio_device = discstation_host.audio_output_device()
+            cmd = [
+                mpv,
+                "--input-ipc-server=" + MPV_SOCKET,
+                "--force-window=no",
+                "--idle=no",
+                "--cdrom-device=" + rip_device(device),
+                "--cdda-cdtext=yes",
+                "cdda://",
+            ]
+            if audio_device:
+                cmd.insert(1, "--audio-device=" + audio_device)
+                print(f"Audio CD output: {audio_device}")
+            _run_mpv(ser, cmd, "Playing audio CD", kind, track_titles, track_starts)
 
     elif kind in ("vcd", "svcd", "video_data"):
         with mounted_disc(device) as mount_dir:
