@@ -58,10 +58,12 @@ discstation-setup          # dispatches to the installer for your OS, then opens
 
 The host runs as a background service; the UI is the built-in web app at
 `http://localhost:8081`. `discstation-setup` opens it when it finishes, and the
-`discstation` command re-opens it any time. It's a PWA — use your browser's
-**Install DiscStation** (or the in-page **INSTALL APP** button on Chromium) to
-get a standalone app window with a dock/taskbar icon on macOS, Linux, and
-Windows.
+`discstation` command re-opens it any time — both also print the LAN address
+(e.g. `Also reachable at http://192.168.1.50:8081/ ...`) so you know what to
+open from a phone or another computer, or enter into the mobile app. It's a
+PWA — use your browser's **Install DiscStation** (or the in-page
+**INSTALL APP** button on Chromium) to get a standalone app window with a
+dock/taskbar icon on macOS, Linux, and Windows.
 
 `discstation-setup --help` lists the forwarded env vars. From a git clone,
 `npm run setup` does the same thing.
@@ -122,6 +124,14 @@ self-signed cert. On startup the host prints the LAN URL to open
   toggle, live disc-status readout, playback transport). Fully functional
   with no ESP32 attached; greys out and auto-collapses the instant a
   physical remote is detected, so the two never fight for control.
+
+## Mobile App
+
+The `mobile/` Expo app (enter the host's LAN address in its settings screen)
+has the same on-screen remote as the web UI — mode buttons, EJECT/CLOSE,
+disc status, and playback transport, tapped from the "REMOTE" tag next to
+the wordmark. Same auto-collapse behavior when a physical ESP32 shows up,
+same underlying `/remote/button` protocol.
 
 ## Disc Support
 
