@@ -3221,7 +3221,13 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
         except Exception:
             pass
 
-    proc = subprocess.Popen(run_as_desktop_user(cmd), env=env)
+    # Discard mpv's own output. Its terminal status line ("A: 00:04 / 00:15
+    # ...") prints several times a second; left inheriting our stdout it
+    # floods journald until the pipe backs up and our own print()/status
+    # writes block, wedging the whole play loop. We drive mpv over the IPC
+    # socket, so none of that output is wanted.
+    proc = subprocess.Popen(run_as_desktop_user(cmd), env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     try:
         if not wait_for_socket(MPV_SOCKET, proc):
@@ -3275,7 +3281,10 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
                     mpv_command(["set_property", "speed", 1.0])
                     send(ser, "PLAY_STATUS:PAUSED" if paused else "PLAY_STATUS:PLAYING")
 
-                elif line == "PLAY_STOP":
+                elif line in ("PLAY_STOP", "EJECT"):
+                    # EJECT during playback = stop first; the web remote has no
+                    # separate stop button, and without this the command is
+                    # silently dropped here and playback never ends.
                     send(ser, "STATUS:Stopping play")
                     discstation_burn.stop_process(proc)
                     break
