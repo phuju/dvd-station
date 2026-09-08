@@ -20,6 +20,7 @@
 #define POT_READ_MS      200
 #define DONE_RESET_MS    30000
 #define STANDBY_BLANK_MS 60000
+#define IDLE_BLANK_MS    45000   // blank the OLED after this long with no input on HOME/STANDBY
 #define PING_TIMEOUT_MS  30000
 #define LED_BLINK_MS     250
 
@@ -96,6 +97,7 @@ bool editingSpeed = false;
 int playVolume = 50;
 unsigned long standbyStartTime = 0;
 unsigned long lastMsgTime = 0;
+unsigned long lastInputTime = 0;   // last button press / screen change; drives OLED idle-blank
 bool displayBlank = false;
 bool audioPlayMode = false;
 int displayRotation = 0;
@@ -162,6 +164,7 @@ void drawHeader() {
 void drawHome() {
   uiState = UI_HOME;
   returnToHomeAt = 0;
+  lastInputTime = millis();
   if (!displayOk) return;
 
   display.clearDisplay();
@@ -314,6 +317,7 @@ void drawStandby() {
   uiState = UI_STANDBY;
   returnToHomeAt = 0;
   standbyStartTime = millis();
+  lastInputTime = millis();
   displayBlank = false;
   if (!displayOk) return;
 
@@ -593,6 +597,7 @@ void parseMessage(String msg) {
 }
 
 void setup() {
+  setCpuFrequencyMhz(160);  // 240 -> 160: ~halves CPU power; I2C/GPIO all fine at 160
   Serial.begin(115200);
   Wire.begin(22, 23);
 
@@ -633,11 +638,13 @@ void setup() {
 
   drawStandby();
   lastMsgTime = millis();
+  lastInputTime = millis();
   Serial.println("DISCSTATION_READY");
 }
 
 void handleSelectPress(bool longPress) {
   wakeDisplay();
+  lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (longPress) {
       Serial.println("EJECT");
@@ -723,6 +730,7 @@ void handleSelectPress(bool longPress) {
 
 void handleUp(bool longPress) {
   wakeDisplay();
+  lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (homeCount > 0) {
       homeIndex = (homeIndex - 1 + homeCount) % homeCount;
@@ -759,6 +767,7 @@ void handleUp(bool longPress) {
 
 void handleDown(bool longPress) {
   wakeDisplay();
+  lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (homeCount > 0) {
       homeIndex = (homeIndex + 1) % homeCount;
@@ -878,8 +887,9 @@ void loop() {
     if (!displayBlank) drawLoading();
   }
 
-  if (displayOk && uiState == UI_STANDBY && !displayBlank &&
-      (long)(millis() - standbyStartTime) >= STANDBY_BLANK_MS) {
+  if (displayOk && !displayBlank &&
+      (uiState == UI_HOME || uiState == UI_STANDBY) &&
+      (long)(millis() - lastInputTime) >= IDLE_BLANK_MS) {
     display.ssd1306_command(0xAE);
     displayBlank = true;
     digitalWrite(LED_POWER_PIN, LOW);

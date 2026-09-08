@@ -23,6 +23,7 @@
 #define POT_READ_MS      200
 #define DONE_RESET_MS    30000
 #define STANDBY_BLANK_MS 60000
+#define IDLE_BLANK_MS    45000   // blank the OLED after this long with no input on HOME/STANDBY
 #define PING_TIMEOUT_MS  30000
 #define LED_BLINK_MS     250
 
@@ -66,6 +67,7 @@ void initWiFi() {
   }
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
+    WiFi.setSleep(WIFI_PS_MIN_MODEM);  // radio naps between DTIM beacons, stays associated
     tcpServer.begin();
     ArduinoOTA.begin();
     ArduinoOTA.setHostname("discstation-v1");
@@ -143,6 +145,7 @@ bool editingSpeed = false;
 int playVolume = 50;
 unsigned long standbyStartTime = 0;
 unsigned long lastMsgTime = 0;
+unsigned long lastInputTime = 0;   // last button press / screen change; drives OLED idle-blank
 bool displayBlank = false;
 bool audioPlayMode = false;
 int displayRotation = 0;
@@ -210,6 +213,7 @@ void drawHeader() {
 void drawHome() {
   uiState = UI_HOME;
   returnToHomeAt = 0;
+  lastInputTime = millis();
   if (!displayOk) return;
 
   display.clearDisplay();
@@ -363,6 +367,7 @@ void drawStandby() {
   uiState = UI_STANDBY;
   returnToHomeAt = 0;
   standbyStartTime = millis();
+  lastInputTime = millis();
   displayBlank = false;
   if (!displayOk) return;
 
@@ -602,6 +607,7 @@ void parseMessage(String msg) {
 }
 
 void setup() {
+  setCpuFrequencyMhz(160);  // 240 -> 160: ~halves CPU power, Wi-Fi/I2C/OTA all fine at 160
   Serial.begin(115200);
   esp_task_wdt_add(NULL);
   Wire.begin(21, 22);
@@ -639,11 +645,13 @@ void setup() {
 
   drawStandby();
   lastMsgTime = millis();
+  lastInputTime = millis();
   Out.println("DISCSTATION_READY");
 }
 
 void handleSelectPress(bool longPress) {
   wakeDisplay();
+  lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (longPress) {
       Out.println("EJECT");
@@ -733,6 +741,7 @@ void handleSelectPress(bool longPress) {
 
 void handleUp(bool longPress) {
   wakeDisplay();
+  lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (homeCount > 0) {
       homeIndex = (homeIndex - 1 + homeCount) % homeCount;
@@ -772,6 +781,7 @@ void handleUp(bool longPress) {
 
 void handleDown(bool longPress) {
   wakeDisplay();
+  lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (homeCount > 0) {
       homeIndex = (homeIndex + 1) % homeCount;
@@ -915,9 +925,10 @@ void loop() {
     if (!displayBlank) drawStatus();
   }
 
-  // --- Standby blanking ---
-  if (displayOk && uiState == UI_STANDBY && !displayBlank &&
-      (long)(millis() - standbyStartTime) >= STANDBY_BLANK_MS) {
+  // --- OLED idle blanking (HOME + STANDBY) ---
+  if (displayOk && !displayBlank &&
+      (uiState == UI_HOME || uiState == UI_STANDBY) &&
+      (long)(millis() - lastInputTime) >= IDLE_BLANK_MS) {
     display.ssd1306_command(0xAE);
     displayBlank = true;
     digitalWrite(LED_POWER_PIN, LOW);
