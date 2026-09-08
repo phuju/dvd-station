@@ -25,8 +25,6 @@
 #define BTN_SELECT_PIN  14
 #define BTN_UP_PIN      13
 #define BTN_DOWN_PIN    15
-#define LED_POWER_PIN   32
-#define LED_ACT_PIN     33
 #define POT_PIN         34
 
 #define DEBOUNCE_MS      50
@@ -36,7 +34,6 @@
 #define STANDBY_BLANK_MS 60000
 #define IDLE_BLANK_MS    45000   // blank the OLED after this long with no input on HOME/STANDBY
 #define PING_TIMEOUT_MS  30000
-#define LED_BLINK_MS     250
 
 #define WIFI_RESET_HOLD_MS      10000  // hold SELECT this long on HOME to wipe Wi-Fi creds
 #define WIFI_CONNECT_TIMEOUT_MS 18000  // give a stored-creds join this long before falling to the portal
@@ -241,9 +238,6 @@ unsigned long downLastDebounce = 0;
 int ffSpeedIndex = 0;
 int rewSpeedIndex = 0;
 
-// LED state
-bool actLedState = false;
-unsigned long lastLedBlink = 0;
 int homeIndex = 0;
 int burnModeIndex = 0;
 int burnSpeedIndex = 0;
@@ -757,10 +751,6 @@ void setup() {
   pinMode(BTN_SELECT_PIN, INPUT_PULLUP);
   pinMode(BTN_UP_PIN, INPUT_PULLUP);
   pinMode(BTN_DOWN_PIN, INPUT_PULLUP);
-  pinMode(LED_POWER_PIN, OUTPUT);
-  pinMode(LED_ACT_PIN, OUTPUT);
-  digitalWrite(LED_POWER_PIN, HIGH);
-  digitalWrite(LED_ACT_PIN, LOW);
   pinMode(POT_PIN, INPUT);
   analogReadResolution(12);
   analogSetPinAttenuation(POT_PIN, ADC_11db);
@@ -776,14 +766,6 @@ void setup() {
   } else {
     Out.println("Display FAILED");
     delay(3000);
-  }
-
-  // Blink activity LED 3x to confirm it works
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(LED_ACT_PIN, HIGH);
-    delay(150);
-    digitalWrite(LED_ACT_PIN, LOW);
-    delay(150);
   }
 
   drawStandby();
@@ -1115,40 +1097,12 @@ void loop() {
       (long)(millis() - lastInputTime) >= IDLE_BLANK_MS) {
     display.ssd1306_command(0xAE);
     displayBlank = true;
-    digitalWrite(LED_POWER_PIN, LOW);
-  }
-  if (!displayBlank) {
-    digitalWrite(LED_POWER_PIN, HIGH);
   }
 
   // --- PING timeout (disconnected) ---
   if (uiState != UI_DISCONNECTED &&
       (long)(millis() - lastMsgTime) >= PING_TIMEOUT_MS) {
     drawDisconnected();
-  }
-
-  // --- Activity LED ---
-  {
-    bool ledOn = false;
-    if (uiState == UI_BURN_READY || uiState == UI_PLAY || uiState == UI_WAITING || uiState == UI_IP) {
-      ledOn = true;
-    } else if (uiState == UI_STATUS) {
-      if (progressPercent >= 0) {
-        ledOn = (millis() - lastLedBlink > LED_BLINK_MS);
-        if (ledOn) {
-          lastLedBlink = millis();
-          actLedState = !actLedState;
-        }
-        ledOn = actLedState;
-      } else {
-        ledOn = true;
-      }
-    } else if (uiState == UI_HOME || uiState == UI_STANDBY) {
-      ledOn = false;
-    } else if (uiState == UI_DISCONNECTED) {
-      ledOn = true;
-    }
-    digitalWrite(LED_ACT_PIN, ledOn ? HIGH : LOW);
   }
 
   delay(20);

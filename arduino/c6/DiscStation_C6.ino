@@ -24,8 +24,6 @@
 #define BTN_SELECT_PIN  21  // D3
 #define BTN_UP_PIN      20  // D9/MISO
 #define BTN_DOWN_PIN    18  // D10/MOSI
-#define LED_POWER_PIN   15  // Built-in user LED
-#define LED_ACT_PIN     16  // D6/TX
 #define POT_PIN          0  // D0/A0 (ADC)
 
 #define DEBOUNCE_MS      50
@@ -35,7 +33,6 @@
 #define STANDBY_BLANK_MS 60000
 #define IDLE_BLANK_MS    45000   // blank the OLED after this long with no input on HOME/STANDBY
 #define PING_TIMEOUT_MS  30000
-#define LED_BLINK_MS     250
 
 #define WIFI_RESET_HOLD_MS      10000
 #define WIFI_CONNECT_TIMEOUT_MS 18000
@@ -237,8 +234,6 @@ unsigned long downLastDebounce = 0;
 int ffSpeedIndex = 0;
 int rewSpeedIndex = 0;
 
-bool actLedState = false;
-unsigned long lastLedBlink = 0;
 int homeIndex = 0;
 int burnModeIndex = 0;
 int burnSpeedIndex = 0;
@@ -792,10 +787,6 @@ void setup() {
   pinMode(BTN_SELECT_PIN, INPUT_PULLUP);
   pinMode(BTN_UP_PIN, INPUT_PULLUP);
   pinMode(BTN_DOWN_PIN, INPUT_PULLUP);
-  pinMode(LED_POWER_PIN, OUTPUT);
-  pinMode(LED_ACT_PIN, OUTPUT);
-  digitalWrite(LED_POWER_PIN, HIGH);
-  digitalWrite(LED_ACT_PIN, LOW);
   pinMode(POT_PIN, INPUT);
   analogReadResolution(12);
 
@@ -810,13 +801,6 @@ void setup() {
   } else {
     Out.println("Display FAILED");
     delay(3000);
-  }
-
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(LED_ACT_PIN, HIGH);
-    delay(150);
-    digitalWrite(LED_ACT_PIN, LOW);
-    delay(150);
   }
 
   drawStandby();
@@ -1134,38 +1118,11 @@ void loop() {
       (long)(millis() - lastInputTime) >= IDLE_BLANK_MS) {
     display.ssd1306_command(0xAE);
     displayBlank = true;
-    digitalWrite(LED_POWER_PIN, LOW);
-  }
-  if (!displayBlank) {
-    digitalWrite(LED_POWER_PIN, HIGH);
   }
 
   if (uiState != UI_DISCONNECTED &&
       (long)(millis() - lastMsgTime) >= PING_TIMEOUT_MS) {
     drawDisconnected();
-  }
-
-  {
-    bool ledOn = false;
-    if (uiState == UI_BURN_READY || uiState == UI_PLAY || uiState == UI_WAITING || uiState == UI_IP) {
-      ledOn = true;
-    } else if (uiState == UI_STATUS) {
-      if (progressPercent >= 0) {
-        ledOn = (millis() - lastLedBlink > LED_BLINK_MS);
-        if (ledOn) {
-          lastLedBlink = millis();
-          actLedState = !actLedState;
-        }
-        ledOn = actLedState;
-      } else {
-        ledOn = true;
-      }
-    } else if (uiState == UI_HOME || uiState == UI_STANDBY || uiState == UI_LOADING) {
-      ledOn = false;
-    } else if (uiState == UI_DISCONNECTED) {
-      ledOn = true;
-    }
-    digitalWrite(LED_ACT_PIN, ledOn ? HIGH : LOW);
   }
 
   delay(20);
