@@ -3,8 +3,18 @@
 #include <Adafruit_SSD1306.h>
 #include "esp_task_wdt.h"
 #include <WiFi.h>
+#include <WiFiManager.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
 #include <ArduinoOTA.h>
 #include <QRCode.h>
+
+// Optional build-time Wi-Fi override for power users: copy secrets.h.example
+// to secrets.h (git-ignored) and set WIFI_SSID / WIFI_PASS / OTA_PASSWORD.
+// If WIFI_SSID is defined the runtime setup portal is skipped entirely.
+#if __has_include("secrets.h")
+  #include "secrets.h"
+#endif
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -27,6 +37,10 @@
 #define PING_TIMEOUT_MS  30000
 #define LED_BLINK_MS     250
 
+#define WIFI_RESET_HOLD_MS      10000  // hold SELECT this long on HOME to wipe Wi-Fi creds
+#define WIFI_CONNECT_TIMEOUT_MS 18000  // give a stored-creds join this long before falling to the portal
+#define WIFI_RETRY_MS           30000  // if a live link drops, force a re-join after this
+
 #define MAX_HOME_MODES 5
 #define BURN_COUNT 4
 #define SPEED_COUNT 4
@@ -37,8 +51,17 @@ String homeModes[MAX_HOME_MODES] = {"BURN", "PLAY", "RIP"};
 
 WiFiServer tcpServer(TCP_PORT);
 WiFiClient tcpClient;
+WiFiManager wm;
+Preferences prefs;
 bool wifiConnected = false;
 bool wifiInitDone = false;
+bool portalActive = false;
+bool otaEnabled = false;
+bool credsJustSaved = false;
+bool wifiResetArmed = false;
+unsigned long wifiDropAt = 0;
+String apName = "DiscStation";
+String mdnsHost = "discstation";
 
 class DualPrint : public Print {
 public:
@@ -57,24 +80,105 @@ private:
   WiFiClient* _client = nullptr;
 } Out;
 
-void initWiFi() {
-  Out.print("WiFi Tez...");
-  WiFi.mode(WIFI_STA);
-  WiFi.begin("Tez", "Dellwin8#$");
-  for (int i = 0; i < 80; i++) {
-    if (WiFi.status() == WL_CONNECTED) break;
-    delay(250);
+void drawSetup();       // fwd decls (defined with the other draw* below)
+void drawWifiReset();
+
+String deviceSuffix() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char buf[5];
+  snprintf(buf, sizeof(buf), "%02X%02X", mac[4], mac[5]);
+  return String(buf);
+}
+
+void loadCreds(String& ssid, String& pass) {
+  prefs.begin("discstation", true);
+  ssid = prefs.getString("ssid", "");
+  pass = prefs.getString("pass", "");
+  prefs.end();
+}
+
+void saveCreds(const String& ssid, const String& pass) {
+  prefs.begin("discstation", false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+}
+
+void clearCreds() {
+  prefs.begin("discstation", false);
+  prefs.clear();
+  prefs.end();
+  WiFi.disconnect(true, true);   // also wipe the ESP's own persisted creds
+}
+
+void wmSaveCallback() {
+  saveCreds(wm.getWiFiSSID(), wm.getWiFiPass());
+  credsJustSaved = true;         // loop() reboots cleanly into STA mode
+}
+
+void onWifiUp() {
+  portalActive = false;
+  wifiConnected = true;
+  wifiDropAt = 0;
+  WiFi.setSleep(WIFI_PS_MIN_MODEM);
+  tcpServer.begin();
+  if (MDNS.begin(mdnsHost.c_str())) {
+    MDNS.addService("discstation", "tcp", TCP_PORT);
   }
+#ifdef OTA_PASSWORD
+  ArduinoOTA.setHostname(mdnsHost.c_str());
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.begin();
+  otaEnabled = true;
+#endif
+  Out.print("WiFi OK "); Out.println(WiFi.localIP());
+}
+
+void startPortal() {
+  Out.print("WiFi: setup portal '"); Out.print(apName); Out.println("'");
+  portalActive = true;
+  WiFi.mode(WIFI_AP_STA);
+  wm.setConfigPortalBlocking(false);
+  wm.setConfigPortalTimeout(0);
+  wm.setSaveConfigCallback(wmSaveCallback);
+  wm.startConfigPortal(apName.c_str());   // open AP at 192.168.4.1
+  drawSetup();
+}
+
+void initWiFi() {
+  apName   = "DiscStation-" + deviceSuffix();
+  mdnsHost = "discstation-" + deviceSuffix();
+  mdnsHost.toLowerCase();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(WIFI_PS_MIN_MODEM);
+
+  String ssid, pass;
+#ifdef WIFI_SSID
+  ssid = WIFI_SSID;
+  pass = WIFI_PASS;
+#else
+  loadCreds(ssid, pass);
+#endif
+
+  if (ssid.length() > 0) {
+    Out.print("WiFi "); Out.print(ssid); Out.print("...");
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    unsigned long t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_CONNECT_TIMEOUT_MS) {
+      esp_task_wdt_reset();
+      delay(200);
+    }
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    WiFi.setSleep(WIFI_PS_MIN_MODEM);  // radio naps between DTIM beacons, stays associated
-    tcpServer.begin();
-    ArduinoOTA.begin();
-    ArduinoOTA.setHostname("discstation-v1");
-    ArduinoOTA.setPassword("dvdstation");
-    Out.print(" OK "); Out.println(WiFi.localIP());
+    Out.println(" OK");
+    onWifiUp();
   } else {
-    Out.println(" fail");
+    if (ssid.length() > 0) Out.println(" fail (2.4GHz band / wrong password?)");
+    startPortal();
   }
 }
 String discName = "";
@@ -91,7 +195,8 @@ enum UiState {
   UI_STANDBY,
   UI_WAITING,
   UI_IP,
-  UI_DISCONNECTED
+  UI_DISCONNECTED,
+  UI_SETUP
 };
 
 const char* BURN_MODES[BURN_COUNT] = {"AUTO", "BEST", "LONG", "TEST"};
@@ -364,6 +469,9 @@ void drawIP() {
 }
 
 void drawStandby() {
+  // While the Wi-Fi setup portal is up and the appliance is otherwise idle,
+  // the standby screen doubles as the setup instructions.
+  if (portalActive) { drawSetup(); return; }
   uiState = UI_STANDBY;
   returnToHomeAt = 0;
   standbyStartTime = millis();
@@ -377,6 +485,39 @@ void drawStandby() {
   display.print("STANDBY // READY");
   display.setCursor(2, 40);
   display.print("INSERT MEDIA");
+  display.display();
+}
+
+void drawSetup() {
+  uiState = UI_SETUP;
+  returnToHomeAt = 0;
+  displayBlank = false;
+  lastInputTime = millis();
+  if (!displayOk) return;
+
+  display.clearDisplay();
+  drawHeader();
+  display.setCursor(2, 16);
+  display.print("WIFI SETUP");
+  display.setCursor(2, 28);
+  display.print("JOIN:");
+  display.setCursor(2, 38);
+  printUpper(apName);
+  display.setCursor(2, 50);
+  display.print("THEN 192.168.4.1");
+  display.display();
+}
+
+void drawWifiReset() {
+  uiState = UI_SETUP;
+  displayBlank = false;
+  if (!displayOk) return;
+  display.clearDisplay();
+  drawHeader();
+  display.setCursor(2, 25);
+  display.print("WIFI RESET");
+  display.setCursor(2, 40);
+  display.print("REBOOTING...");
   display.display();
 }
 
@@ -408,6 +549,7 @@ void wakeDisplay() {
     case UI_WAITING: drawWaiting(); break;
     case UI_STANDBY: drawStandby(); break;
     case UI_DISCONNECTED: drawDisconnected(); break;
+    case UI_SETUP: drawSetup(); break;
   }
 }
 
@@ -824,8 +966,33 @@ void loop() {
     wifiInitDone = true;
     initWiFi();
   }
-  if (wifiConnected) {
-    ArduinoOTA.handle();
+
+  if (credsJustSaved) {          // portal saved new creds -> reboot into clean STA
+    drawWifiReset();
+    delay(600);
+    ESP.restart();
+  }
+
+  if (portalActive) {
+    wm.process();
+    if (WiFi.status() == WL_CONNECTED) onWifiUp();
+  }
+
+  // Live link dropped: WiFi.setAutoReconnect handles most; if still down after
+  // WIFI_RETRY_MS, force a fresh join.
+  if (wifiConnected && WiFi.status() != WL_CONNECTED) {
+    if (wifiDropAt == 0) wifiDropAt = millis();
+    else if (millis() - wifiDropAt > WIFI_RETRY_MS) {
+      wifiDropAt = millis();
+      WiFi.disconnect();
+      WiFi.begin();
+    }
+  } else if (wifiConnected) {
+    wifiDropAt = 0;
+  }
+
+  if (wifiConnected && WiFi.status() == WL_CONNECTED) {
+    if (otaEnabled) ArduinoOTA.handle();
     if (tcpServer.hasClient()) {
       if (tcpClient) tcpClient.stop();
       tcpClient = tcpServer.available();
@@ -875,11 +1042,27 @@ void loop() {
     if (sel && !selectDown && millis() - selectLastDebounce > DEBOUNCE_MS) {
       selectDown = true;
       selectDownAt = millis();
+      wifiResetArmed = false;
+    }
+    // 10s hold on HOME (or SETUP) = wipe Wi-Fi creds + reboot to portal. Fires
+    // while still held so the eventual release doesn't also trigger EJECT.
+    if (sel && selectDown && !wifiResetArmed &&
+        (uiState == UI_HOME || uiState == UI_SETUP || uiState == UI_STANDBY) &&
+        millis() - selectDownAt >= WIFI_RESET_HOLD_MS) {
+      wifiResetArmed = true;
+      Out.println("WiFi: creds wiped, rebooting");
+      clearCreds();
+      drawWifiReset();
+      delay(800);
+      ESP.restart();
     }
     if (!sel && selectDown) {
       selectDown = false;
       selectLastDebounce = millis();
-      handleSelectPress(millis() - selectDownAt >= LONG_PRESS_MS);
+      if (!wifiResetArmed) {
+        handleSelectPress(millis() - selectDownAt >= LONG_PRESS_MS);
+      }
+      wifiResetArmed = false;
     }
   }
 

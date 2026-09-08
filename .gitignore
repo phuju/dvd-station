@@ -11,6 +11,7 @@ Thumbs.db
 *.crt
 *.pem
 server.*
+arduino/*/secrets.h
 
 # Arduino build
 arduino/**/build/

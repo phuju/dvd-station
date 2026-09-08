@@ -1,12 +1,24 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+#include <WiFiManager.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
+#include <ArduinoOTA.h>
 #include <QRCode.h>
+
+// Optional build-time Wi-Fi override for power users: copy secrets.h.example
+// to secrets.h (git-ignored) and set WIFI_SSID / WIFI_PASS / OTA_PASSWORD.
+#if __has_include("secrets.h")
+  #include "secrets.h"
+#endif
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
 #define I2C_ADDRESS   0x3C
+#define TCP_PORT      2323
 
 #define BTN_SELECT_PIN  21  // D3
 #define BTN_UP_PIN      20  // D9/MISO
@@ -24,6 +36,10 @@
 #define PING_TIMEOUT_MS  30000
 #define LED_BLINK_MS     250
 
+#define WIFI_RESET_HOLD_MS      10000
+#define WIFI_CONNECT_TIMEOUT_MS 18000
+#define WIFI_RETRY_MS           30000
+
 #define MAX_HOME_MODES 5
 #define BURN_COUNT 4
 #define SPEED_COUNT 4
@@ -31,6 +47,137 @@
 int homeCount = 3;
 String homeModes[MAX_HOME_MODES] = {"BURN", "PLAY", "RIP"};
 String discName = "";
+
+// --- Wi-Fi link: mirror every outbound line to Serial AND a TCP client ---
+WiFiServer tcpServer(TCP_PORT);
+WiFiClient tcpClient;
+WiFiManager wm;
+Preferences prefs;
+bool wifiConnected = false;
+bool wifiInitDone = false;
+bool portalActive = false;
+bool otaEnabled = false;
+bool credsJustSaved = false;
+bool wifiResetArmed = false;
+unsigned long wifiDropAt = 0;
+String apName = "DiscStation";
+String mdnsHost = "discstation";
+
+class DualPrint : public Print {
+public:
+  void setClient(WiFiClient* c) { _client = c; }
+  size_t write(uint8_t c) override {
+    Serial.write(c);
+    if (_client && _client->connected()) _client->write(c);
+    return 1;
+  }
+  size_t write(const uint8_t* buf, size_t len) override {
+    Serial.write(buf, len);
+    if (_client && _client->connected()) _client->write(buf, len);
+    return len;
+  }
+private:
+  WiFiClient* _client = nullptr;
+} Out;
+
+void drawSetup();
+void drawWifiReset();
+
+String deviceSuffix() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char buf[5];
+  snprintf(buf, sizeof(buf), "%02X%02X", mac[4], mac[5]);
+  return String(buf);
+}
+
+void loadCreds(String& ssid, String& pass) {
+  prefs.begin("discstation", true);
+  ssid = prefs.getString("ssid", "");
+  pass = prefs.getString("pass", "");
+  prefs.end();
+}
+
+void saveCreds(const String& ssid, const String& pass) {
+  prefs.begin("discstation", false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+}
+
+void clearCreds() {
+  prefs.begin("discstation", false);
+  prefs.clear();
+  prefs.end();
+  WiFi.disconnect(true, true);
+}
+
+void wmSaveCallback() {
+  saveCreds(wm.getWiFiSSID(), wm.getWiFiPass());
+  credsJustSaved = true;
+}
+
+void onWifiUp() {
+  portalActive = false;
+  wifiConnected = true;
+  wifiDropAt = 0;
+  WiFi.setSleep(WIFI_PS_MIN_MODEM);
+  tcpServer.begin();
+  if (MDNS.begin(mdnsHost.c_str())) {
+    MDNS.addService("discstation", "tcp", TCP_PORT);
+  }
+#ifdef OTA_PASSWORD
+  ArduinoOTA.setHostname(mdnsHost.c_str());
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.begin();
+  otaEnabled = true;
+#endif
+  Out.print("WiFi OK "); Out.println(WiFi.localIP());
+}
+
+void startPortal() {
+  Out.print("WiFi: setup portal '"); Out.print(apName); Out.println("'");
+  portalActive = true;
+  WiFi.mode(WIFI_AP_STA);
+  wm.setConfigPortalBlocking(false);
+  wm.setConfigPortalTimeout(0);
+  wm.setSaveConfigCallback(wmSaveCallback);
+  wm.startConfigPortal(apName.c_str());
+  drawSetup();
+}
+
+void initWiFi() {
+  apName   = "DiscStation-" + deviceSuffix();
+  mdnsHost = "discstation-" + deviceSuffix();
+  mdnsHost.toLowerCase();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(WIFI_PS_MIN_MODEM);
+
+  String ssid, pass;
+#ifdef WIFI_SSID
+  ssid = WIFI_SSID;
+  pass = WIFI_PASS;
+#else
+  loadCreds(ssid, pass);
+#endif
+
+  if (ssid.length() > 0) {
+    Out.print("WiFi "); Out.print(ssid); Out.print("...");
+    WiFi.begin(ssid.c_str(), pass.c_str());
+    unsigned long t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_CONNECT_TIMEOUT_MS) delay(200);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Out.println(" OK");
+    onWifiUp();
+  } else {
+    if (ssid.length() > 0) Out.println(" fail (2.4GHz band / wrong password?)");
+    startPortal();
+  }
+}
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
@@ -45,7 +192,8 @@ enum UiState {
   UI_WAITING,
   UI_IP,
   UI_DISCONNECTED,
-  UI_LOADING
+  UI_LOADING,
+  UI_SETUP
 };
 
 const char* BURN_MODES[BURN_COUNT] = {"AUTO", "BEST", "LONG", "TEST"};
@@ -123,14 +271,14 @@ int readPercent() {
 
 void sendHomeMode() {
   if (homeIndex >= 0 && homeIndex < homeCount) {
-    Serial.print("MENU:");
-    Serial.println(homeModes[homeIndex]);
+    Out.print("MENU:");
+    Out.println(homeModes[homeIndex]);
   }
 }
 
 void sendBurnMode() {
-  Serial.print("MODE:");
-  Serial.println(BURN_MODES[burnModeIndex]);
+  Out.print("MODE:");
+  Out.println(BURN_MODES[burnModeIndex]);
 }
 
 void printUpper(String value) {
@@ -314,6 +462,7 @@ void drawIP() {
 }
 
 void drawStandby() {
+  if (portalActive) { drawSetup(); return; }
   uiState = UI_STANDBY;
   returnToHomeAt = 0;
   standbyStartTime = millis();
@@ -327,6 +476,38 @@ void drawStandby() {
   display.print("STANDBY // READY");
   display.setCursor(2, 40);
   display.print("INSERT MEDIA");
+  display.display();
+}
+
+void drawSetup() {
+  uiState = UI_SETUP;
+  returnToHomeAt = 0;
+  displayBlank = false;
+  lastInputTime = millis();
+  if (!displayOk) return;
+  display.clearDisplay();
+  drawHeader();
+  display.setCursor(2, 16);
+  display.print("WIFI SETUP");
+  display.setCursor(2, 28);
+  display.print("JOIN:");
+  display.setCursor(2, 38);
+  display.print(apName);
+  display.setCursor(2, 50);
+  display.print("THEN 192.168.4.1");
+  display.display();
+}
+
+void drawWifiReset() {
+  uiState = UI_SETUP;
+  displayBlank = false;
+  if (!displayOk) return;
+  display.clearDisplay();
+  drawHeader();
+  display.setCursor(2, 25);
+  display.print("WIFI RESET");
+  display.setCursor(2, 40);
+  display.print("REBOOTING...");
   display.display();
 }
 
@@ -382,6 +563,7 @@ void wakeDisplay() {
     case UI_STANDBY: drawStandby(); break;
     case UI_DISCONNECTED: drawDisconnected(); break;
     case UI_LOADING: drawLoading(); break;
+    case UI_SETUP: drawSetup(); break;
   }
 }
 
@@ -414,7 +596,7 @@ void parseMessage(String msg) {
 
   if (msg == "PING") {
     lastMsgTime = millis();
-    Serial.println("PONG");
+    Out.println("PONG");
     if (uiState == UI_DISCONNECTED) drawStandby();
     return;
   }
@@ -422,8 +604,8 @@ void parseMessage(String msg) {
   wakeDisplay();
   lastMsgTime = millis();
 
-  Serial.print("RCV:");
-  Serial.println(msg);
+  Out.print("RCV:");
+  Out.println(msg);
 
   if (msg.startsWith("HOME:")) {
     homeIndex = readBucket(homeCount);
@@ -623,9 +805,9 @@ void setup() {
   displayOk = display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS);
 
   if (displayOk) {
-    Serial.println("Display OK");
+    Out.println("Display OK");
   } else {
-    Serial.println("Display FAILED");
+    Out.println("Display FAILED");
     delay(3000);
   }
 
@@ -639,7 +821,7 @@ void setup() {
   drawStandby();
   lastMsgTime = millis();
   lastInputTime = millis();
-  Serial.println("DISCSTATION_READY");
+  Out.println("DISCSTATION_READY");
 }
 
 void handleSelectPress(bool longPress) {
@@ -647,15 +829,15 @@ void handleSelectPress(bool longPress) {
   lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (longPress) {
-      Serial.println("EJECT");
+      Out.println("EJECT");
       line1 = "Ejecting...";
       line2 = "";
       line3 = "";
       returnToHomeAt = millis() + 5000;
       drawStatus();
     } else if (homeIndex >= 0 && homeIndex < homeCount) {
-      Serial.print("SELECT:");
-      Serial.println(homeModes[homeIndex]);
+      Out.print("SELECT:");
+      Out.println(homeModes[homeIndex]);
       line1 = "Selected";
       line2 = homeModes[homeIndex];
       line3 = "";
@@ -663,7 +845,7 @@ void handleSelectPress(bool longPress) {
     }
 
   } else if (uiState == UI_STANDBY) {
-    Serial.println("EJECT");
+    Out.println("EJECT");
     line1 = "Ejecting...";
     line2 = "";
     line3 = "";
@@ -675,16 +857,16 @@ void handleSelectPress(bool longPress) {
 
   } else if (uiState == UI_IP) {
     if (longPress) {
-      Serial.println("CANCEL");
+      Out.println("CANCEL");
       drawHome();
     }
 
   } else if (uiState == UI_WAITING) {
     if (longPress) {
-      Serial.println("CANCEL");
+      Out.println("CANCEL");
       drawHome();
     } else {
-      Serial.println("CONFIRM");
+      Out.println("CONFIRM");
       line1 = "Confirmed!";
       line2 = "";
       line3 = "";
@@ -693,8 +875,8 @@ void handleSelectPress(bool longPress) {
 
   } else if (uiState == UI_BURN_READY) {
     if (longPress) {
-      Serial.print("START:");
-      Serial.println(BURN_MODES[burnModeIndex]);
+      Out.print("START:");
+      Out.println(BURN_MODES[burnModeIndex]);
       line1 = "Starting...";
       line2 = BURN_MODES[burnModeIndex];
       line3 = "";
@@ -706,7 +888,7 @@ void handleSelectPress(bool longPress) {
 
   } else if (uiState == UI_STATUS) {
     if (longPress) {
-      Serial.println("CANCEL");
+      Out.println("CANCEL");
       line1 = "Cancelling...";
       line2 = "";
       line3 = "";
@@ -714,16 +896,16 @@ void handleSelectPress(bool longPress) {
     }
 
   } else if (uiState == UI_DISCONNECTED) {
-    Serial.println("CANCEL");
+    Out.println("CANCEL");
     drawStandby();
 
   } else if (uiState == UI_PLAY) {
     ffSpeedIndex = 0;
     rewSpeedIndex = 0;
     if (longPress) {
-      Serial.println("PLAY_STOP");
+      Out.println("PLAY_STOP");
     } else {
-      Serial.println("PLAY_BUTTON");
+      Out.println("PLAY_BUTTON");
     }
   }
 }
@@ -740,8 +922,8 @@ void handleUp(bool longPress) {
   } else if (uiState == UI_BURN_READY) {
     if (editingSpeed) {
       burnSpeedIndex = (burnSpeedIndex - 1 + SPEED_COUNT) % SPEED_COUNT;
-      Serial.print("SPEED:");
-      Serial.println(SPEED_MODES[burnSpeedIndex]);
+      Out.print("SPEED:");
+      Out.println(SPEED_MODES[burnSpeedIndex]);
       drawBurnReady();
     } else {
       burnModeIndex = (burnModeIndex - 1 + BURN_COUNT) % BURN_COUNT;
@@ -750,17 +932,17 @@ void handleUp(bool longPress) {
     }
   } else if (uiState == UI_PLAY) {
     if (audioPlayMode) {
-      Serial.println(displayRotation == 0 ? (longPress ? "REW:BIG" : "REW:10") : (longPress ? "FF:BIG" : "FF:10"));
+      Out.println(displayRotation == 0 ? (longPress ? "REW:BIG" : "REW:10") : (longPress ? "FF:BIG" : "FF:10"));
       return;
     }
     rewSpeedIndex = 0;
     if (longPress) {
-      Serial.println("FF:BIG");
+      Out.println("FF:BIG");
     } else {
       ffSpeedIndex = (ffSpeedIndex + 1) % 4;
       int seek_sec[] = {10, 20, 30, 60};
-      Serial.print("FF:");
-      Serial.println(seek_sec[ffSpeedIndex]);
+      Out.print("FF:");
+      Out.println(seek_sec[ffSpeedIndex]);
     }
   }
 }
@@ -777,8 +959,8 @@ void handleDown(bool longPress) {
   } else if (uiState == UI_BURN_READY) {
     if (editingSpeed) {
       burnSpeedIndex = (burnSpeedIndex + 1) % SPEED_COUNT;
-      Serial.print("SPEED:");
-      Serial.println(SPEED_MODES[burnSpeedIndex]);
+      Out.print("SPEED:");
+      Out.println(SPEED_MODES[burnSpeedIndex]);
       drawBurnReady();
     } else {
       burnModeIndex = (burnModeIndex + 1) % BURN_COUNT;
@@ -787,22 +969,66 @@ void handleDown(bool longPress) {
     }
   } else if (uiState == UI_PLAY) {
     if (audioPlayMode) {
-      Serial.println(displayRotation == 0 ? (longPress ? "FF:BIG" : "FF:10") : (longPress ? "REW:BIG" : "REW:10"));
+      Out.println(displayRotation == 0 ? (longPress ? "FF:BIG" : "FF:10") : (longPress ? "REW:BIG" : "REW:10"));
       return;
     }
     ffSpeedIndex = 0;
     if (longPress) {
-      Serial.println("REW:BIG");
+      Out.println("REW:BIG");
     } else {
       rewSpeedIndex = (rewSpeedIndex + 1) % 4;
       int seek_sec[] = {10, 20, 30, 60};
-      Serial.print("REW:");
-      Serial.println(seek_sec[rewSpeedIndex]);
+      Out.print("REW:");
+      Out.println(seek_sec[rewSpeedIndex]);
     }
   }
 }
 
 void loop() {
+  if (!wifiInitDone && millis() > 3000) {
+    wifiInitDone = true;
+    initWiFi();
+  }
+
+  if (credsJustSaved) {
+    drawWifiReset();
+    delay(600);
+    ESP.restart();
+  }
+
+  if (portalActive) {
+    wm.process();
+    if (WiFi.status() == WL_CONNECTED) onWifiUp();
+  }
+
+  if (wifiConnected && WiFi.status() != WL_CONNECTED) {
+    if (wifiDropAt == 0) wifiDropAt = millis();
+    else if (millis() - wifiDropAt > WIFI_RETRY_MS) {
+      wifiDropAt = millis();
+      WiFi.disconnect();
+      WiFi.begin();
+    }
+  } else if (wifiConnected) {
+    wifiDropAt = 0;
+  }
+
+  if (wifiConnected && WiFi.status() == WL_CONNECTED) {
+    if (otaEnabled) ArduinoOTA.handle();
+    if (tcpServer.hasClient()) {
+      if (tcpClient) tcpClient.stop();
+      tcpClient = tcpServer.available();
+      Out.setClient(&tcpClient);
+    }
+    if (tcpClient && !tcpClient.connected()) {
+      tcpClient.stop();
+      Out.setClient(nullptr);
+    }
+    if (tcpClient && tcpClient.available()) {
+      String tmsg = tcpClient.readStringUntil('\n');
+      if (tmsg.length() > 0) parseMessage(tmsg);
+    }
+  }
+
   if (Serial.available()) {
     String msg = Serial.readStringUntil('\n');
     parseMessage(msg);
@@ -823,8 +1049,8 @@ void loop() {
     int nextVolume = readPercent();
     if (abs(nextVolume - playVolume) >= 3) {
       playVolume = nextVolume;
-      Serial.print("POT:");
-      Serial.println(playVolume);
+      Out.print("POT:");
+      Out.println(playVolume);
       drawPlay();
     }
   }
@@ -834,11 +1060,26 @@ void loop() {
     if (sel && !selectDown && millis() - selectLastDebounce > DEBOUNCE_MS) {
       selectDown = true;
       selectDownAt = millis();
+      wifiResetArmed = false;
+    }
+    // 10s hold on HOME/SETUP/STANDBY = wipe Wi-Fi creds + reboot to portal.
+    if (sel && selectDown && !wifiResetArmed &&
+        (uiState == UI_HOME || uiState == UI_SETUP || uiState == UI_STANDBY) &&
+        millis() - selectDownAt >= WIFI_RESET_HOLD_MS) {
+      wifiResetArmed = true;
+      Out.println("WiFi: creds wiped, rebooting");
+      clearCreds();
+      drawWifiReset();
+      delay(800);
+      ESP.restart();
     }
     if (!sel && selectDown) {
       selectDown = false;
       selectLastDebounce = millis();
-      handleSelectPress(millis() - selectDownAt >= LONG_PRESS_MS);
+      if (!wifiResetArmed) {
+        handleSelectPress(millis() - selectDownAt >= LONG_PRESS_MS);
+      }
+      wifiResetArmed = false;
     }
   }
 
