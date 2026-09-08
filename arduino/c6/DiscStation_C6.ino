@@ -2,6 +2,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
+#include "esp_mac.h"
 #include <WiFiManager.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
@@ -85,7 +86,7 @@ void drawWifiReset();
 
 String deviceSuffix() {
   uint8_t mac[6];
-  WiFi.macAddress(mac);
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);  // factory MAC from eFuse - valid before the Wi-Fi driver starts
   char buf[5];
   snprintf(buf, sizeof(buf), "%02X%02X", mac[4], mac[5]);
   return String(buf);
