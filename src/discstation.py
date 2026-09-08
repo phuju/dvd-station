@@ -114,9 +114,87 @@ class VirtualSerial:
         pass
 
 
+class TcpSerial:
+    """serial.Serial look-alike over a TCP socket to the ESP32's Wi-Fi link
+    (firmware's WiFiServer on port 2323). Exposes the same tiny surface
+    station_loop and the flow functions use - write / readline / in_waiting /
+    read / close / setDTR - so nothing downstream knows it isn't a wire.
+    A dead link raises serial.SerialException from in_waiting/write, which is
+    what check_serial_alive() / main()'s reconnect loop already expect."""
+
+    def __init__(self, host, port=2323, connect_timeout=5):
+        if host.count(":") == 1 and not host.startswith("["):  # "ip:port"
+            host, _, p = host.rpartition(":")
+            if p.isdigit():
+                port = int(p)
+        self._sock = socket.create_connection((host, port), timeout=connect_timeout)
+        self._sock.settimeout(0.05)
+        self._buf = b""
+        self._lock = threading.Lock()
+        self._alive = True
+        self._reader = threading.Thread(target=self._pump, daemon=True)
+        self._reader.start()
+
+    def _pump(self):
+        while self._alive:
+            try:
+                chunk = self._sock.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            with self._lock:
+                self._buf += chunk
+        self._alive = False
+
+    @property
+    def in_waiting(self):
+        if not self._alive:
+            raise serial.SerialException("Wi-Fi remote link closed")
+        with self._lock:
+            return len(self._buf)
+
+    def read(self, n=1):
+        with self._lock:
+            data, self._buf = self._buf[:n], self._buf[n:]
+            return data
+
+    def readline(self):
+        with self._lock:
+            idx = self._buf.find(b"\n")
+            if idx < 0:
+                data, self._buf = self._buf, b""
+                return data
+            line, self._buf = self._buf[:idx + 1], self._buf[idx + 1:]
+            return line
+
+    def write(self, data):
+        if not self._alive:
+            raise serial.SerialException("Wi-Fi remote link closed")
+        try:
+            self._sock.sendall(data)
+            return len(data) if data else 0
+        except OSError as e:
+            self._alive = False
+            raise serial.SerialException(f"Wi-Fi remote write failed: {e}") from e
+
+    def close(self):
+        self._alive = False
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+    def setDTR(self, value):
+        pass
+
+
 class _HardwareAttached(Exception):
-    """Raised out of station_loop when a real ESP32 appears while running on
-    a VirtualSerial, so main() can hand control over to it."""
+    """Raised out of station_loop when a real link (USB serial or the Wi-Fi
+    remote) appears while running on a VirtualSerial, so main() can hand
+    control over to it."""
 
 
 class _WebHandler(http.server.BaseHTTPRequestHandler):
@@ -4257,14 +4335,15 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
             last_ping = now
             safe_send(ser, "PING")
             if isinstance(ser, VirtualSerial):
-                # Safe point (no flow active) to check whether a real ESP32
-                # has appeared - hand off to it instead of the web remote.
+                # Safe point (no flow active) to check whether a real link -
+                # USB serial or the Wi-Fi remote - has appeared, and hand off
+                # to it instead of the web remote.
                 try:
-                    port = discstation_host.serial_port()
+                    link = discstation_host.serial_port() or discstation_host.remote_host()
                 except Exception:
-                    port = None
-                if port:
-                    raise _HardwareAttached(port)
+                    link = None
+                if link:
+                    raise _HardwareAttached(link)
             else:
                 check_serial_alive(ser)
 
@@ -4473,8 +4552,20 @@ def main():
         while True:
             try:
                 _line_buf = b""
+                ser = None
+                remote = discstation_host.remote_host()
                 port = discstation_host.serial_port()
-                if port:
+                if remote and not port:
+                    try:
+                        print(f"Connecting to Wi-Fi remote at {remote}:2323 ...")
+                        ser = TcpSerial(remote)
+                        discstation_burn.reset_serial_state()
+                        _appliance_mode = "hardware"
+                        print(f"Wi-Fi remote link up ({remote}).")
+                    except OSError as e:
+                        print(f"Wi-Fi remote {remote} unreachable ({e}); trying USB / web.")
+                        ser = None
+                if ser is None and port:
                     print(f"Using ESP32 serial port: {port}")
                     ser = serial.Serial(port, discstation_burn.BAUD, timeout=1, write_timeout=1)
                     if discstation_host.system_name() == "linux":
@@ -4484,10 +4575,10 @@ def main():
                     time.sleep(2)
                     discstation_burn.reset_serial_state()
                     _appliance_mode = "hardware"
-                else:
-                    # No ESP32 found - run fully useful off the on-screen web
-                    # remote instead of retrying forever (station_loop already
-                    # publishes status via status_sink regardless of ser).
+                if ser is None:
+                    # No wired or Wi-Fi remote - run fully useful off the
+                    # on-screen web remote instead of retrying forever
+                    # (station_loop publishes status via status_sink regardless).
                     print("No ESP32 found - running in software-only mode (web remote).")
                     ser = VirtualSerial()
                     _appliance_mode = "software"

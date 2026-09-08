@@ -8,9 +8,11 @@ import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from serial.tools import list_ports
@@ -65,6 +67,79 @@ def serial_port():
     if not preferred:
         return None
     return _stable_serial_path(sorted(preferred)[0])
+
+
+_REMOTE_MDNS_TYPE = "_discstation._tcp.local."
+_REMOTE_DEFAULT_HOST = "discstation.local"
+_remote_cache = {"at": 0.0, "value": None}
+
+
+def remote_host():
+    """Address of the Wi-Fi appliance remote, or None.
+
+    `DISC_REMOTE_HOST` unset       -> None (no Wi-Fi remote; USB / software mode).
+    `DISC_REMOTE_HOST=<ip|host>`   -> that address, verbatim, instantly.
+    `DISC_REMOTE_HOST=auto`        -> mDNS browse for the firmware's
+                                     `_discstation._tcp` advert (needs the
+                                     optional `zeroconf` package), falling back
+                                     to resolving `discstation.local` via the
+                                     OS (Bonjour/avahi). Result cached ~30s so
+                                     the reconnect loop / hot-swap poll don't
+                                     hammer mDNS.
+
+    Best-effort - main() just tries to connect and falls back on failure."""
+    setting = (os.environ.get("DISC_REMOTE_HOST") or "").strip()
+    if not setting:
+        return None
+    if setting.lower() != "auto":
+        return setting
+
+    if time.time() - _remote_cache["at"] < 30:
+        return _remote_cache["value"]
+
+    value = _discover_remote()
+    _remote_cache["at"] = time.time()
+    _remote_cache["value"] = value
+    return value
+
+
+def _discover_remote():
+    try:
+        from zeroconf import Zeroconf, ServiceBrowser
+    except ImportError:
+        Zeroconf = None
+    if Zeroconf is not None:
+        found = {}
+
+        class _Listener:
+            def add_service(self, zc, type_, name):
+                info = zc.get_service_info(type_, name, timeout=1500)
+                if info:
+                    for addr in info.parsed_addresses():
+                        if "." in addr:  # IPv4
+                            found["addr"] = addr
+                            return
+
+            update_service = add_service
+
+            def remove_service(self, *a):
+                pass
+
+        zc = Zeroconf()
+        try:
+            ServiceBrowser(zc, _REMOTE_MDNS_TYPE, _Listener())
+            deadline = time.time() + 2.5
+            while time.time() < deadline and "addr" not in found:
+                time.sleep(0.1)
+        finally:
+            zc.close()
+        if found.get("addr"):
+            return found["addr"]
+
+    try:
+        return socket.gethostbyname(_REMOTE_DEFAULT_HOST)
+    except OSError:
+        return None
 
 
 def _stable_serial_path(device):

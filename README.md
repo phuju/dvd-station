@@ -9,11 +9,35 @@ use every mode.
 ## Hardware
 
 - **Brain:** Raspberry Pi 4/5 (or any Linux box)
-- **Remote (optional):** ESP32-C6 with SSD1306 OLED, rotary encoder, and
-  buttons — or none at all; the web UI's on-screen remote covers the same
-  controls when no ESP32 is detected, and steps aside (greyed out,
-  auto-collapsing) the moment one is plugged in
+- **Remote (optional):** ESP32 DevKit or ESP32-C6 with an SSD1306 OLED, 3
+  buttons, and a volume pot — connected by **USB serial** or over **Wi-Fi**
+  (see below) — or none at all; the web UI / mobile app's on-screen remote
+  covers the same controls when no ESP32 is detected, and steps aside
+  (greyed out, auto-collapsing) the moment one appears.
 - **Drive:** ATAPI DVD writer (e.g. iHAS124) over USB
+
+### Wi-Fi remote (optional)
+
+The firmware also serves the same line protocol over TCP 2323, so the
+remote can talk to the host over Wi-Fi instead of a USB cable.
+
+- **Provisioning (no code edit):** on first boot with no stored credentials
+  the remote starts an open `DiscStation-XXXX` access point; join it from a
+  phone, the captive portal (or `http://192.168.4.1`) lists nearby networks
+  — pick yours, enter the password, done. It reconnects on every boot after
+  that. Change networks later: **hold SELECT for 10 s** on the home screen
+  to wipe the credentials and reopen the portal.
+  Power users can instead `cp arduino/<board>/secrets.h.example secrets.h`
+  and set `WIFI_SSID` / `WIFI_PASS` at build time (git-ignored).
+- **Host side:** set `DISC_REMOTE_HOST` in `discstation.env` to the remote's
+  IP (shown on its OLED), or `auto` for mDNS discovery (needs the optional
+  `zeroconf` package). Unset = USB / on-screen remote only. The host prefers
+  a USB cable when both are present.
+- **Trust model:** TCP 2323 is unauthenticated on the LAN, same as the USB
+  link and the LAN web UI — fine for a home appliance. During the ~30 s of
+  portal setup the password crosses an open AP; the ESP32 is 2.4 GHz only
+  (a "connected to the router but no data" symptom usually means a
+  5 GHz-only / band-steering network or a wrong password).
 
 ## Features
 
