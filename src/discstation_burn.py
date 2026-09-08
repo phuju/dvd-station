@@ -192,6 +192,9 @@ BAUD   = 115200
 
 def check_cancel(ser):
     try:
+        if line_reader is not None:
+            line = line_reader(ser, 0)
+            return bool(line) and line in ("CANCEL", "PLAY_STOP")
         if ser and ser.in_waiting:
             line = ser.readline().decode(errors="ignore").strip()
             note_serial_activity()
@@ -516,6 +519,12 @@ def detect_disc_type(device):
 # discstation.py sets this to _record_web_status so every serial line the burn
 # pipeline emits also updates the web/SSE status in real time.
 status_sink = None
+
+# discstation.py sets this to its buffered read_serial_line so check_cancel
+# reads the same way station_loop does (partial lines get buffered and
+# reassembled). A bare ser.readline() here can slice a "CANCEL\n" in half
+# on a mid-transmission read and then never match it.
+line_reader = None
 
 
 def send(ser, msg):

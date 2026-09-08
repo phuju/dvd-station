@@ -825,7 +825,12 @@ _line_buf = b""
 def read_serial_line(ser, timeout=0.1):
     global _line_buf
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    # Always make at least one non-blocking pass, even for timeout<=0 - the
+    # `remaining <= 0: break` at the bottom still ends it after that pass.
+    # (`while time.monotonic() < deadline` used to skip the body entirely for
+    # timeout=0, which is exactly how _check_cancel() calls this - so cancel
+    # detection during rips silently never read the port.)
+    while True:
         if _line_buf:
             _line_buf = _line_buf.lstrip(b'\r\n')
             if _line_buf:
@@ -868,6 +873,10 @@ def read_serial_line(ser, timeout=0.1):
             break
         time.sleep(min(remaining, 0.05))
     return None
+
+
+# Let the burn pipeline's check_cancel() share this buffered reader.
+discstation_burn.line_reader = read_serial_line
 
 
 def check_serial_alive(ser=None):
@@ -2526,6 +2535,15 @@ def _check_cancel(ser):
         return False
 
 
+def _raise_if_cancelled(ser):
+    """Poll for a CANCEL press between blocking phases that have no
+    subprocess loop of their own (metadata lookups, scans, cover-art
+    downloads). Doesn't interrupt a call in progress, but catches the press
+    the moment the phase returns."""
+    if _check_cancel(ser):
+        raise CancelError
+
+
 def iter_process_events(proc, idle_seconds=1.0, ser=None):
     lines = Queue()
     finished = object()
@@ -3769,7 +3787,10 @@ def rip_flow(ser, artist_hint=None, album_hint=None):
         time.sleep(3)
         return
 
+    _raise_if_cancelled(ser)
+    send(ser, "STATUS:Scanning disc...")
     scan = handbrake_scan(device)
+    _raise_if_cancelled(ser)
     if scan:
         main = scan["main_feature"]
         mins = next((t["duration_s"] // 60 for t in scan["titles"] if t["index"] == main), 0)
@@ -3872,6 +3893,7 @@ def rip_video_disc(ser, device, kind):
             raise RuntimeError("No video files found")
 
         for index, src in enumerate(files, start=1):
+            _raise_if_cancelled(ser)
             send(ser, f"PROGRESS:File {index}/{len(files)}")
             dest = out_dir / f"{index:02d} - {safe_path_name(src.stem)}.mpg"
             print(f"Ripping {src.name} -> {dest.name}")
@@ -3932,6 +3954,7 @@ def _rip_audio_cd_macos(ser, device, chapters, metadata, cover_path, out_dir):
     if len(wav_files) < len(chapters):
         raise RuntimeError(f"Only ripped {len(wav_files)}/{len(chapters)} tracks")
     for index, wav in enumerate(wav_files[:len(chapters)], start=1):
+        _raise_if_cancelled(ser)
         chapter = chapters[index - 1]
         if metadata and index <= len(metadata["tracks"]):
             track_meta = metadata["tracks"][index - 1]
@@ -3967,8 +3990,10 @@ def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
     metadata = None
     cover_path = None
 
+    _raise_if_cancelled(ser)
     send(ser, "STATUS:Looking up CD...")
     metadata = audio_metadata_lookup(device, len(chapters), artist_hint, album_hint)
+    _raise_if_cancelled(ser)
 
     if metadata:
         album_folder = safe_path_name(f"{metadata['album_artist']} - {metadata['album']}")
@@ -3987,6 +4012,7 @@ def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
             out_dir,
             metadata.get("release_group_id"),
         )
+        _raise_if_cancelled(ser)
 
     send(ser, "STATUS:Ripping audio CD")
     if metadata:
@@ -4357,6 +4383,11 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
 
         except KeyboardInterrupt:
             raise
+        except CancelError:
+            safe_send(ser, "CANCELLED:Cancelled")
+            _last_burn_result = "Cancelled"
+            print(f"{mode} cancelled by user")
+            time.sleep(2)
         except Exception as e:
             safe_send(ser, f"ERROR:{str(e)[:50]}")
             _last_burn_result = f"ERROR: {e}"
