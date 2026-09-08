@@ -40,7 +40,7 @@
 
 #define WIFI_RESET_HOLD_MS      10000  // hold SELECT this long on HOME to wipe Wi-Fi creds
 #define WIFI_CONNECT_TIMEOUT_MS 18000  // give a stored-creds join this long before falling to the portal
-#define WIFI_RETRY_MS           30000  // if a live link drops, force a re-join after this
+#define WIFI_RETRY_MS           15000  // if a live link drops, force a re-join after this
 
 #define MAX_HOME_MODES 5
 #define BURN_COUNT 4

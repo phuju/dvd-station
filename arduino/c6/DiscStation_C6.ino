@@ -39,7 +39,7 @@
 
 #define WIFI_RESET_HOLD_MS      10000
 #define WIFI_CONNECT_TIMEOUT_MS 18000
-#define WIFI_RETRY_MS           30000
+#define WIFI_RETRY_MS           15000
 
 #define MAX_HOME_MODES 5
 #define BURN_COUNT 4

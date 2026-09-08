@@ -122,7 +122,7 @@ class TcpSerial:
     A dead link raises serial.SerialException from in_waiting/write, which is
     what check_serial_alive() / main()'s reconnect loop already expect."""
 
-    def __init__(self, host, port=2323, connect_timeout=5):
+    def __init__(self, host, port=2323, connect_timeout=3):
         if host.count(":") == 1 and not host.startswith("["):  # "ip:port"
             host, _, p = host.rpartition(":")
             if p.isdigit():

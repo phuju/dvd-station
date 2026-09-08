@@ -79,8 +79,10 @@ def remote_host():
 
     `DISC_REMOTE_HOST` unset / `auto` (default) -> mDNS browse for the
         firmware's `_discstation._tcp` advert, falling back to resolving
-        `discstation.local` via the OS resolver. Result cached ~60s so the
-        reconnect loop / hot-swap poll don't hammer mDNS.
+        `discstation.local` via the OS resolver. A hit is cached 60s (stable
+        address, don't hammer mDNS); a miss only ~8s, so a host that just
+        rejoined the appliance's network reconnects promptly instead of
+        waiting out a full minute.
     `DISC_REMOTE_HOST=<ip|host>`  -> that address, verbatim, instantly.
     `DISC_REMOTE_HOST=off` / `none` / `0`  -> None (never look; USB / web only).
 
@@ -92,7 +94,8 @@ def remote_host():
     if setting and setting != "auto":
         return (os.environ.get("DISC_REMOTE_HOST") or "").strip()
 
-    if time.time() - _remote_cache["at"] < 60:
+    ttl = 60 if _remote_cache["value"] else 8
+    if time.time() - _remote_cache["at"] < ttl:
         return _remote_cache["value"]
 
     value = _discover_remote()
