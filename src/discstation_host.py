@@ -77,24 +77,22 @@ _remote_cache = {"at": 0.0, "value": None}
 def remote_host():
     """Address of the Wi-Fi appliance remote, or None.
 
-    `DISC_REMOTE_HOST` unset       -> None (no Wi-Fi remote; USB / software mode).
-    `DISC_REMOTE_HOST=<ip|host>`   -> that address, verbatim, instantly.
-    `DISC_REMOTE_HOST=auto`        -> mDNS browse for the firmware's
-                                     `_discstation._tcp` advert (needs the
-                                     optional `zeroconf` package), falling back
-                                     to resolving `discstation.local` via the
-                                     OS (Bonjour/avahi). Result cached ~30s so
-                                     the reconnect loop / hot-swap poll don't
-                                     hammer mDNS.
+    `DISC_REMOTE_HOST` unset / `auto` (default) -> mDNS browse for the
+        firmware's `_discstation._tcp` advert, falling back to resolving
+        `discstation.local` via the OS resolver. Result cached ~60s so the
+        reconnect loop / hot-swap poll don't hammer mDNS.
+    `DISC_REMOTE_HOST=<ip|host>`  -> that address, verbatim, instantly.
+    `DISC_REMOTE_HOST=off` / `none` / `0`  -> None (never look; USB / web only).
 
-    Best-effort - main() just tries to connect and falls back on failure."""
-    setting = (os.environ.get("DISC_REMOTE_HOST") or "").strip()
-    if not setting:
+    Only consulted by main() when no USB serial is present. Best-effort -
+    main() tries to connect and falls back on failure."""
+    setting = (os.environ.get("DISC_REMOTE_HOST") or "").strip().lower()
+    if setting in ("off", "none", "no", "false", "0", "disabled"):
         return None
-    if setting.lower() != "auto":
-        return setting
+    if setting and setting != "auto":
+        return (os.environ.get("DISC_REMOTE_HOST") or "").strip()
 
-    if time.time() - _remote_cache["at"] < 30:
+    if time.time() - _remote_cache["at"] < 60:
         return _remote_cache["value"]
 
     value = _discover_remote()

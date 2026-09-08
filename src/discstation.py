@@ -4553,19 +4553,10 @@ def main():
             try:
                 _line_buf = b""
                 ser = None
-                remote = discstation_host.remote_host()
+
+                # 1. USB serial wins whenever it's present (no mDNS scan then).
                 port = discstation_host.serial_port()
-                if remote and not port:
-                    try:
-                        print(f"Connecting to Wi-Fi remote at {remote}:2323 ...")
-                        ser = TcpSerial(remote)
-                        discstation_burn.reset_serial_state()
-                        _appliance_mode = "hardware"
-                        print(f"Wi-Fi remote link up ({remote}).")
-                    except OSError as e:
-                        print(f"Wi-Fi remote {remote} unreachable ({e}); trying USB / web.")
-                        ser = None
-                if ser is None and port:
+                if port:
                     print(f"Using ESP32 serial port: {port}")
                     ser = serial.Serial(port, discstation_burn.BAUD, timeout=1, write_timeout=1)
                     if discstation_host.system_name() == "linux":
@@ -4575,10 +4566,23 @@ def main():
                     time.sleep(2)
                     discstation_burn.reset_serial_state()
                     _appliance_mode = "hardware"
+
+                # 2. Else look for a Wi-Fi remote (DISC_REMOTE_HOST, default auto/mDNS).
                 if ser is None:
-                    # No wired or Wi-Fi remote - run fully useful off the
-                    # on-screen web remote instead of retrying forever
-                    # (station_loop publishes status via status_sink regardless).
+                    remote = discstation_host.remote_host()
+                    if remote:
+                        try:
+                            print(f"Connecting to Wi-Fi remote at {remote}:2323 ...")
+                            ser = TcpSerial(remote)
+                            discstation_burn.reset_serial_state()
+                            _appliance_mode = "hardware"
+                            print(f"Wi-Fi remote link up ({remote}).")
+                        except OSError as e:
+                            print(f"Wi-Fi remote {remote} unreachable ({e}); using web remote.")
+                            ser = None
+
+                # 3. Else the on-screen web/app remote is the control surface.
+                if ser is None:
                     print("No ESP32 found - running in software-only mode (web remote).")
                     ser = VirtualSerial()
                     _appliance_mode = "software"

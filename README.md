@@ -29,10 +29,11 @@ remote can talk to the host over Wi-Fi instead of a USB cable.
   to wipe the credentials and reopen the portal.
   Power users can instead `cp arduino/<board>/secrets.h.example secrets.h`
   and set `WIFI_SSID` / `WIFI_PASS` at build time (git-ignored).
-- **Host side:** set `DISC_REMOTE_HOST` in `discstation.env` to the remote's
-  IP (shown on its OLED), or `auto` for mDNS discovery (needs the optional
-  `zeroconf` package). Unset = USB / on-screen remote only. The host prefers
-  a USB cable when both are present.
+- **Host side:** nothing to configure. With no USB cable present the host
+  finds the remote by mDNS automatically (`discstation-xxxx.local`). Set
+  `DISC_REMOTE_HOST` in `discstation.env` to an explicit IP only if mDNS is
+  blocked on your network, or `off` to never look. A USB cable always wins
+  when both are present.
 - **Trust model:** TCP 2323 is unauthenticated on the LAN, same as the USB
   link and the LAN web UI — fine for a home appliance. During the ~30 s of
   portal setup the password crosses an open AP; the ESP32 is 2.4 GHz only

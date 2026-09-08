@@ -12,8 +12,3 @@ pyudev>=0.24 ; sys_platform == "linux"
 python-libdiscid>=2.0 ; sys_platform == "linux"
 musicbrainzngs>=0.7.1
 tmdbsimple>=2.9
-
-# Only used for DISC_REMOTE_HOST=auto (mDNS discovery of a Wi-Fi appliance
-# remote). Not needed if you set DISC_REMOTE_HOST to an explicit IP, or use
-# the USB serial cable.
-zeroconf>=0.131
