@@ -658,6 +658,8 @@ void parseMessage(String msg) {
     line1 = msg.substring(5);
     line2 = "Playing disc";
     playVolume = readPercent();
+    Out.print("POT:");            // push the knob's current level so playback starts at it
+    Out.println(playVolume);
     drawPlay();
 
   } else if (msg.startsWith("PLAY_MODE:")) {
