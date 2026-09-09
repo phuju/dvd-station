@@ -545,19 +545,30 @@ const int8_t SIN24[24] = {
 // a USB power-bank feeding the remote doesn't hit its no-load auto-shutoff.
 void drawDiscSaver(int step) {
   if (!displayOk) return;
-  const int cx = 64, cy = 32, R = 27, rh = 6;
+  const int cx = 64, cy = 32, R = 30;
   display.clearDisplay();
-  display.drawCircle(cx, cy, R, SSD1306_WHITE);
-  display.drawCircle(cx, cy, R - 3, SSD1306_WHITE);
-  display.fillCircle(cx, cy, rh, SSD1306_WHITE);
-  for (int k = 0; k < 3; k++) {
-    int i = (step + k * 8) % 24;
-    int c = SIN24[(i + 6) % 24], s = SIN24[i];
-    display.drawLine(cx + rh * c / 64, cy + rh * s / 64,
-                     cx + (R - 5) * c / 64, cy + (R - 5) * s / 64, SSD1306_WHITE);
+  display.fillCircle(cx, cy, R, SSD1306_WHITE);                 // vinyl body
+
+  for (int cl = 0; cl < 2; cl++) {                              // 2 groove clusters, 180 apart
+    int base = step + cl * 12;
+    for (int g = 0; g < 3; g++) {                               // 3 nested "sound wave" grooves
+      int r = 16 + g * 4;
+      int px = -100, py = -100;
+      for (int a = 0; a <= 4; a++) {                            // ~60deg arc, 4 chords
+        int i = (base + a) % 24;
+        int x = cx + r * SIN24[(i + 6) % 24] / 64;
+        int y = cy + r * SIN24[i] / 64;
+        if (px > -100) display.drawLine(px, py, x, y, SSD1306_BLACK);
+        px = x; py = y;
+      }
+    }
   }
-  int hi = step % 24, hc = SIN24[(hi + 6) % 24], hs = SIN24[hi];
-  display.fillCircle(cx + (R - 10) * hc / 64, cy + (R - 10) * hs / 64, 2, SSD1306_WHITE);
+
+  display.fillCircle(cx, cy, 13, SSD1306_BLACK);                // concentric label
+  display.fillCircle(cx, cy, 11, SSD1306_WHITE);
+  display.fillCircle(cx, cy, 8,  SSD1306_BLACK);
+  display.fillCircle(cx, cy, 5,  SSD1306_WHITE);
+  display.fillCircle(cx, cy, 2,  SSD1306_BLACK);                // center hole
   display.display();
 }
 
