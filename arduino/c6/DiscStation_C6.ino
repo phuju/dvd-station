@@ -545,8 +545,10 @@ void drawLoading() {
   display.display();
 }
 
-void wakeDisplay() {
-  if (!displayBlank || !displayOk) return;
+// Returns true if this call actually woke a blanked screen - callers use that
+// to swallow the wake press so it doesn't also trigger a menu action.
+bool wakeDisplay() {
+  if (!displayBlank || !displayOk) return false;
   display.ssd1306_command(0xAF);
   displayBlank = false;
   switch (uiState) {
@@ -561,6 +563,7 @@ void wakeDisplay() {
     case UI_LOADING: drawLoading(); break;
     case UI_SETUP: drawSetup(); break;
   }
+  return true;
 }
 
 void drawPlay() {
@@ -810,7 +813,7 @@ void setup() {
 }
 
 void handleSelectPress(bool longPress) {
-  wakeDisplay();
+  if (wakeDisplay()) { lastInputTime = millis(); return; }  // wake-only press, swallow the action
   lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (longPress) {
@@ -896,7 +899,7 @@ void handleSelectPress(bool longPress) {
 }
 
 void handleUp(bool longPress) {
-  wakeDisplay();
+  if (wakeDisplay()) { lastInputTime = millis(); return; }  // wake-only press, swallow the action
   lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (homeCount > 0) {
@@ -933,7 +936,7 @@ void handleUp(bool longPress) {
 }
 
 void handleDown(bool longPress) {
-  wakeDisplay();
+  if (wakeDisplay()) { lastInputTime = millis(); return; }  // wake-only press, swallow the action
   lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (homeCount > 0) {
