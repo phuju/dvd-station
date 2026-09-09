@@ -552,14 +552,16 @@ void drawDiscSaver(int step) {
   for (int cl = 0; cl < 2; cl++) {                              // 2 groove clusters, 180 apart
     int base = step + cl * 12;
     for (int g = 0; g < 3; g++) {                               // 3 nested "sound wave" grooves
-      int r = 16 + g * 4;
-      int px = -100, py = -100;
-      for (int a = 0; a <= 4; a++) {                            // ~60deg arc, 4 chords
-        int i = (base + a) % 24;
-        int x = cx + r * SIN24[(i + 6) % 24] / 64;
-        int y = cy + r * SIN24[i] / 64;
-        if (px > -100) display.drawLine(px, py, x, y, SSD1306_BLACK);
-        px = x; py = y;
+      for (int t = 0; t < 3; t++) {                             // 3px-thick stroke
+        int r = 16 + g * 5 + t;
+        int px = -100, py = -100;
+        for (int a = 0; a <= 4; a++) {                          // ~60deg arc, 4 chords
+          int i = (base + a) % 24;
+          int x = cx + r * SIN24[(i + 6) % 24] / 64;
+          int y = cy + r * SIN24[i] / 64;
+          if (px > -100) display.drawLine(px, py, x, y, SSD1306_BLACK);
+          px = x; py = y;
+        }
       }
     }
   }
