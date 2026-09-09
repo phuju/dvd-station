@@ -72,6 +72,7 @@ def serial_port():
 _REMOTE_MDNS_TYPE = "_discstation._tcp.local."
 _REMOTE_DEFAULT_HOST = "discstation.local"
 _remote_cache = {"at": 0.0, "value": None}
+_remote_browser = {}  # {"zc": Zeroconf|None, "found": {"addr": ...}} - built once, lives for the process
 
 
 def remote_host():
@@ -94,53 +95,60 @@ def remote_host():
     if setting and setting != "auto":
         return (os.environ.get("DISC_REMOTE_HOST") or "").strip()
 
+    addr = _mdns_addr()
+    if addr:
+        return addr
+
+    # zeroconf absent / nothing advertised yet -> OS resolver for discstation.local.
+    # Cache it: a hit 60s, a miss ~8s (so a host that just rejoined reconnects fast).
     ttl = 60 if _remote_cache["value"] else 8
     if time.time() - _remote_cache["at"] < ttl:
         return _remote_cache["value"]
-
-    value = _discover_remote()
+    try:
+        value = socket.gethostbyname(_REMOTE_DEFAULT_HOST)
+    except OSError:
+        value = None
     _remote_cache["at"] = time.time()
     _remote_cache["value"] = value
     return value
 
 
-def _discover_remote():
-    try:
-        from zeroconf import Zeroconf, ServiceBrowser
-    except ImportError:
-        Zeroconf = None
-    if Zeroconf is not None:
+def _mdns_addr():
+    """Latest IPv4 advertised for the firmware's _discstation._tcp service, or None.
+
+    A single background ServiceBrowser is started on the first call and reused for
+    the whole process. (Creating a fresh Zeroconf per lookup - this runs every few
+    seconds while the link is down - leaked sockets and engine threads until the
+    process hit its fd limit and every transport died.)"""
+    if not _remote_browser:
+        try:
+            from zeroconf import Zeroconf, ServiceBrowser
+        except ImportError:
+            _remote_browser["zc"] = None
+            return None
         found = {}
 
         class _Listener:
-            def add_service(self, zc, type_, name):
-                info = zc.get_service_info(type_, name, timeout=1500)
+            def _seen(self, zc, type_, name):
+                info = zc.get_service_info(type_, name, timeout=1000)
                 if info:
                     for addr in info.parsed_addresses():
                         if "." in addr:  # IPv4
                             found["addr"] = addr
                             return
 
-            update_service = add_service
+            add_service = _seen
+            update_service = _seen
 
-            def remove_service(self, *a):
-                pass
+            def remove_service(self, zc, type_, name):
+                found.pop("addr", None)
 
-        zc = Zeroconf()
-        try:
-            ServiceBrowser(zc, _REMOTE_MDNS_TYPE, _Listener())
-            deadline = time.time() + 2.5
-            while time.time() < deadline and "addr" not in found:
-                time.sleep(0.1)
-        finally:
-            zc.close()
-        if found.get("addr"):
-            return found["addr"]
+        _remote_browser["found"] = found
+        _remote_browser["zc"] = Zeroconf()
+        ServiceBrowser(_remote_browser["zc"], _REMOTE_MDNS_TYPE, _Listener())
 
-    try:
-        return socket.gethostbyname(_REMOTE_DEFAULT_HOST)
-    except OSError:
-        return None
+    found = _remote_browser.get("found")
+    return found.get("addr") if found else None
 
 
 def _stable_serial_path(device):
