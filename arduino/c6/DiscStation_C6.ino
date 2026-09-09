@@ -31,7 +31,8 @@
 #define POT_READ_MS      200
 #define DONE_RESET_MS    30000
 #define STANDBY_BLANK_MS 60000
-#define IDLE_BLANK_MS    45000   // blank the OLED after this long with no input on HOME/STANDBY
+#define IDLE_BLANK_MS    45000   // no input this long on HOME/STANDBY -> spinning-disc screensaver
+#define SAVER_FRAME_MS   90      // screensaver frame interval (~11fps)
 #define PING_TIMEOUT_MS  30000
 
 #define WIFI_RESET_HOLD_MS      10000
@@ -241,8 +242,10 @@ bool editingSpeed = false;
 int playVolume = 50;
 unsigned long standbyStartTime = 0;
 unsigned long lastMsgTime = 0;
-unsigned long lastInputTime = 0;   // last button press / screen change; drives OLED idle-blank
-bool displayBlank = false;
+unsigned long lastInputTime = 0;   // last button press / screen change; drives the idle screensaver
+bool displayBlank = false;          // true = real UI hidden, disc screensaver running; any input restores it
+unsigned long lastSaverFrame = 0;
+int saverStep = 0;
 bool audioPlayMode = false;
 int displayRotation = 0;
 
@@ -542,6 +545,33 @@ void drawLoading() {
   display.setCursor(70, 32);
   display.print("LOADING //");
 
+  display.display();
+}
+
+// 24-step sine table x64: sin(i*15deg)*64. Drives the idle disc screensaver.
+const int8_t SIN24[24] = {
+  0, 17, 32, 45, 55, 62, 64, 62, 55, 45, 32, 17,
+  0, -17, -32, -45, -55, -62, -64, -62, -55, -45, -32, -17
+};
+
+// Spinning-disc screensaver frame - shown after IDLE_BLANK_MS on HOME/STANDBY
+// instead of powering the panel off. Keeps the OLED lit and the I2C bus busy so
+// a USB power-bank feeding the remote doesn't hit its no-load auto-shutoff.
+void drawDiscSaver(int step) {
+  if (!displayOk) return;
+  const int cx = 64, cy = 32, R = 27, rh = 6;
+  display.clearDisplay();
+  display.drawCircle(cx, cy, R, SSD1306_WHITE);
+  display.drawCircle(cx, cy, R - 3, SSD1306_WHITE);
+  display.fillCircle(cx, cy, rh, SSD1306_WHITE);
+  for (int k = 0; k < 3; k++) {
+    int i = (step + k * 8) % 24;
+    int c = SIN24[(i + 6) % 24], s = SIN24[i];
+    display.drawLine(cx + rh * c / 64, cy + rh * s / 64,
+                     cx + (R - 5) * c / 64, cy + (R - 5) * s / 64, SSD1306_WHITE);
+  }
+  int hi = step % 24, hc = SIN24[(hi + 6) % 24], hs = SIN24[hi];
+  display.fillCircle(cx + (R - 10) * hc / 64, cy + (R - 10) * hs / 64, 2, SSD1306_WHITE);
   display.display();
 }
 
@@ -1118,11 +1148,19 @@ void loop() {
     if (!displayBlank) drawLoading();
   }
 
+  // --- Idle disc screensaver (HOME + STANDBY) ---
   if (displayOk && !displayBlank &&
       (uiState == UI_HOME || uiState == UI_STANDBY) &&
       (long)(millis() - lastInputTime) >= IDLE_BLANK_MS) {
-    display.ssd1306_command(0xAE);
     displayBlank = true;
+    saverStep = 0;
+    lastSaverFrame = 0;
+  }
+  if (displayBlank && displayOk &&
+      (long)(millis() - lastSaverFrame) >= SAVER_FRAME_MS) {
+    lastSaverFrame = millis();
+    drawDiscSaver(saverStep);
+    saverStep = (saverStep + 1) % 24;
   }
 
   if (uiState != UI_DISCONNECTED &&
