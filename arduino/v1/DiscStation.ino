@@ -22,14 +22,16 @@
 #define OLED_RESET    -1
 #define I2C_ADDRESS   0x3C
 
-#define BTN_SELECT_PIN  14
-#define BTN_UP_PIN      13
-#define BTN_DOWN_PIN    15
-#define POT_PIN         34
+#define BTN_EJECT_PIN     14  // was SELECT
+#define BTN_HOME_PIN      13  // was UP; also carries the 10s Wi-Fi-reset hold
+#define BTN_PLAYPAUSE_PIN 15  // was DOWN
+#define ENC_CLK_PIN       32  // freed ex-LED pin
+#define ENC_DT_PIN        33  // freed ex-LED pin
+#define ENC_SW_PIN         4  // encoder's click switch
 
 #define DEBOUNCE_MS      50
 #define LONG_PRESS_MS    1000
-#define POT_READ_MS      200
+#define ENC_STEPS_PER_DETENT 4   // quadrature transitions per physical click, standard for most encoders
 #define DONE_RESET_MS    30000
 #define STANDBY_BLANK_MS 60000
 #define IDLE_BLANK_MS    45000   // no input this long on HOME/STANDBY -> spinning-disc screensaver
@@ -218,32 +220,32 @@ bool displayOk = false;
 unsigned long returnToHomeAt = 0;
 unsigned long playStatusAt = 0;
 bool playStatusTemp = false;
-unsigned long lastPotRead = 0;
 
-// Select button state
-unsigned long selectDownAt = 0;
-bool selectDown = false;
-unsigned long selectLastDebounce = 0;
+// Encoder click (SW) - short/long press state, same shape as the old SELECT button
+unsigned long encClickDownAt = 0;
+bool encClickDown = false;
+unsigned long encClickLastDebounce = 0;
 
-// Up button state
-unsigned long upDownAt = 0;
-bool upDown = false;
-unsigned long upLastDebounce = 0;
+// EJECT button - single press, no long-press timer needed
+bool ejectDown = false;
+unsigned long ejectLastDebounce = 0;
 
-// Down button state
-unsigned long downDownAt = 0;
-bool downDown = false;
-unsigned long downLastDebounce = 0;
+// HOME/BACK button - single press; also carries the 10s Wi-Fi-reset hold
+unsigned long homeDownAt = 0;
+bool homeDown = false;
+unsigned long homeLastDebounce = 0;
 
-// FF/REW speed state (used by UP/DOWN during playback)
-int ffSpeedIndex = 0;
-int rewSpeedIndex = 0;
+// PLAY/PAUSE button - short = pause/resume, long = stop
+unsigned long playpauseDownAt = 0;
+bool playpauseDown = false;
+unsigned long playpauseLastDebounce = 0;
 
 int homeIndex = 0;
 int burnModeIndex = 0;
 int burnSpeedIndex = 0;
 bool editingSpeed = false;
 int playVolume = 50;
+bool playSeekMode = false;   // false = encoder rotate adjusts volume (default); true = seek/track-skip
 unsigned long standbyStartTime = 0;
 unsigned long lastMsgTime = 0;
 unsigned long lastInputTime = 0;   // last button press / screen change; drives the idle screensaver
@@ -257,20 +259,28 @@ int displayRotation = 0;
 int indeterminateCount = 0;
 unsigned long lastIndeterminateAnim = 0;
 
-int readBucket(int count) {
-  int raw = analogRead(POT_PIN);
-  int idx = raw * count / 4096;
-  if (idx < 0) idx = 0;
-  if (idx >= count) idx = count - 1;
-  return idx;
-}
+// --- Rotary encoder quadrature decode ---
+// Standard 4-state Gray-code transition table, indexed by (prevState<<2)|
+// currState where state = (CLK<<1)|DT. Gives -1/0/+1 per raw transition;
+// ENC_STEPS_PER_DETENT of these sum to one physical click. Interrupt-driven
+// because the main loop's ~20ms cadence is too slow to reliably catch a fast
+// spin without missing or double-counting transitions.
+const int8_t ENC_TABLE[16] = {
+   0, -1,  1,  0,
+   1,  0,  0, -1,
+  -1,  0,  0,  1,
+   0,  1, -1,  0
+};
+volatile int8_t encAccum = 0;
+volatile int16_t encTicks = 0;   // whole detents ready for loop() to drain
+uint8_t encPrevState = 0;
 
-int readPercent() {
-  int raw = analogRead(POT_PIN);
-  int pct = raw * 100 / 4095;
-  if (pct < 0) pct = 0;
-  if (pct > 100) pct = 100;
-  return ((pct + 2) / 5) * 5;
+void IRAM_ATTR encoderISR() {
+  uint8_t state = (digitalRead(ENC_CLK_PIN) << 1) | digitalRead(ENC_DT_PIN);
+  encAccum += ENC_TABLE[(encPrevState << 2) | state];
+  encPrevState = state;
+  if (encAccum >= ENC_STEPS_PER_DETENT) { encTicks++; encAccum = 0; }
+  else if (encAccum <= -ENC_STEPS_PER_DETENT) { encTicks--; encAccum = 0; }
 }
 
 void sendHomeMode() {
@@ -607,13 +617,16 @@ void drawPlay() {
   display.setCursor(2, 30);
   printUpper(line2);
   display.setCursor(2, 44);
-  display.print("VOL // ");
-  display.print(playVolume);
-  display.print("%");
-  if (!audioPlayMode) {
-    display.setCursor(2, 56);
-    display.print("SELECT // PLAY");
+  if (playSeekMode) {
+    display.print(audioPlayMode ? "TURN // SKIP TRACK" : "TURN // SEEK");
+  } else {
+    display.print("VOL // ");
+    display.print(playVolume);
+    display.print("%");
   }
+  display.setCursor(2, 56);
+  display.print("CLICK // ");
+  display.print(playSeekMode ? "VOL MODE" : "SEEK MODE");
 
   display.display();
 }
@@ -635,7 +648,6 @@ void parseMessage(String msg) {
   Out.println(msg);
 
   if (msg.startsWith("HOME:")) {
-    homeIndex = readBucket(homeCount);
     drawHome();
 
   } else if (msg.startsWith("DISC:")) {
@@ -669,7 +681,6 @@ void parseMessage(String msg) {
   } else if (msg.startsWith("TITLE:")) {
     titleLine = msg.substring(6);
     if (titleLine.length() > 20) titleLine = titleLine.substring(0, 20);
-    burnModeIndex = readBucket(BURN_COUNT);
     drawBurnReady();
 
   } else if (msg.startsWith("META:")) {
@@ -685,8 +696,8 @@ void parseMessage(String msg) {
   } else if (msg.startsWith("PLAY:")) {
     line1 = msg.substring(5);
     line2 = "Playing disc";
-    playVolume = readPercent();
-    Out.print("POT:");            // push the knob's current level so playback starts at it
+    playSeekMode = false;          // always start in volume mode
+    Out.print("POT:");             // push the last-used volume so playback starts at it
     Out.println(playVolume);
     drawPlay();
 
@@ -796,16 +807,15 @@ void setup() {
   Serial.begin(115200);
   esp_task_wdt_add(NULL);
   Wire.begin(21, 22);
-  pinMode(BTN_SELECT_PIN, INPUT_PULLUP);
-  pinMode(BTN_UP_PIN, INPUT_PULLUP);
-  pinMode(BTN_DOWN_PIN, INPUT_PULLUP);
-  pinMode(POT_PIN, INPUT);
-  analogReadResolution(12);
-  analogSetPinAttenuation(POT_PIN, ADC_11db);
-
-  homeIndex = readBucket(homeCount);
-  burnModeIndex = readBucket(BURN_COUNT);
-  playVolume = readPercent();
+  pinMode(BTN_EJECT_PIN, INPUT_PULLUP);
+  pinMode(BTN_HOME_PIN, INPUT_PULLUP);
+  pinMode(BTN_PLAYPAUSE_PIN, INPUT_PULLUP);
+  pinMode(ENC_SW_PIN, INPUT_PULLUP);
+  pinMode(ENC_CLK_PIN, INPUT_PULLUP);
+  pinMode(ENC_DT_PIN, INPUT_PULLUP);
+  encPrevState = (digitalRead(ENC_CLK_PIN) << 1) | digitalRead(ENC_DT_PIN);
+  attachInterrupt(digitalPinToInterrupt(ENC_CLK_PIN), encoderISR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_DT_PIN), encoderISR, CHANGE);
 
   displayOk = display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS);
 
@@ -898,62 +908,24 @@ void handleSelectPress(bool longPress) {
     Out.println("CANCEL");
     drawStandby();
 
-  } else if (uiState == UI_STANDBY) {
-    displayRotation = 2;
-    drawStandby();
   } else if (uiState == UI_PLAY) {
-    ffSpeedIndex = 0;
-    rewSpeedIndex = 0;
     if (longPress) {
       Out.println("PLAY_STOP");
     } else {
-      Out.println("PLAY_BUTTON");
+      playSeekMode = !playSeekMode;   // encoder click swaps what rotating does
+      drawPlay();
     }
   }
 }
 
-void handleUp(bool longPress) {
-  if (wakeDisplay()) { lastInputTime = millis(); return; }  // wake-only press, swallow the action
-  lastInputTime = millis();
-  if (uiState == UI_HOME) {
-    if (homeCount > 0) {
-      homeIndex = (homeIndex - 1 + homeCount) % homeCount;
-      sendHomeMode();
-      drawHome();
-    }
-  } else if (uiState == UI_BURN_READY) {
-    if (editingSpeed) {
-      burnSpeedIndex = (burnSpeedIndex - 1 + SPEED_COUNT) % SPEED_COUNT;
-      Out.print("SPEED:");
-      Out.println(SPEED_MODES[burnSpeedIndex]);
-      drawBurnReady();
-    } else {
-      burnModeIndex = (burnModeIndex - 1 + BURN_COUNT) % BURN_COUNT;
-      sendBurnMode();
-      drawBurnReady();
-    }
-  } else if (uiState == UI_STANDBY) {
-    displayRotation = 0;
-    drawStandby();
-  } else if (uiState == UI_PLAY) {
-    if (audioPlayMode) {
-      Out.println(displayRotation == 0 ? (longPress ? "REW:BIG" : "REW:10") : (longPress ? "FF:BIG" : "FF:10"));
-      return;
-    }
-    rewSpeedIndex = 0;
-    if (longPress) {
-      Out.println("FF:BIG");
-    } else {
-      ffSpeedIndex = (ffSpeedIndex + 1) % 4;
-      int seek_sec[] = {10, 20, 30, 60};
-      Out.print("FF:");
-      Out.println(seek_sec[ffSpeedIndex]);
-    }
-  }
-}
-
-void handleDown(bool longPress) {
-  if (wakeDisplay()) { lastInputTime = millis(); return; }  // wake-only press, swallow the action
+// Encoder rotation replaces UP/DOWN. One tick = one detent (see encoderISR).
+// STANDBY's displayRotation flip and BURN_READY's mode/speed scroll are
+// otherwise unchanged from the old UP/DOWN behavior. PLAY defaults to
+// adjusting volume; a short encoder click (see handleSelectPress) swaps it
+// to seek/track-skip instead - there's only one rotate axis now, where
+// before the pot (volume) and UP/DOWN (seek) were independent.
+void handleEncoderCW() {
+  if (wakeDisplay()) { lastInputTime = millis(); return; }  // wake-only turn, swallow the action
   lastInputTime = millis();
   if (uiState == UI_HOME) {
     if (homeCount > 0) {
@@ -976,18 +948,97 @@ void handleDown(bool longPress) {
     displayRotation = 2;
     drawStandby();
   } else if (uiState == UI_PLAY) {
-    if (audioPlayMode) {
-      Out.println(displayRotation == 0 ? (longPress ? "FF:BIG" : "FF:10") : (longPress ? "REW:BIG" : "REW:10"));
-      return;
-    }
-    ffSpeedIndex = 0;
-    if (longPress) {
-      Out.println("REW:BIG");
+    if (!playSeekMode) {
+      playVolume = min(100, playVolume + 5);
+      Out.print("POT:");
+      Out.println(playVolume);
+      drawPlay();
+    } else if (audioPlayMode) {
+      Out.println(displayRotation == 0 ? "REW:BIG" : "FF:BIG");  // next/prev track, screen-flip-aware
     } else {
-      rewSpeedIndex = (rewSpeedIndex + 1) % 4;
-      int seek_sec[] = {10, 20, 30, 60};
-      Out.print("REW:");
-      Out.println(seek_sec[rewSpeedIndex]);
+      Out.println("FF:10");
+    }
+  }
+}
+
+void handleEncoderCCW() {
+  if (wakeDisplay()) { lastInputTime = millis(); return; }  // wake-only turn, swallow the action
+  lastInputTime = millis();
+  if (uiState == UI_HOME) {
+    if (homeCount > 0) {
+      homeIndex = (homeIndex - 1 + homeCount) % homeCount;
+      sendHomeMode();
+      drawHome();
+    }
+  } else if (uiState == UI_BURN_READY) {
+    if (editingSpeed) {
+      burnSpeedIndex = (burnSpeedIndex - 1 + SPEED_COUNT) % SPEED_COUNT;
+      Out.print("SPEED:");
+      Out.println(SPEED_MODES[burnSpeedIndex]);
+      drawBurnReady();
+    } else {
+      burnModeIndex = (burnModeIndex - 1 + BURN_COUNT) % BURN_COUNT;
+      sendBurnMode();
+      drawBurnReady();
+    }
+  } else if (uiState == UI_STANDBY) {
+    displayRotation = 0;
+    drawStandby();
+  } else if (uiState == UI_PLAY) {
+    if (!playSeekMode) {
+      playVolume = max(0, playVolume - 5);
+      Out.print("POT:");
+      Out.println(playVolume);
+      drawPlay();
+    } else if (audioPlayMode) {
+      Out.println(displayRotation == 0 ? "FF:BIG" : "REW:BIG");
+    } else {
+      Out.println("REW:10");
+    }
+  }
+}
+
+// EJECT: fixed shortcut, any idle-ish state. Not during an active burn/rip -
+// don't pull the disc mid-operation (matches the old SELECT-EJECT's implicit
+// restriction, since that branch only ever existed on HOME/STANDBY).
+void handleEjectButton() {
+  if (wakeDisplay()) { lastInputTime = millis(); return; }
+  lastInputTime = millis();
+  if (uiState == UI_HOME || uiState == UI_STANDBY || uiState == UI_DISCONNECTED || uiState == UI_PLAY) {
+    Out.println("EJECT");
+    line1 = "Ejecting...";
+    line2 = "";
+    line3 = "";
+    returnToHomeAt = millis() + 5000;
+    drawStatus();
+  }
+}
+
+// HOME/BACK: universal escape from anywhere back to the top menu.
+void handleHomeButton() {
+  if (wakeDisplay()) { lastInputTime = millis(); return; }
+  lastInputTime = millis();
+  if (uiState == UI_HOME) return;
+  Out.println(uiState == UI_PLAY ? "PLAY_STOP" : "CANCEL");
+  drawHome();
+}
+
+// PLAY/PAUSE: toggles pause while playing; from HOME, jumps straight into
+// PLAY without needing to scroll the menu there first.
+void handlePlayPauseButton(bool longPress) {
+  if (wakeDisplay()) { lastInputTime = millis(); return; }
+  lastInputTime = millis();
+  if (uiState == UI_PLAY) {
+    Out.println(longPress ? "PLAY_STOP" : "PLAY_BUTTON");
+  } else if (uiState == UI_HOME && !longPress) {
+    bool hasPlay = false;
+    for (int i = 0; i < homeCount; i++) if (homeModes[i] == "PLAY") hasPlay = true;
+    if (hasPlay) {
+      Out.println("SELECT:PLAY");
+      line1 = "Selected";
+      line2 = "PLAY";
+      line3 = "";
+      drawStatus();
     }
   }
 }
@@ -1055,31 +1106,56 @@ void loop() {
     drawPlay();
   }
 
-  // --- Pot reading (PLAY only, volume) ---
-  if (uiState == UI_PLAY && millis() - lastPotRead > POT_READ_MS) {
-    lastPotRead = millis();
-    int nextVolume = readPercent();
-    if (abs(nextVolume - playVolume) >= 3) {
-      playVolume = nextVolume;
-      Out.print("POT:");
-      Out.println(playVolume);
-      drawPlay();
+  // --- Encoder rotation: drain ticks accumulated by encoderISR ---
+  {
+    noInterrupts();
+    int16_t ticks = encTicks;
+    encTicks = 0;
+    interrupts();
+    while (ticks > 0) { handleEncoderCW(); ticks--; }
+    while (ticks < 0) { handleEncoderCCW(); ticks++; }
+  }
+
+  // --- Encoder click (SW) - same debounce/long-press shape as the old SELECT ---
+  {
+    bool sw = digitalRead(ENC_SW_PIN) == LOW;
+    if (sw && !encClickDown && millis() - encClickLastDebounce > DEBOUNCE_MS) {
+      encClickDown = true;
+      encClickDownAt = millis();
+    }
+    if (!sw && encClickDown) {
+      encClickDown = false;
+      encClickLastDebounce = millis();
+      handleSelectPress(millis() - encClickDownAt >= LONG_PRESS_MS);
     }
   }
 
-  // --- SELECT button ---
+  // --- EJECT button (single press, no long-press timer) ---
   {
-    bool sel = digitalRead(BTN_SELECT_PIN) == LOW;
-    if (sel && !selectDown && millis() - selectLastDebounce > DEBOUNCE_MS) {
-      selectDown = true;
-      selectDownAt = millis();
+    bool ej = digitalRead(BTN_EJECT_PIN) == LOW;
+    if (ej && !ejectDown && millis() - ejectLastDebounce > DEBOUNCE_MS) {
+      ejectDown = true;
+    }
+    if (!ej && ejectDown) {
+      ejectDown = false;
+      ejectLastDebounce = millis();
+      handleEjectButton();
+    }
+  }
+
+  // --- HOME/BACK button (single press; 10s hold = Wi-Fi reset) ---
+  {
+    bool hm = digitalRead(BTN_HOME_PIN) == LOW;
+    if (hm && !homeDown && millis() - homeLastDebounce > DEBOUNCE_MS) {
+      homeDown = true;
+      homeDownAt = millis();
       wifiResetArmed = false;
     }
-    // 10s hold on HOME (or SETUP) = wipe Wi-Fi creds + reboot to portal. Fires
-    // while still held so the eventual release doesn't also trigger EJECT.
-    if (sel && selectDown && !wifiResetArmed &&
+    // 10s hold on HOME/SETUP/STANDBY = wipe Wi-Fi creds + reboot to portal. Fires
+    // while still held so the eventual release doesn't also trigger the normal action.
+    if (hm && homeDown && !wifiResetArmed &&
         (uiState == UI_HOME || uiState == UI_SETUP || uiState == UI_STANDBY) &&
-        millis() - selectDownAt >= WIFI_RESET_HOLD_MS) {
+        millis() - homeDownAt >= WIFI_RESET_HOLD_MS) {
       wifiResetArmed = true;
       Out.println("WiFi: creds wiped, rebooting");
       clearCreds();
@@ -1087,47 +1163,25 @@ void loop() {
       delay(800);
       ESP.restart();
     }
-    if (!sel && selectDown) {
-      selectDown = false;
-      selectLastDebounce = millis();
-      if (!wifiResetArmed) {
-        handleSelectPress(millis() - selectDownAt >= LONG_PRESS_MS);
-      }
+    if (!hm && homeDown) {
+      homeDown = false;
+      homeLastDebounce = millis();
+      if (!wifiResetArmed) handleHomeButton();
       wifiResetArmed = false;
     }
   }
 
-  // --- UP button ---
+  // --- PLAY/PAUSE button (short = pause/resume, long = stop) ---
   {
-    bool up = digitalRead(BTN_UP_PIN) == LOW;
-    if (up && !upDown && millis() - upLastDebounce > DEBOUNCE_MS) {
-      upDown = true;
-      upDownAt = millis();
+    bool pp = digitalRead(BTN_PLAYPAUSE_PIN) == LOW;
+    if (pp && !playpauseDown && millis() - playpauseLastDebounce > DEBOUNCE_MS) {
+      playpauseDown = true;
+      playpauseDownAt = millis();
     }
-    if (!up && upDown) {
-      upDown = false;
-      upLastDebounce = millis();
-      bool lp = millis() - upDownAt >= LONG_PRESS_MS;
-      if (uiState == UI_PLAY || !lp) {
-        handleUp(lp);
-      }
-    }
-  }
-
-  // --- DOWN button ---
-  {
-    bool dn = digitalRead(BTN_DOWN_PIN) == LOW;
-    if (dn && !downDown && millis() - downLastDebounce > DEBOUNCE_MS) {
-      downDown = true;
-      downDownAt = millis();
-    }
-    if (!dn && downDown) {
-      downDown = false;
-      downLastDebounce = millis();
-      bool lp = millis() - downDownAt >= LONG_PRESS_MS;
-      if (uiState == UI_PLAY || !lp) {
-        handleDown(lp);
-      }
+    if (!pp && playpauseDown) {
+      playpauseDown = false;
+      playpauseLastDebounce = millis();
+      handlePlayPauseButton(millis() - playpauseDownAt >= LONG_PRESS_MS);
     }
   }
 
