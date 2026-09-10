@@ -9,8 +9,8 @@ use every mode.
 ## Hardware
 
 - **Brain:** Raspberry Pi 4/5 (or any Linux box)
-- **Remote (optional):** ESP32 DevKit or ESP32-C6 with an SSD1306 OLED, 3
-  buttons, and a volume pot — connected by **USB serial** or over **Wi-Fi**
+- **Remote (optional):** ESP32 DevKit (WROOM-32) with an SSD1306 OLED, a
+  rotary encoder, and 3 buttons — connected by **USB serial** or over **Wi-Fi**
   (see below) — or none at all; the web UI / mobile app's on-screen remote
   covers the same controls when no ESP32 is detected, and steps aside
   (greyed out, auto-collapsing) the moment one appears.
@@ -61,9 +61,7 @@ remote can talk to the host over Wi-Fi instead of a USB cable.
 │   ├── discstation_meta.py   # TMDb video metadata
 │   └── static/               # Built-in web UI (index.html, app.js, style.css)
 ├── mobile/                   # Expo (React Native) companion app
-├── arduino/
-│   ├── c6/                   # ESP32-C6 firmware
-│   └── v1/                   # ESP32 DevKit firmware
+├── arduino/DiscStation/     # ESP32 DevKit remote firmware
 ├── scripts/setup.mjs         # `discstation-setup` — cross-OS installer dispatch
 ├── docs/                     # Platform support notes
 ├── install.sh / install-macos.sh / install-windows.ps1
@@ -113,10 +111,9 @@ Support by OS:
 # Linux host
 ./install.sh
 
-# Arduino
+# Arduino (ESP32 DevKit remote)
 arduino-cli lib install QRCode
-# Upload arduino/c6/DiscStation_C6.ino or arduino/v1/DiscStation.ino
-# to the matching ESP32 board
+arduino-cli compile --upload -b esp32:esp32:esp32 -p /dev/ttyUSB0 arduino/DiscStation
 
 # macOS host
 ./install-macos.sh

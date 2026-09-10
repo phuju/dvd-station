@@ -1,6 +1,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "esp_task_wdt.h"
 #include <WiFi.h>
 #include "esp_mac.h"
 #include <WiFiManager.h>
@@ -11,6 +12,7 @@
 
 // Optional build-time Wi-Fi override for power users: copy secrets.h.example
 // to secrets.h (git-ignored) and set WIFI_SSID / WIFI_PASS / OTA_PASSWORD.
+// If WIFI_SSID is defined the runtime setup portal is skipped entirely.
 #if __has_include("secrets.h")
   #include "secrets.h"
 #endif
@@ -19,37 +21,35 @@
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
 #define I2C_ADDRESS   0x3C
-#define TCP_PORT      2323
 
-#define BTN_EJECT_PIN     21  // D3  (was SELECT)
-#define BTN_HOME_PIN      20  // D9/MISO  (was UP; also carries the 10s Wi-Fi-reset hold)
-#define BTN_PLAYPAUSE_PIN 18  // D10/MOSI (was DOWN)
-#define ENC_CLK_PIN        1  // D1
-#define ENC_DT_PIN         2  // D2
-#define ENC_SW_PIN        16  // D6 (was the "spare" fallback pin - now the encoder's click switch)
+#define BTN_EJECT_PIN     14  // was SELECT
+#define BTN_HOME_PIN      13  // was UP; also carries the 10s Wi-Fi-reset hold
+#define BTN_PLAYPAUSE_PIN 15  // was DOWN
+#define ENC_CLK_PIN       32  // freed ex-LED pin
+#define ENC_DT_PIN        33  // freed ex-LED pin
+#define ENC_SW_PIN         4  // encoder's click switch
 
 #define DEBOUNCE_MS      50
 #define LONG_PRESS_MS    1000
-#define ENC_STEPS_PER_DETENT 4   // quadrature transitions per physical click, standard for most encoders
+#define ENC_DEBOUNCE_US 2000     // ignore encoder interrupts closer together than this (contact bounce)
 #define DONE_RESET_MS    30000
 #define STANDBY_BLANK_MS 60000
 #define IDLE_BLANK_MS    45000   // no input this long on HOME/STANDBY -> spinning-disc screensaver
 #define SAVER_FRAME_MS   90      // screensaver frame interval (~11fps)
 #define PING_TIMEOUT_MS  30000
 
-#define WIFI_RESET_HOLD_MS      10000
-#define WIFI_CONNECT_TIMEOUT_MS 18000
-#define WIFI_RETRY_MS           15000
+#define WIFI_RESET_HOLD_MS      10000  // hold SELECT this long on HOME to wipe Wi-Fi creds
+#define WIFI_CONNECT_TIMEOUT_MS 18000  // give a stored-creds join this long before falling to the portal
+#define WIFI_RETRY_MS           15000  // if a live link drops, force a re-join after this
 
 #define MAX_HOME_MODES 5
 #define BURN_COUNT 4
 #define SPEED_COUNT 4
+#define TCP_PORT 2323
 
 int homeCount = 3;
 String homeModes[MAX_HOME_MODES] = {"BURN", "PLAY", "RIP"};
-String discName = "";
 
-// --- Wi-Fi link: mirror every outbound line to Serial AND a TCP client ---
 WiFiServer tcpServer(TCP_PORT);
 WiFiClient tcpClient;
 WiFiManager wm;
@@ -81,7 +81,7 @@ private:
   WiFiClient* _client = nullptr;
 } Out;
 
-void drawSetup();
+void drawSetup();       // fwd decls (defined with the other draw* below)
 void drawWifiReset();
 
 String deviceSuffix() {
@@ -110,12 +110,12 @@ void clearCreds() {
   prefs.begin("discstation", false);
   prefs.clear();
   prefs.end();
-  WiFi.disconnect(true, true);
+  WiFi.disconnect(true, true);   // also wipe the ESP's own persisted creds
 }
 
 void wmSaveCallback() {
   saveCreds(wm.getWiFiSSID(), wm.getWiFiPass());
-  credsJustSaved = true;
+  credsJustSaved = true;         // loop() reboots cleanly into STA mode
 }
 
 void onWifiUp() {
@@ -143,7 +143,7 @@ void startPortal() {
   wm.setConfigPortalBlocking(false);
   wm.setConfigPortalTimeout(0);
   wm.setSaveConfigCallback(wmSaveCallback);
-  wm.startConfigPortal(apName.c_str());
+  wm.startConfigPortal(apName.c_str());   // open AP at 192.168.4.1
   drawSetup();
 }
 
@@ -168,7 +168,10 @@ void initWiFi() {
     Out.print("WiFi "); Out.print(ssid); Out.print("...");
     WiFi.begin(ssid.c_str(), pass.c_str());
     unsigned long t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_CONNECT_TIMEOUT_MS) delay(200);
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_CONNECT_TIMEOUT_MS) {
+      esp_task_wdt_reset();
+      delay(200);
+    }
   }
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -179,6 +182,7 @@ void initWiFi() {
     startPortal();
   }
 }
+String discName = "";
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
@@ -193,7 +197,6 @@ enum UiState {
   UI_WAITING,
   UI_IP,
   UI_DISCONNECTED,
-  UI_LOADING,
   UI_SETUP
 };
 
@@ -211,9 +214,6 @@ String line2 = "";
 String line3 = "";
 String waitingLine1 = "";
 String waitingLine2 = "";
-String loadingLine = "";
-int loadingDots = 0;
-unsigned long lastLoadingAnim = 0;
 int progressPercent = -1;
 
 bool displayOk = false;
@@ -255,31 +255,26 @@ int saverStep = 0;
 bool audioPlayMode = false;
 int displayRotation = 0;
 
+// Indeterminate progress animation
 int indeterminateCount = 0;
 unsigned long lastIndeterminateAnim = 0;
 
-// --- Rotary encoder quadrature decode ---
-// Standard 4-state Gray-code transition table, indexed by (prevState<<2)|
-// currState where state = (CLK<<1)|DT. Gives -1/0/+1 per raw transition;
-// ENC_STEPS_PER_DETENT of these sum to one physical click. Interrupt-driven
-// because the main loop's ~20ms cadence is too slow to reliably catch a fast
-// spin without missing or double-counting transitions.
-const int8_t ENC_TABLE[16] = {
-   0, -1,  1,  0,
-   1,  0,  0, -1,
-  -1,  0,  0,  1,
-   0,  1, -1,  0
-};
-volatile int8_t encAccum = 0;
+// --- Rotary encoder decode ---
+// Interrupt only on CLK's falling edge (one detent = one interrupt, not four
+// - a mechanical encoder's contact bounce can otherwise fire far more often
+// than that and starve other tasks, including the USB-serial link); DT's
+// level at that instant gives direction. A short time debounce rejects
+// contact chatter. Interrupt-driven because the main loop's ~20ms cadence is
+// too slow to reliably catch a fast spin without missing ticks.
 volatile int16_t encTicks = 0;   // whole detents ready for loop() to drain
-uint8_t encPrevState = 0;
+volatile uint32_t encLastIsrUs = 0;
 
 void IRAM_ATTR encoderISR() {
-  uint8_t state = (digitalRead(ENC_CLK_PIN) << 1) | digitalRead(ENC_DT_PIN);
-  encAccum += ENC_TABLE[(encPrevState << 2) | state];
-  encPrevState = state;
-  if (encAccum >= ENC_STEPS_PER_DETENT) { encTicks++; encAccum = 0; }
-  else if (encAccum <= -ENC_STEPS_PER_DETENT) { encTicks--; encAccum = 0; }
+  uint32_t now = micros();
+  if (now - encLastIsrUs < ENC_DEBOUNCE_US) return;
+  encLastIsrUs = now;
+  if (digitalRead(ENC_CLK_PIN) != digitalRead(ENC_DT_PIN)) encTicks++;
+  else encTicks--;
 }
 
 void sendHomeMode() {
@@ -428,6 +423,7 @@ void drawStatus() {
       display.fillRect(2, 54, barW, 8, SSD1306_WHITE);
     }
   } else {
+    // Indeterminate progress — draw cycling dots
     String dots = "";
     for (int i = 0; i < indeterminateCount; i++) dots += ".";
     display.setCursor(2, 56);
@@ -475,6 +471,8 @@ void drawIP() {
 }
 
 void drawStandby() {
+  // While the Wi-Fi setup portal is up and the appliance is otherwise idle,
+  // the standby screen doubles as the setup instructions.
   if (portalActive) { drawSetup(); return; }
   uiState = UI_STANDBY;
   returnToHomeAt = 0;
@@ -498,6 +496,7 @@ void drawSetup() {
   displayBlank = false;
   lastInputTime = millis();
   if (!displayOk) return;
+
   display.clearDisplay();
   drawHeader();
   display.setCursor(2, 16);
@@ -505,7 +504,7 @@ void drawSetup() {
   display.setCursor(2, 28);
   display.print("JOIN:");
   display.setCursor(2, 38);
-  display.print(apName);
+  printUpper(apName);
   display.setCursor(2, 50);
   display.print("THEN 192.168.4.1");
   display.display();
@@ -536,29 +535,6 @@ void drawDisconnected() {
   display.print("DISCONNECTED // LINK");
   display.setCursor(2, 40);
   display.print("CHECK USB");
-  display.display();
-}
-
-void drawLoading() {
-  uiState = UI_LOADING;
-  returnToHomeAt = 0;
-  displayBlank = false;
-  if (!displayOk) return;
-
-  display.clearDisplay();
-  drawHeader();
-
-  display.setTextSize(1);
-  display.setCursor(2, 18);
-  printUpper(loadingLine);
-
-  String dots = "";
-  for (int i = 0; i < loadingDots; i++) dots += ".";
-  display.setCursor(2, 32);
-  display.print(dots);
-  display.setCursor(70, 32);
-  display.print("LOADING //");
-
   display.display();
 }
 
@@ -617,7 +593,6 @@ bool wakeDisplay() {
     case UI_WAITING: drawWaiting(); break;
     case UI_STANDBY: drawStandby(); break;
     case UI_DISCONNECTED: drawDisconnected(); break;
-    case UI_LOADING: drawLoading(); break;
     case UI_SETUP: drawSetup(); break;
   }
   return true;
@@ -755,13 +730,10 @@ void parseMessage(String msg) {
     line1 = msg.substring(7);
     line2 = "";
     line3 = "";
-    // Don't reset progressPercent here - a STATUS: label change (e.g.
-    // "Copying files..." -> "Converting...") is often immediately
-    // followed by a fresh PROGRESS: for the same ongoing operation.
-    // Wiping it every time flipped the bar to the indeterminate dots
-    // and back on every single label update, flickering between the
-    // two. DONE:/CANCELLED:/ERROR:/NO_DISC: still reset it below - those
-    // really are the end of an operation.
+    // Don't reset progressPercent here - see arduino/c6/DiscStation_C6.ino's
+    // matching comment: STATUS: label changes mid-operation are usually
+    // immediately followed by a fresh PROGRESS:, so wiping it every time
+    // flickered the bar to the indeterminate dots and back.
     drawStatus();
 
   } else if (msg.startsWith("PROGRESS:")) {
@@ -821,41 +793,21 @@ void parseMessage(String msg) {
   } else if (msg.startsWith("IP:")) {
     ipUrl = msg.substring(3);
     drawIP();
-
-  } else if (msg.startsWith("LOADING:")) {
-    loadingLine = msg.substring(8);
-    loadingDots = 0;
-    lastLoadingAnim = millis();
-    drawLoading();
-
-  } else if (msg.startsWith("NO_DISC:")) {
-    line1 = msg.substring(8);
-    line2 = "";
-    line3 = "";
-    progressPercent = -1;
-    drawStatus();
   }
 }
 
 void setup() {
-  setCpuFrequencyMhz(160);  // 240 -> 160: ~halves CPU power; I2C/GPIO all fine at 160
+  setCpuFrequencyMhz(160);  // 240 -> 160: ~halves CPU power, Wi-Fi/I2C/OTA all fine at 160
   Serial.begin(115200);
-  Wire.begin(22, 23);
-
-  pinMode(3, OUTPUT);
-  digitalWrite(3, LOW);
-  pinMode(14, OUTPUT);
-  digitalWrite(14, LOW);
-
+  esp_task_wdt_add(NULL);
+  Wire.begin(21, 22);
   pinMode(BTN_EJECT_PIN, INPUT_PULLUP);
   pinMode(BTN_HOME_PIN, INPUT_PULLUP);
   pinMode(BTN_PLAYPAUSE_PIN, INPUT_PULLUP);
   pinMode(ENC_SW_PIN, INPUT_PULLUP);
   pinMode(ENC_CLK_PIN, INPUT_PULLUP);
   pinMode(ENC_DT_PIN, INPUT_PULLUP);
-  encPrevState = (digitalRead(ENC_CLK_PIN) << 1) | digitalRead(ENC_DT_PIN);
-  attachInterrupt(digitalPinToInterrupt(ENC_CLK_PIN), encoderISR, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_DT_PIN), encoderISR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_CLK_PIN), encoderISR, FALLING);
 
   displayOk = display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS);
 
@@ -901,6 +853,7 @@ void handleSelectPress(bool longPress) {
     drawStatus();
 
   } else if (uiState == UI_STATUS && line1 == "Ejecting...") {
+    // Manual escape if stuck on eject screen with no app response
     drawStandby();
 
   } else if (uiState == UI_IP) {
@@ -1088,7 +1041,7 @@ void loop() {
     initWiFi();
   }
 
-  if (credsJustSaved) {
+  if (credsJustSaved) {          // portal saved new creds -> reboot into clean STA
     drawWifiReset();
     delay(600);
     ESP.restart();
@@ -1099,6 +1052,8 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) onWifiUp();
   }
 
+  // Live link dropped: WiFi.setAutoReconnect handles most; if still down after
+  // WIFI_RETRY_MS, force a fresh join.
   if (wifiConnected && WiFi.status() != WL_CONNECTED) {
     if (wifiDropAt == 0) wifiDropAt = millis();
     else if (millis() - wifiDropAt > WIFI_RETRY_MS) {
@@ -1122,11 +1077,12 @@ void loop() {
       Out.setClient(nullptr);
     }
     if (tcpClient && tcpClient.available()) {
-      String tmsg = tcpClient.readStringUntil('\n');
-      if (tmsg.length() > 0) parseMessage(tmsg);
+      String msg = tcpClient.readStringUntil('\n');
+      if (msg.length() > 0) parseMessage(msg);
     }
   }
 
+  esp_task_wdt_reset();
   if (Serial.available()) {
     String msg = Serial.readStringUntil('\n');
     parseMessage(msg);
@@ -1187,6 +1143,8 @@ void loop() {
       homeDownAt = millis();
       wifiResetArmed = false;
     }
+    // 10s hold on HOME/SETUP/STANDBY = wipe Wi-Fi creds + reboot to portal. Fires
+    // while still held so the eventual release doesn't also trigger the normal action.
     if (hm && homeDown && !wifiResetArmed &&
         (uiState == UI_HOME || uiState == UI_SETUP || uiState == UI_STANDBY) &&
         millis() - homeDownAt >= WIFI_RESET_HOLD_MS) {
@@ -1219,17 +1177,12 @@ void loop() {
     }
   }
 
+  // --- Indeterminate progress animation ---
   if (uiState == UI_STATUS && progressPercent < 0 &&
       millis() - lastIndeterminateAnim > 500) {
     lastIndeterminateAnim = millis();
     indeterminateCount = (indeterminateCount % 4) + 1;
     if (!displayBlank) drawStatus();
-  }
-
-  if (uiState == UI_LOADING && millis() - lastLoadingAnim > 400) {
-    lastLoadingAnim = millis();
-    loadingDots = (loadingDots % 4) + 1;
-    if (!displayBlank) drawLoading();
   }
 
   // --- Idle disc screensaver (HOME + STANDBY) ---
@@ -1247,6 +1200,7 @@ void loop() {
     saverStep = (saverStep + 1) % 24;
   }
 
+  // --- PING timeout (disconnected) ---
   if (uiState != UI_DISCONNECTED &&
       (long)(millis() - lastMsgTime) >= PING_TIMEOUT_MS) {
     drawDisconnected();
