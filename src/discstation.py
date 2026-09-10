@@ -4558,7 +4558,7 @@ def main():
                 port = discstation_host.serial_port()
                 if port:
                     print(f"Using ESP32 serial port: {port}")
-                    ser = serial.Serial(port, discstation_burn.BAUD, timeout=1, write_timeout=1)
+                    ser = serial.Serial(port, discstation_burn.BAUD, timeout=1, write_timeout=2)
                     if discstation_host.system_name() == "linux":
                         ser.setDTR(False)
                         time.sleep(0.1)

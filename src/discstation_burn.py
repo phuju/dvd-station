@@ -538,9 +538,23 @@ def send(ser, msg):
             pass
     if not ser:
         return False
+    payload = (msg + '\n').encode()
     try:
         with SERIAL_WRITE_LOCK:
-            ser.write((msg + '\n').encode())
+            # pyserial's Serial.write() on Linux waits on select() for the fd
+            # to report writable before it calls the real write() - some
+            # USB-CDC-ACM devices (e.g. the ESP32-C6's native USB peripheral,
+            # unlike a CP2102/CH340 bridge chip) never signal that through
+            # select() even though a plain write succeeds instantly, so
+            # ser.write() times out forever on those. Write through the raw
+            # fd directly for a real serial port; other transports
+            # (TcpSerial/VirtualSerial) keep their own write().
+            fileno = getattr(ser, "fileno", None)
+            if isinstance(ser, serial.Serial) and fileno:
+                os.write(fileno(), payload)
+            else:
+                ser.write(payload)
+        return True
     except (serial.SerialException, OSError) as e:
         if not _serial_write_failed:
             print(f"serial send error ('{msg[:30]}'): {e}")
@@ -549,7 +563,6 @@ def send(ser, msg):
     except Exception as e:
         print(f"serial send error ('{msg[:30]}'): {e}")
         return False
-    return True
 
 def safe_send(ser, msg):
     if not ser:
