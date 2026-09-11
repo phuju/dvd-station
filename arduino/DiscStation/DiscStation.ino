@@ -605,6 +605,8 @@ bool wakeDisplay() {
 void drawPlay() {
   uiState = UI_PLAY;
   returnToHomeAt = 0;
+  lastInputTime = millis();   // real status content (track change, pause/resume) gets a full
+                               // IDLE_BLANK_MS on screen before the screensaver reclaims it
   if (!displayOk) return;
 
   display.clearDisplay();
@@ -1193,9 +1195,12 @@ void loop() {
     if (!displayBlank) drawStatus();
   }
 
-  // --- Idle disc screensaver (HOME + STANDBY) ---
+  // --- Idle disc screensaver (HOME + STANDBY + PLAY) ---
+  // PLAY is included because a static "PLAYING" screen is just as low-current
+  // as HOME/STANDBY were - the power bank doesn't care what's on screen, only
+  // that the draw stays static this long.
   if (displayOk && !displayBlank &&
-      (uiState == UI_HOME || uiState == UI_STANDBY) &&
+      (uiState == UI_HOME || uiState == UI_STANDBY || uiState == UI_PLAY) &&
       (long)(millis() - lastInputTime) >= IDLE_BLANK_MS) {
     displayBlank = true;
     saverStep = 0;
