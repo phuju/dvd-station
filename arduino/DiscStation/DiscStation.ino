@@ -724,18 +724,29 @@ void parseMessage(String msg) {
     lastMsgTime = millis();
     String rest = msg.substring(3);
     for (int i = 0; i < VU_BARS; i++) vuLevel[i] = 0;
+    bool anyNonzero = false;
     for (int i = 0; i < VU_BARS && rest.length() > 0; i++) {
       int comma = rest.indexOf(',');
       String tok = (comma < 0) ? rest : rest.substring(0, comma);
       vuLevel[i] = (uint8_t)constrain(tok.toInt(), 0, 63);
+      if (vuLevel[i] > 0) anyNonzero = true;
       if (comma < 0) break;
       rest = rest.substring(comma + 1);
     }
-    visualizerActive = true;
-    lastVuAt = millis();
-    lastInputTime = millis();   // the visualizer's own continuous redraw already beats the
-                                 // power-bank shutoff - no need for the screensaver too
-    if (uiState == UI_PLAY && (long)(millis() - vuSuppressUntil) >= 0) drawPlayVisualizer();
+    // A host that's technically capturing but getting only silence (e.g. macOS's
+    // blocked system-audio-capture - see docs/PLATFORM_SUPPORT.md) sends real
+    // VU: frames that are all zero. Treating that as "visualizer active" would
+    // draw an all-zero bars screen forever, which is just a blank display - and
+    // it'd permanently disable the disc-spinner fallback below (lastVuAt == 0
+    // check), since technically a frame DID arrive. Only count it as real data
+    // if at least one bar actually has something in it.
+    if (anyNonzero) {
+      visualizerActive = true;
+      lastVuAt = millis();
+      lastInputTime = millis();   // the visualizer's own continuous redraw already beats the
+                                   // power-bank shutoff - no need for the screensaver too
+      if (uiState == UI_PLAY && (long)(millis() - vuSuppressUntil) >= 0) drawPlayVisualizer();
+    }
     return;
   }
 
