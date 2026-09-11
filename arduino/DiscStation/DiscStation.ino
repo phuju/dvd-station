@@ -235,7 +235,6 @@ bool playStatusTemp = false;
 unsigned long encClickDownAt = 0;
 bool encClickDown = false;
 unsigned long encClickLastDebounce = 0;
-unsigned long lastEncRotateMs = 0;   // set whenever a rotation tick is drained; guards SW against rotation noise
 
 // EJECT button - single press, no long-press timer needed
 bool ejectDown = false;
@@ -314,13 +313,20 @@ const uint8_t ENC_TTABLE[7][4] = {
 
 volatile uint8_t encState = ENC_R_START;
 volatile int16_t encTicks = 0;   // whole detents ready for loop() to drain
+volatile uint32_t encLastActivityMs = 0;   // refreshed on every raw pin transition, not just
+                                            // committed ticks - guards handleSelectPress's SW
+                                            // read against bounce/crosstalk from a spin in progress
 
 void IRAM_ATTR encoderISR() {
+  encLastActivityMs = millis();
   uint8_t pinState = (digitalRead(ENC_DT_PIN) << 1) | digitalRead(ENC_CLK_PIN);
   encState = ENC_TTABLE[encState & 0xF][pinState];
   uint8_t dir = encState & 0x30;
-  if (dir == ENC_DIR_CW) encTicks++;
-  else if (dir == ENC_DIR_CCW) encTicks--;
+  // Flipped from the table's literal CW/CCW so the tick sign matches this
+  // encoder's physical wiring: turning the knob clockwise should increase
+  // (next track, volume up), not decrease.
+  if (dir == ENC_DIR_CW) encTicks--;
+  else if (dir == ENC_DIR_CCW) encTicks++;
 }
 
 void sendHomeMode() {
@@ -1226,7 +1232,6 @@ void loop() {
     int16_t ticks = encTicks;
     encTicks = 0;
     interrupts();
-    if (ticks != 0) lastEncRotateMs = millis();
     while (ticks > 0) { handleEncoderCW(); ticks--; }
     while (ticks < 0) { handleEncoderCCW(); ticks++; }
   }
@@ -1237,7 +1242,7 @@ void loop() {
   {
     bool sw = digitalRead(ENC_SW_PIN) == LOW;
     if (sw && !encClickDown && millis() - encClickLastDebounce > DEBOUNCE_MS &&
-        millis() - lastEncRotateMs > ENC_CLICK_GUARD_MS) {
+        millis() - encLastActivityMs > ENC_CLICK_GUARD_MS) {
       encClickDown = true;
       encClickDownAt = millis();
     }
