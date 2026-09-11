@@ -1604,9 +1604,8 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
         return
 
     send(ser, "STATUS:Burning audio CD...")
-    # The cooked generic-mmc writer does NOT lay down the CD-TEXT lead-in on most
-    # ATAPI drives; the raw writer does. Override with DISCSTATION_CDRDAO_DRIVER
-    # (set it empty to let cdrdao auto-pick).
+    # DISCSTATION_CDRDAO_DRIVER forces one specific driver (set it empty for
+    # cdrdao to auto-pick) instead of the try-in-order fallback below.
     try:
         cdrdao_write_dev = discstation_host.cdrdao_device(disc_device())
     except RuntimeError:
@@ -1641,20 +1640,32 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
         return proc.wait(), lines
 
     log_path = WORK / "cdrdao.log"
-    driver = os.environ.get("DISCSTATION_CDRDAO_DRIVER", "generic-mmc-raw")
+    override = os.environ.get("DISCSTATION_CDRDAO_DRIVER")
+    # generic-mmc-raw (raw P-W sub-channel writing) is what guarantees CD-TEXT,
+    # but some drives reject raw sub-channel writing outright - confirmed live
+    # on this drive with --simulate: it fails at the lead-in even with CD-TEXT
+    # stripped out entirely, so it's the raw *driver* that's incompatible here,
+    # not CD-TEXT itself. generic-mmc (cooked) writes fine on the same drive
+    # (also confirmed with --simulate) and still carries the CD-TEXT blocks in
+    # the TOC, so it's worth trying with labels intact before dropping them -
+    # only the last resort actually removes CD-TEXT from the TOC.
+    drivers_to_try = [override] if override else ["generic-mmc-raw", "generic-mmc"]
     try:
-        rc, out_lines = _run_cdrdao(driver)
-        # The raw P-W sub-channel mode cdrdao needs to lay down CD-TEXT isn't
-        # supported by every drive - a drive that rejects it fails immediately
-        # while writing the lead-in, before any audio data is written, so
-        # it's safe to retry once without CD-TEXT/without forcing raw mode
-        # rather than failing the whole burn over track/album labels.
-        if rc != 0 and rc != -15 and driver == "generic-mmc-raw":
-            print("cdrdao: raw write failed - retrying without CD-TEXT")
+        rc, out_lines = -1, []
+        for i, driver in enumerate(drivers_to_try):
+            if i > 0:
+                print(f"cdrdao: write failed with previous driver - retrying with --driver {driver or 'auto'}")
+                send(ser, "STATUS:Retrying burn...")
+            rc, lines = _run_cdrdao(driver)
+            out_lines += ([f"--- driver {driver or 'auto'} ---"] if i else []) + lines
+            if rc == 0 or rc == -15:
+                break
+        if rc != 0 and rc != -15 and not override:
+            print("cdrdao: all driver modes failed - retrying without CD-TEXT")
             send(ser, "STATUS:Retrying without CD-TEXT...")
             _write_toc(include_cdtext=False)
-            rc2, out_lines2 = _run_cdrdao(None)
-            out_lines = out_lines + ["--- retry without CD-TEXT ---"] + out_lines2
+            rc2, lines2 = _run_cdrdao(None)
+            out_lines += ["--- retry without CD-TEXT ---"] + lines2
             rc = rc2
     finally:
         for w in tmp_dir.glob("*.wav"):
