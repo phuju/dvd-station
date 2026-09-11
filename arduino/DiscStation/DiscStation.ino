@@ -47,7 +47,7 @@
 #define VU_ENTRY_DELAY_MS  10000  // stay on the text status screen this long after entering PLAY
 #define VU_RESUME_DELAY_MS  7000  // ...and this long after any input while already in PLAY
 
-#define WIFI_RESET_HOLD_MS      10000  // hold SELECT this long on HOME to wipe Wi-Fi creds
+#define WIFI_RESET_HOLD_MS      10000  // hold HOME/BACK this long on HOME to wipe Wi-Fi creds
 #define WIFI_CONNECT_TIMEOUT_MS 18000  // give a stored-creds join this long before falling to the portal
 #define WIFI_RETRY_MS           15000  // if a live link drops, force a re-join after this
 

@@ -25,8 +25,8 @@ remote can talk to the host over Wi-Fi instead of a USB cable.
   the remote starts an open `DiscStation-XXXX` access point; join it from a
   phone, the captive portal (or `http://192.168.4.1`) lists nearby networks
   — pick yours, enter the password, done. It reconnects on every boot after
-  that. Change networks later: **hold SELECT for 10 s** on the home screen
-  to wipe the credentials and reopen the portal.
+  that. Change networks later: **hold HOME/BACK for 10 s** on the home
+  screen to wipe the credentials and reopen the portal.
   Power users can instead `cp arduino/<board>/secrets.h.example secrets.h`
   and set `WIFI_SSID` / `WIFI_PASS` at build time (git-ignored).
 - **Host side:** nothing to configure. With no USB cable present the host
@@ -47,7 +47,7 @@ remote can talk to the host over Wi-Fi instead of a USB cable.
 | **Burn Video DVD** | YouTube URL or local file → ffmpeg 2-pass → DVD-Video disc |
 | **Burn Data DVD** | Any files/folders → ISO/Joliet data disc (no quality loss) |
 | **Burn MPG** | Re-burn a previously converted movie.mpg |
-| **Play** | Playback via mpv (DVD-Video, Audio CD, VCD, SVCD) |
+| **Play** | Playback via mpv (DVD-Video, Audio CD, VCD, SVCD) — the OLED remote shows a live spectrum visualizer of the actual audio (Linux only for now; see `docs/PLATFORM_SUPPORT.md`) |
 | **Rip** | Audio CD → FLAC (MusicBrainz); DVD-Video → VIDEO_TS mirror or HandBrake MKV (TMDb naming) |
 
 ## Project Structure
