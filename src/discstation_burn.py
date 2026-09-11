@@ -1567,30 +1567,27 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
 
     album_t = _cdt(album_title) or "Audio CD"
     album_p = _cdt(album_artist) or "Unknown Artist"
-    toc_lines = ["CD_DA"]
-    toc_lines.append("CD_TEXT {")
-    toc_lines.append("  LANGUAGE_MAP { 0: EN }")
-    toc_lines.append("  LANGUAGE 0 {")
-    toc_lines.append(f'    TITLE "{album_t}"')
-    toc_lines.append(f'    PERFORMER "{album_p}"')
-    toc_lines.append("  }")
-    toc_lines.append("}")
-    toc_lines.append("")
-    for i, (artist, title) in enumerate(track_meta):
-        wav = tmp_dir / f"track_{i + 1:02d}.wav"
-        track_t = _cdt(title) or f"Track {i + 1:02d}"
-        track_p = _cdt(artist) or album_p
-        toc_lines.append("TRACK AUDIO")
-        toc_lines.append("CD_TEXT {")
-        toc_lines.append("  LANGUAGE 0 {")
-        toc_lines.append(f'    TITLE "{track_t}"')
-        toc_lines.append(f'    PERFORMER "{track_p}"')
-        toc_lines.append("  }")
-        toc_lines.append("}")
-        toc_lines.append(f'FILE "{wav}" 0')
-        toc_lines.append("")
     toc_path = tmp_dir / "disc.toc"
-    toc_path.write_text("\n".join(toc_lines) + "\n")
+
+    def _write_toc(include_cdtext):
+        toc_lines = ["CD_DA"]
+        if include_cdtext:
+            toc_lines += ["CD_TEXT {", "  LANGUAGE_MAP { 0: EN }", "  LANGUAGE 0 {",
+                          f'    TITLE "{album_t}"', f'    PERFORMER "{album_p}"',
+                          "  }", "}", ""]
+        for i, (artist, title) in enumerate(track_meta):
+            wav = tmp_dir / f"track_{i + 1:02d}.wav"
+            toc_lines.append("TRACK AUDIO")
+            if include_cdtext:
+                track_t = _cdt(title) or f"Track {i + 1:02d}"
+                track_p = _cdt(artist) or album_p
+                toc_lines += ["CD_TEXT {", "  LANGUAGE 0 {", f'    TITLE "{track_t}"',
+                              f'    PERFORMER "{track_p}"', "  }", "}"]
+            toc_lines.append(f'FILE "{wav}" 0')
+            toc_lines.append("")
+        toc_path.write_text("\n".join(toc_lines) + "\n")
+
+    _write_toc(include_cdtext=True)
     print(f"CD-TEXT: album={album_t!r} performer={album_p!r}, "
           f"{len(track_meta)} track titles")
     send(ser, "PROGRESS:35%")
@@ -1617,39 +1614,53 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
             raise RuntimeError("Audio CD burning is not supported on this Mac "
                                "(cdrdao cannot access the optical drive)")
         raise
-    cdrdao_cmd = [tool('cdrdao'), 'write', '--buffers', '64',
-                  '--device', cdrdao_write_dev]
-    driver = os.environ.get("DISCSTATION_CDRDAO_DRIVER", "generic-mmc-raw")
-    if driver:
-        cdrdao_cmd += ['--driver', driver]
-    speed_ = speed or DISC_SPEED
-    if speed_ and speed_.lower() != "auto":
-        cdrdao_cmd += ['--speed', speed_.rstrip('x')]
-    cdrdao_cmd.append(str(toc_path))  # toc-file must come after all options
+    def _run_cdrdao(driver):
+        cmd = [tool('cdrdao'), 'write', '--buffers', '64', '--device', cdrdao_write_dev]
+        if driver:
+            cmd += ['--driver', driver]
+        speed_ = speed or DISC_SPEED
+        if speed_ and speed_.lower() != "auto":
+            cmd += ['--speed', speed_.rstrip('x')]
+        cmd.append(str(toc_path))  # toc-file must come after all options
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        lines = []
+        last_prog = 0
+        try:
+            for line in iter_proc_or_cancel(proc, ser):
+                lines.append(line)
+                m = re.search(r'(\d+)\s*%', line)
+                if m:
+                    pct = 35 + int(int(m.group(1)) * 0.65)
+                    now = time.time()
+                    if now - last_prog >= 0.2:
+                        send(ser, f"PROGRESS:{pct}%")
+                        last_prog = now
+        except (KeyboardInterrupt, SystemExit):
+            stop_process(proc)
+            raise
+        return proc.wait(), lines
 
-    proc = subprocess.Popen(cdrdao_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    out_lines = []
     log_path = WORK / "cdrdao.log"
-    last_prog = 0
+    driver = os.environ.get("DISCSTATION_CDRDAO_DRIVER", "generic-mmc-raw")
     try:
-        for line in iter_proc_or_cancel(proc, ser):
-            out_lines.append(line)
-            m = re.search(r'(\d+)\s*%', line)
-            if m:
-                pct = 35 + int(int(m.group(1)) * 0.65)
-                now = time.time()
-                if now - last_prog >= 0.2:
-                    send(ser, f"PROGRESS:{pct}%")
-                    last_prog = now
-    except (KeyboardInterrupt, SystemExit):
-        stop_process(proc)
-        raise
+        rc, out_lines = _run_cdrdao(driver)
+        # The raw P-W sub-channel mode cdrdao needs to lay down CD-TEXT isn't
+        # supported by every drive - a drive that rejects it fails immediately
+        # while writing the lead-in, before any audio data is written, so
+        # it's safe to retry once without CD-TEXT/without forcing raw mode
+        # rather than failing the whole burn over track/album labels.
+        if rc != 0 and rc != -15 and driver == "generic-mmc-raw":
+            print("cdrdao: raw write failed - retrying without CD-TEXT")
+            send(ser, "STATUS:Retrying without CD-TEXT...")
+            _write_toc(include_cdtext=False)
+            rc2, out_lines2 = _run_cdrdao(None)
+            out_lines = out_lines + ["--- retry without CD-TEXT ---"] + out_lines2
+            rc = rc2
     finally:
         for w in tmp_dir.glob("*.wav"):
             w.unlink(missing_ok=True)
         toc_path.unlink(missing_ok=True)
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
-    rc = proc.wait()
     log_path.write_text("\n".join(out_lines) + "\n")
     if rc != 0:
         for line in out_lines[-10:]:
