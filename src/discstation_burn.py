@@ -242,6 +242,7 @@ DVD_DEVICE = os.environ.get("DISC_DEVICE") or os.environ.get("DVD_DEVICE")
 DISC_SPEED = os.environ.get("DISC_SPEED")
 DISC_DISC_BYTES = 4_700_000_000
 DVD_DL_BYTES = 8_500_000_000
+CD_R_BYTES = 700_000_000
 DISC_TARGET_BYTES = int(os.environ.get("DISC_TARGET_BYTES", "4300000000"))
 DVD_MUX_SAFETY = float(os.environ.get("DVD_MUX_SAFETY", "0.92"))
 AUDIO_BITRATE_K = int(os.environ.get("DVD_AUDIO_KBPS", "192"))
@@ -423,8 +424,17 @@ def disc_capacity_bytes(device):
         props.get("ID_CDROM_MEDIA_DVD_R_DL") == "1" or
         props.get("ID_CDROM_MEDIA_DVD_R_DL_SEQ") == "1"
     )
-    expected_min = 1_000_000_000
-    expected_max = DVD_DL_BYTES if is_dl else DISC_DISC_BYTES
+    # ID_CDROM_MEDIA_CD_R/CD_RW is the media actually loaded, not the drive's
+    # read/write capability (ID_CDROM_CD_R, set for any combo drive
+    # regardless of what's inserted) - checking the wrong one here is why a
+    # blank CD-R used to get treated as an unreadable DVD (capacity "unknown,
+    # assuming DVD5") instead of a ~700MB CD.
+    is_cd = (
+        props.get("ID_CDROM_MEDIA_CD_R") == "1" or
+        props.get("ID_CDROM_MEDIA_CD_RW") == "1"
+    )
+    expected_min = 100_000_000 if is_cd else 1_000_000_000
+    expected_max = CD_R_BYTES if is_cd else (DVD_DL_BYTES if is_dl else DISC_DISC_BYTES)
 
     mediainfo_timeout = _env_int("DISCSTATION_PROBE_TIMEOUT_MEDIAINFO", 12)
     best = None
@@ -465,14 +475,13 @@ def disc_capacity_bytes(device):
     if best is not None:
         return best
 
-    if props.get("ID_CDROM_MEDIA_STATE") == "blank":
-        if is_dl:
-            return DVD_DL_BYTES
     if is_dl:
         return DVD_DL_BYTES
     if props.get("ID_CDROM_MEDIA_DVD_PLUS_R") == "1" or \
        props.get("ID_CDROM_MEDIA_DVD_R") == "1":
         return DISC_DISC_BYTES
+    if is_cd:
+        return CD_R_BYTES
 
     # Last resort: a raw block size (works for finalized/pressed discs where
     # dvd+rw-mediainfo reports no free blocks; 0/absent for audio CDs).
@@ -498,6 +507,10 @@ def detect_disc_type(device):
         props.get("ID_CDROM_MEDIA_DVD_PLUS_R") == "1" or
         props.get("ID_CDROM_MEDIA_DVD_R") == "1"
     )
+    is_cd = (
+        props.get("ID_CDROM_MEDIA_CD_R") == "1" or
+        props.get("ID_CDROM_MEDIA_CD_RW") == "1"
+    )
     is_blank = props.get("ID_CDROM_MEDIA_STATE") == "blank"
     media_type = props.get("ID_CDROM_MEDIA", "")
 
@@ -505,11 +518,12 @@ def detect_disc_type(device):
 
     capacity = disc_capacity_bytes(device)
     if capacity is None:
-        capacity = DVD_DL_BYTES if is_dl else (DISC_DISC_BYTES if is_sl else None)
+        capacity = DVD_DL_BYTES if is_dl else (CD_R_BYTES if is_cd else (DISC_DISC_BYTES if is_sl else None))
 
     return {
         "is_dual_layer": is_dl,
         "is_single_layer": is_sl,
+        "is_cd": is_cd,
         "is_blank": is_blank,
         "status": status,
         "media_type": media_type,
@@ -1414,6 +1428,13 @@ def burn_data(ser, source_paths, disc_label, speed=None, is_dual_layer=False):
     send(ser, "PROGRESS:Starting")
     send(ser, f"INFO:Label {disc_label[:13]}")
     device = disc_device()
+    # growisofs (dvd+rw-tools) only writes DVD/BD media - it refuses CD-R/RW
+    # outright ("media is not recognized as recordable DVD"), so a blank CD-R
+    # needs the CD-specific tool (genisoimage build + wodim write) instead.
+    props = _udevadm_props(device)
+    if props.get("ID_CDROM_MEDIA_CD_R") == "1" or props.get("ID_CDROM_MEDIA_CD_RW") == "1":
+        _burn_data_cd(ser, source_paths, disc_label, speed, device)
+        return
     growisofs_cmd = [tool('growisofs'), '-dvd-compat', '-Z', device]
     speed = speed or DISC_SPEED
     if speed and speed.lower() != "auto":
@@ -1426,6 +1447,59 @@ def burn_data(ser, source_paths, disc_label, speed=None, is_dual_layer=False):
     growisofs_cmd += ['-R', '-J', '-joliet-long', '-allow-limited-size', '-V', disc_label]
     growisofs_cmd += [str(p) for p in source_paths]
     _run_growisofs(ser, growisofs_cmd, source_paths[0].parent / "growisofs.log", device)
+
+def _burn_data_cd(ser, source_paths, disc_label, speed, device):
+    """Build an ISO9660/Joliet image with genisoimage and burn it with wodim -
+    the CD-R/RW equivalent of the growisofs path above (growisofs can't
+    write CD media at all)."""
+    WORK.mkdir(parents=True, exist_ok=True)
+    iso_path = WORK / f"data_{time.strftime('%Y%m%d_%H%M%S')}.iso"
+    mkisofs_cmd = [tool('genisoimage'), '-R', '-J', '-joliet-long', '-V', disc_label,
+                   '-o', str(iso_path)]
+    mkisofs_cmd += [str(p) for p in source_paths]
+    r = subprocess.run(mkisofs_cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"ISO build failed: {r.stderr.strip()[-200:] or 'genisoimage error'}")
+
+    try:
+        discstation_host.unmount_device(device)
+        wodim_cmd = [tool('wodim'), '-v', f'dev={device}']
+        speed = speed or DISC_SPEED
+        if speed and speed.lower() != "auto":
+            wodim_cmd += [f"speed={re.sub(r'[^0-9]', '', speed) or '8'}"]
+        wodim_cmd.append(str(iso_path))
+
+        proc = subprocess.Popen(wodim_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        out_lines = []
+        last_prog = 0
+        try:
+            for line in iter_proc_or_cancel(proc, ser):
+                out_lines.append(line)
+                m = re.search(r'(\d+)%', line)
+                if m:
+                    now = time.time()
+                    if now - last_prog >= 0.2:
+                        send(ser, f"PROGRESS:{m.group(1)}%")
+                        last_prog = now
+        except (KeyboardInterrupt, SystemExit):
+            stop_process(proc)
+            raise
+        rc = proc.wait()
+        if rc != 0:
+            for line in out_lines[-10:]:
+                print(f"wodim: {line}")
+            if rc == -15:
+                safe_send(ser, "CANCELLED:Burn cancelled")
+                raise CancelError("Cancelled")
+            safe_send(ser, "INFO:Burn failed, check log")
+            raise RuntimeError("Disc burn failed")
+    finally:
+        iso_path.unlink(missing_ok=True)
+
+    try:
+        discstation_host.eject_device(device)
+    except Exception as e:
+        print(f"Disc eject skipped: {e}")
 
 def burn_audio_cd(ser, audio_files, disc_label, speed=None):
     """Convert audio files to CD-DA WAV and burn via cdrdao with CD-TEXT."""

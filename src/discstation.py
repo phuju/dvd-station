@@ -3063,7 +3063,7 @@ def burn_data_flow(ser):
         for d in files_to_burn:
             if d.is_dir():
                 total_bytes += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
-        label = "DVD5" if not dl_info["is_dual_layer"] else "DVD9"
+        label = "CD-R" if dl_info.get("is_cd") else ("DVD9" if dl_info["is_dual_layer"] else "DVD5")
         usable = discstation_burn.disc_output_limit_bytes(disc_bytes)
         if usable and total_bytes > usable:
             size_gb = total_bytes / 1e9
