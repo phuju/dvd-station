@@ -31,6 +31,7 @@
 
 #define DEBOUNCE_MS      50
 #define LONG_PRESS_MS    1000
+#define ENC_CLICK_GUARD_MS 200  // ignore new SW presses this soon after a rotation tick (rotation vibration can bounce SW low)
 #define ENC_DEBOUNCE_US 2000     // ignore encoder interrupts closer together than this (contact bounce)
 #define DONE_RESET_MS    30000
 #define STANDBY_BLANK_MS 60000
@@ -225,6 +226,7 @@ bool playStatusTemp = false;
 unsigned long encClickDownAt = 0;
 bool encClickDown = false;
 unsigned long encClickLastDebounce = 0;
+unsigned long lastEncRotateMs = 0;   // set whenever a rotation tick is drained; guards SW against rotation noise
 
 // EJECT button - single press, no long-press timer needed
 bool ejectDown = false;
@@ -946,7 +948,7 @@ void handleEncoderCW() {
       Out.println(playVolume);
       drawPlay();
     } else if (audioPlayMode) {
-      Out.println(displayRotation == 0 ? "REW:BIG" : "FF:BIG");  // next/prev track, screen-flip-aware
+      Out.println(displayRotation == 0 ? "FF:BIG" : "REW:BIG");  // next/prev track, screen-flip-aware
     } else {
       Out.println("FF:10");
     }
@@ -983,7 +985,7 @@ void handleEncoderCCW() {
       Out.println(playVolume);
       drawPlay();
     } else if (audioPlayMode) {
-      Out.println(displayRotation == 0 ? "FF:BIG" : "REW:BIG");
+      Out.println(displayRotation == 0 ? "REW:BIG" : "FF:BIG");
     } else {
       Out.println("REW:10");
     }
@@ -1104,14 +1106,18 @@ void loop() {
     int16_t ticks = encTicks;
     encTicks = 0;
     interrupts();
+    if (ticks != 0) lastEncRotateMs = millis();
     while (ticks > 0) { handleEncoderCW(); ticks--; }
     while (ticks < 0) { handleEncoderCCW(); ticks++; }
   }
 
-  // --- Encoder click (SW) - same debounce/long-press shape as the old SELECT ---
+  // --- Encoder click (SW) - same debounce/long-press shape as the old SELECT.
+  // Also guarded against rotation: spinning the knob can momentarily bounce
+  // SW low too, which was being misread as a real click and firing SELECT/PLAY. ---
   {
     bool sw = digitalRead(ENC_SW_PIN) == LOW;
-    if (sw && !encClickDown && millis() - encClickLastDebounce > DEBOUNCE_MS) {
+    if (sw && !encClickDown && millis() - encClickLastDebounce > DEBOUNCE_MS &&
+        millis() - lastEncRotateMs > ENC_CLICK_GUARD_MS) {
       encClickDown = true;
       encClickDownAt = millis();
     }
