@@ -42,7 +42,9 @@
 #define PING_TIMEOUT_MS  30000
 
 #define VU_BARS       16   // must match the host's VU: band count
-#define VU_TIMEOUT_MS 400  // no VU: update this long -> host isn't sending (paused/stopped), fall back to text
+#define VU_TIMEOUT_MS 1200 // no VU: update this long -> host isn't sending (paused/stopped), fall back to text
+                           // (generous on purpose: the host's capture thread can jitter under load on a Pi -
+                           // too tight and normal jitter flickers between bars and the text screen)
 
 #define WIFI_RESET_HOLD_MS      10000  // hold SELECT this long on HOME to wipe Wi-Fi creds
 #define WIFI_CONNECT_TIMEOUT_MS 18000  // give a stored-creds join this long before falling to the portal
@@ -617,9 +619,12 @@ bool wakeDisplay() {
   return true;
 }
 
-// Full-screen spectrum bars, no header/chrome - maximizes bar height using
-// the whole 128x64 panel. Falls back to the normal drawPlay() text screen
-// once VU: updates stop arriving (see VU_TIMEOUT_MS in loop()).
+#define VU_TOP_MARGIN 16   // px of empty headroom above the tallest possible bar
+
+// Full-screen-width spectrum bars, no header/chrome, capped short of the top
+// edge (VU_TOP_MARGIN) so a loud peak doesn't run the panel edge-to-edge.
+// Falls back to the normal drawPlay() text screen once VU: updates stop
+// arriving (see VU_TIMEOUT_MS in loop()).
 void drawPlayVisualizer() {
   uiState = UI_PLAY;
   returnToHomeAt = 0;
@@ -627,10 +632,11 @@ void drawPlayVisualizer() {
 
   display.clearDisplay();
   const int gap = 2;
+  const int maxH = SCREEN_HEIGHT - VU_TOP_MARGIN;
   const int barW = (SCREEN_WIDTH - gap * (VU_BARS - 1)) / VU_BARS;
   int x = (SCREEN_WIDTH - (barW * VU_BARS + gap * (VU_BARS - 1))) / 2;
   for (int i = 0; i < VU_BARS; i++) {
-    int h = map(vuLevel[i], 0, 63, 0, SCREEN_HEIGHT);
+    int h = map(vuLevel[i], 0, 63, 0, maxH);
     if (h > 0) display.fillRect(x, SCREEN_HEIGHT - h, barW, h, SSD1306_WHITE);
     x += barW + gap;
   }
