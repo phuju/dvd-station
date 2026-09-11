@@ -272,6 +272,13 @@ uint8_t vuLevel[VU_BARS];
 bool visualizerActive = false;
 unsigned long lastVuAt = 0;
 unsigned long vuSuppressUntil = 0;   // bars withheld (text screen shown instead) until millis() reaches this
+bool vuSeenReal = false;   // has this PLAY session ever gotten a VU: frame with a nonzero bar -
+                           // a session-level fact (macOS: never; Linux: within the first frame or
+                           // two), decided once and left alone. Deliberately separate from
+                           // visualizerActive/lastVuAt, which track "is the stream still alive"
+                           // per frame (including legitimate all-zero frames during quiet music) -
+                           // conflating the two into one gate previously caused the bars/screensaver
+                           // to flicker on Linux every time a frame happened to read all zero.
 int displayRotation = 0;
 
 // Indeterminate progress animation
@@ -642,7 +649,7 @@ bool wakeDisplay() {
     case UI_IP: drawIP(); break;
     case UI_BURN_READY: drawBurnReady(); break;
     case UI_PLAY:
-      if (visualizerActive && (long)(millis() - lastVuAt) < VU_TIMEOUT_MS &&
+      if (vuSeenReal && visualizerActive && (long)(millis() - lastVuAt) < VU_TIMEOUT_MS &&
           (long)(millis() - vuSuppressUntil) >= 0) drawPlayVisualizer();
       else drawPlay();
       break;
@@ -733,19 +740,29 @@ void parseMessage(String msg) {
       if (comma < 0) break;
       rest = rest.substring(comma + 1);
     }
-    // A host that's technically capturing but getting only silence (e.g. macOS's
+    if (anyNonzero) vuSeenReal = true;
+    // lastVuAt/visualizerActive/lastInputTime update on EVERY frame, zero or
+    // not - they track "is the stream still alive", and real music routinely
+    // produces a frame where every bar reads 0 (quiet moment right after a
+    // loud transient keeps the adaptive reference elevated for a beat). Only
+    // gating those three on anyNonzero previously made ordinary quiet frames
+    // look like "host stopped sending" to the unrelated VU_TIMEOUT_MS check
+    // below, flickering bars/screensaver during normal playback.
+    visualizerActive = true;
+    lastVuAt = millis();
+    lastInputTime = millis();   // the visualizer's own continuous redraw already beats the
+                                 // power-bank shutoff - no need for the screensaver too
+    // Drawing bars (and reclaiming the screen from the disc-spinner screensaver,
+    // if it's up) is the one thing that DOES stay gated on vuSeenReal - a host
+    // that's technically capturing but getting only silence (e.g. macOS's
     // blocked system-audio-capture - see docs/PLATFORM_SUPPORT.md) sends real
-    // VU: frames that are all zero. Treating that as "visualizer active" would
-    // draw an all-zero bars screen forever, which is just a blank display - and
-    // it'd permanently disable the disc-spinner fallback below (lastVuAt == 0
-    // check), since technically a frame DID arrive. Only count it as real data
-    // if at least one bar actually has something in it.
-    if (anyNonzero) {
-      visualizerActive = true;
-      lastVuAt = millis();
-      lastInputTime = millis();   // the visualizer's own continuous redraw already beats the
-                                   // power-bank shutoff - no need for the screensaver too
-      if (uiState == UI_PLAY && (long)(millis() - vuSuppressUntil) >= 0) drawPlayVisualizer();
+    // VU: frames that are all zero forever. Without this gate, every one of
+    // those frames would re-draw a blank bars screen and set displayBlank =
+    // false, fighting the disc-spinner screensaver for the display every
+    // ~66ms instead of leaving it alone once chosen.
+    if (vuSeenReal && uiState == UI_PLAY && (long)(millis() - vuSuppressUntil) >= 0) {
+      displayBlank = false;
+      drawPlayVisualizer();
     }
     return;
   }
@@ -809,6 +826,7 @@ void parseMessage(String msg) {
     vuSuppressUntil = millis() + VU_ENTRY_DELAY_MS;   // text screen first, bars after a beat
     lastVuAt = 0;                  // fresh session - unknown yet whether the host even sends VU: at all
     visualizerActive = false;
+    vuSeenReal = false;            // unknown yet whether this session ever gets a real (nonzero) frame
     Out.print("POT:");             // push the last-used volume so playback starts at it
     Out.println(playVolume);
     drawPlay();
@@ -1340,14 +1358,15 @@ void loop() {
   // as HOME/STANDBY were - the power bank doesn't care what's on screen, only
   // that the draw stays static this long.
   //
-  // In PLAY specifically, if this session has never received a single VU:
-  // (lastVuAt == 0 - the host/platform doesn't support the visualizer, e.g.
-  // macOS today), don't make the user wait out the full generic idle timer
-  // for an animation - drop into the spinning-disc screensaver as soon as
-  // the text-hold window (vuSuppressUntil) expires. Once any VU: does
-  // arrive this stops applying (lastVuAt is no longer 0) and PLAY behaves
-  // exactly as before, showing bars instead.
-  bool playSkippingToScreensaver = (uiState == UI_PLAY) && (lastVuAt == 0) &&
+  // In PLAY specifically, if this session has never gotten a single REAL
+  // (nonzero) VU: frame (!vuSeenReal - the host/platform doesn't support the
+  // visualizer, e.g. macOS today), don't make the user wait out the full
+  // generic idle timer for an animation - drop into the spinning-disc
+  // screensaver as soon as the text-hold window (vuSuppressUntil) expires.
+  // vuSeenReal (not lastVuAt, which now updates on every frame including
+  // all-zero ones) is deliberately a session-level, decided-once fact, so
+  // this can't re-trigger mid-playback and flicker against the bars.
+  bool playSkippingToScreensaver = (uiState == UI_PLAY) && !vuSeenReal &&
       (long)(millis() - vuSuppressUntil) >= 0;
   if (displayOk && !displayBlank &&
       (uiState == UI_HOME || uiState == UI_STANDBY || uiState == UI_PLAY) &&
