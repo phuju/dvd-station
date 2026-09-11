@@ -3448,7 +3448,29 @@ def start_vu_visualizer(ser):
     return stop_event, pause_event
 
 
-def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
+def _audio_cd_track_seek(delta, track_starts):
+    """Seek to the start of the next/previous track using the CD TOC's own
+    per-track offsets (already in seconds from track 1's start - see
+    audio_track_metadata) instead of mpv's own chapter list. Works whether
+    or not mpv has track chapters for this stream: macOS's piped
+    cd-paranoia audio has none, since mpv just sees one continuous stream,
+    not the disc itself - time-pos still works fine either way."""
+    if not track_starts:
+        mpv_command(["add", "chapter", delta])
+        return
+    track = mpv_query(["get_property", "chapter"])
+    if not isinstance(track, (int, float)):
+        position = mpv_query(["get_property", "time-pos"])
+        track = max((i for i, start in enumerate(track_starts) if start <= position), default=0) \
+            if isinstance(position, (int, float)) else 0
+    target = max(0, min(len(track_starts) - 1, int(track) + delta))
+    mpv_command(["seek", track_starts[target], "absolute"])
+
+
+def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None, stdin_proc=None):
+    """stdin_proc: an already-started subprocess whose stdout feeds mpv's
+    stdin (e.g. macOS's cd-paranoia-into-mpv audio CD pipe) - mpv reads `-`
+    as its input in cmd in that case. Stopped alongside mpv on cleanup."""
     try:
         os.unlink(MPV_SOCKET)
     except OSError:
@@ -3472,7 +3494,14 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
     # writes block, wedging the whole play loop. We drive mpv over the IPC
     # socket, so none of that output is wanted.
     proc = subprocess.Popen(run_as_desktop_user(cmd), env=env,
+                            stdin=(stdin_proc.stdout if stdin_proc else None),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if stdin_proc:
+        # Close our own copy of the read end now that mpv's had it duped into
+        # its own stdin - otherwise we're also holding it open, so cd-paranoia
+        # never gets SIGPIPE (and just hangs writing into a full pipe buffer)
+        # if mpv exits first.
+        stdin_proc.stdout.close()
     vu_stop = None
 
     try:
@@ -3540,7 +3569,7 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
 
                 elif line == "FF:BIG":
                     if kind == "audio_cd":
-                        mpv_command(["add", "chapter", 1])
+                        _audio_cd_track_seek(1, track_starts)
                         send(ser, "PLAY_STATUS:Next track")
                     else:
                         mpv_command(["seek", 120])
@@ -3554,7 +3583,7 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
                     except ValueError:
                         continue
                     if kind == "audio_cd":
-                        mpv_command(["add", "chapter", 1])
+                        _audio_cd_track_seek(1, track_starts)
                         send(ser, "PLAY_STATUS:Next track")
                     else:
                         mpv_command(["seek", seek_sec])
@@ -3564,7 +3593,7 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
 
                 elif line == "REW:BIG":
                     if kind == "audio_cd":
-                        mpv_command(["add", "chapter", -1])
+                        _audio_cd_track_seek(-1, track_starts)
                         send(ser, "PLAY_STATUS:Prev track")
                     else:
                         mpv_command(["seek", -120])
@@ -3578,7 +3607,7 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
                     except ValueError:
                         continue
                     if kind == "audio_cd":
-                        mpv_command(["add", "chapter", -1])
+                        _audio_cd_track_seek(-1, track_starts)
                         send(ser, "PLAY_STATUS:Prev track")
                     else:
                         mpv_command(["seek", -seek_sec])
@@ -3604,6 +3633,8 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
             vu_stop.set()
         if proc.poll() is None:
             discstation_burn.stop_process(proc)
+        if stdin_proc and stdin_proc.poll() is None:
+            discstation_burn.stop_process(stdin_proc)
         try:
             os.unlink(MPV_SOCKET)
         except OSError:
@@ -3774,11 +3805,40 @@ def play_flow(ser):
 
     elif kind == "audio_cd":
         _, track_titles, track_starts = audio_track_metadata(device)
-        if discstation_host.system_name() == "windows":
+        system = discstation_host.system_name()
+        if system == "windows":
             # mpv on Windows has no libcdio - cdda:// is unavailable there
             # ("disabled at compile-time"). Windows Media Player's own COM
             # control plays it fine via Windows' native CD-audio support.
             _play_audio_cd_windows(ser, device, track_titles)
+        elif system == "darwin":
+            # Homebrew's mpv formula doesn't depend on libcdio either (no
+            # build option to add it) - confirmed live: `mpv cdda://` says
+            # "protocol ... disabled at compile-time" and --cdrom-device
+            # isn't even a recognized option. Same shape of gap as Windows,
+            # different fix: stream the disc via cd-paranoia (already used
+            # for ripping) into mpv's stdin instead of mpv opening the
+            # drive itself. mpv still does all actual playback + IPC
+            # control (pause/volume/stop), just fed a pipe instead of the
+            # disc directly.
+            paranoia = None
+            for name in ("cd-paranoia", "cdparanoia"):
+                try:
+                    paranoia = discstation_burn.tool(name)
+                    break
+                except FileNotFoundError:
+                    continue
+            if not paranoia:
+                raise RuntimeError("cd-paranoia not installed (brew install libcdio-paranoia)")
+            rip_proc = subprocess.Popen(
+                [paranoia, "-d", rip_device(device), "1-", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            audio_device = discstation_host.audio_output_device()
+            cmd = [mpv, "--input-ipc-server=" + MPV_SOCKET, "--force-window=no", "--idle=no", "-"]
+            if audio_device:
+                cmd.insert(1, "--audio-device=" + audio_device)
+                print(f"Audio CD output: {audio_device}")
+            _run_mpv(ser, cmd, "Playing audio CD", kind, track_titles, track_starts, stdin_proc=rip_proc)
         else:
             audio_device = discstation_host.audio_output_device()
             cmd = [
