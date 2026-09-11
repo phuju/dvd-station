@@ -796,6 +796,8 @@ void parseMessage(String msg) {
     line2 = "Playing disc";
     playSeekMode = false;          // always start in volume mode
     vuSuppressUntil = millis() + VU_ENTRY_DELAY_MS;   // text screen first, bars after a beat
+    lastVuAt = 0;                  // fresh session - unknown yet whether the host even sends VU: at all
+    visualizerActive = false;
     Out.print("POT:");             // push the last-used volume so playback starts at it
     Out.println(playVolume);
     drawPlay();
@@ -1326,9 +1328,19 @@ void loop() {
   // PLAY is included because a static "PLAYING" screen is just as low-current
   // as HOME/STANDBY were - the power bank doesn't care what's on screen, only
   // that the draw stays static this long.
+  //
+  // In PLAY specifically, if this session has never received a single VU:
+  // (lastVuAt == 0 - the host/platform doesn't support the visualizer, e.g.
+  // macOS today), don't make the user wait out the full generic idle timer
+  // for an animation - drop into the spinning-disc screensaver as soon as
+  // the text-hold window (vuSuppressUntil) expires. Once any VU: does
+  // arrive this stops applying (lastVuAt is no longer 0) and PLAY behaves
+  // exactly as before, showing bars instead.
+  bool playSkippingToScreensaver = (uiState == UI_PLAY) && (lastVuAt == 0) &&
+      (long)(millis() - vuSuppressUntil) >= 0;
   if (displayOk && !displayBlank &&
       (uiState == UI_HOME || uiState == UI_STANDBY || uiState == UI_PLAY) &&
-      (long)(millis() - lastInputTime) >= IDLE_BLANK_MS) {
+      ((long)(millis() - lastInputTime) >= IDLE_BLANK_MS || playSkippingToScreensaver)) {
     displayBlank = true;
     saverStep = 0;
     lastSaverFrame = 0;
