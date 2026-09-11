@@ -32,7 +32,6 @@
 #define DEBOUNCE_MS      50
 #define LONG_PRESS_MS    1000
 #define ENC_CLICK_GUARD_MS 200  // ignore new SW presses this soon after a rotation tick (rotation vibration can bounce SW low)
-#define ENC_DEBOUNCE_US 2000     // ignore encoder interrupts closer together than this (contact bounce)
 #define DONE_RESET_MS    30000
 #define STANDBY_BLANK_MS 60000
 #define IDLE_BLANK_MS    15000   // no input this long on HOME/STANDBY -> spinning-disc screensaver
@@ -281,21 +280,47 @@ int indeterminateCount = 0;
 unsigned long lastIndeterminateAnim = 0;
 
 // --- Rotary encoder decode ---
-// Interrupt only on CLK's falling edge (one detent = one interrupt, not four
-// - a mechanical encoder's contact bounce can otherwise fire far more often
-// than that and starve other tasks, including the USB-serial link); DT's
-// level at that instant gives direction. A short time debounce rejects
-// contact chatter. Interrupt-driven because the main loop's ~20ms cadence is
-// too slow to reliably catch a fast spin without missing ticks.
+// Ben Buxton's full-step quadrature state machine (the standard robust
+// rotary-encoder algorithm, e.g. the basis of the Arduino "Rotary" library).
+// Reads BOTH pins on every change and only commits a tick after a complete,
+// valid 4-transition sequence - contact bounce just walks between
+// non-committing states instead of producing a spurious tick, so no time
+// debounce is needed. (An earlier CLK-only + micros()-debounce version read
+// just one pin's level at one instant, which is fragile - CLK and DT edges
+// aren't perfectly synchronized on a mechanical encoder, so bounce right at
+// the sample instant could misread direction or double-fire: skipped,
+// doubled, and wrong-direction ticks. That simpler decode was chosen to
+// lighten interrupt load for the dead XIAO ESP32-C6's fragile native-USB
+// link; the current board's CP2102 bridge isn't affected by that at all.)
+#define ENC_R_START     0x0
+#define ENC_R_CW_FINAL  0x1
+#define ENC_R_CW_BEGIN  0x2
+#define ENC_R_CW_NEXT   0x3
+#define ENC_R_CCW_BEGIN 0x4
+#define ENC_R_CCW_FINAL 0x5
+#define ENC_R_CCW_NEXT  0x6
+#define ENC_DIR_CW  0x10
+#define ENC_DIR_CCW 0x20
+
+const uint8_t ENC_TTABLE[7][4] = {
+  {ENC_R_START,    ENC_R_CW_BEGIN,  ENC_R_CCW_BEGIN, ENC_R_START},
+  {ENC_R_CW_NEXT,  ENC_R_START,     ENC_R_CW_FINAL,  ENC_R_START | ENC_DIR_CW},
+  {ENC_R_CW_NEXT,  ENC_R_CW_BEGIN,  ENC_R_START,     ENC_R_START},
+  {ENC_R_CW_NEXT,  ENC_R_CW_BEGIN,  ENC_R_CW_FINAL,  ENC_R_START},
+  {ENC_R_CCW_NEXT, ENC_R_START,     ENC_R_CCW_BEGIN, ENC_R_START},
+  {ENC_R_CCW_NEXT, ENC_R_CCW_FINAL, ENC_R_START,     ENC_R_START | ENC_DIR_CCW},
+  {ENC_R_CCW_NEXT, ENC_R_CCW_FINAL, ENC_R_CCW_BEGIN, ENC_R_START},
+};
+
+volatile uint8_t encState = ENC_R_START;
 volatile int16_t encTicks = 0;   // whole detents ready for loop() to drain
-volatile uint32_t encLastIsrUs = 0;
 
 void IRAM_ATTR encoderISR() {
-  uint32_t now = micros();
-  if (now - encLastIsrUs < ENC_DEBOUNCE_US) return;
-  encLastIsrUs = now;
-  if (digitalRead(ENC_CLK_PIN) != digitalRead(ENC_DT_PIN)) encTicks++;
-  else encTicks--;
+  uint8_t pinState = (digitalRead(ENC_DT_PIN) << 1) | digitalRead(ENC_CLK_PIN);
+  encState = ENC_TTABLE[encState & 0xF][pinState];
+  uint8_t dir = encState & 0x30;
+  if (dir == ENC_DIR_CW) encTicks++;
+  else if (dir == ENC_DIR_CCW) encTicks--;
 }
 
 void sendHomeMode() {
@@ -883,7 +908,8 @@ void setup() {
   pinMode(ENC_SW_PIN, INPUT_PULLUP);
   pinMode(ENC_CLK_PIN, INPUT_PULLUP);
   pinMode(ENC_DT_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ENC_CLK_PIN), encoderISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(ENC_CLK_PIN), encoderISR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_DT_PIN), encoderISR, CHANGE);
 
   displayOk = display.begin(SSD1306_SWITCHCAPVCC, I2C_ADDRESS);
 
