@@ -3312,7 +3312,7 @@ def _iter_proc_lines(proc, ser):
 # its normal PLAY text screen. ponytail: gain is a fixed guess (VU_GAIN),
 # not calibrated against real playback levels - retune if bars run pinned
 # at 63 or barely move.
-VU_BARS = 8   # must match the firmware's VU_BARS
+VU_BARS = 16   # must match the firmware's VU_BARS
 VU_RATE_HZ = 15
 VU_SAMPLE_RATE = 22050
 VU_GAIN = 350
@@ -3334,8 +3334,14 @@ def _vu_loop(ser, stop_event, pause_event):
     chunk_samples = max(256, VU_SAMPLE_RATE // VU_RATE_HZ)
     chunk_bytes = chunk_samples * 2  # s16le, mono
     try:
+        # --latency-msec=50: PulseAudio's default capture buffer is several
+        # hundred ms to seconds (tuned for robust recording, not streaming) -
+        # without this, parec hands us data in ~1.5-2s bursts instead of a
+        # steady trickle, which starves the visualizer for longer than the
+        # firmware's fallback timeout and flickers back to the text screen.
         proc = subprocess.Popen(
-            ["parec", "--format=s16le", f"--rate={VU_SAMPLE_RATE}", "--channels=1", "-d", monitor],
+            ["parec", "--format=s16le", f"--rate={VU_SAMPLE_RATE}", "--channels=1",
+             "--latency-msec=50", "-d", monitor],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
         return

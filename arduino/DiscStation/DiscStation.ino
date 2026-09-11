@@ -41,7 +41,7 @@
 #define SAVER_FRAME_MS   90      // screensaver frame interval (~11fps)
 #define PING_TIMEOUT_MS  30000
 
-#define VU_BARS       8    // must match the host's VU: band count
+#define VU_BARS       16   // must match the host's VU: band count
 #define VU_TIMEOUT_MS 1200 // no VU: update this long -> host isn't sending (paused/stopped), fall back to text
                            // (generous on purpose: the host's capture thread can jitter under load on a Pi -
                            // too tight and normal jitter flickers between bars and the text screen)
