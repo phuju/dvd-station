@@ -17,7 +17,7 @@ if command -v apt-get >/dev/null 2>&1; then
     cdrdao dvdauthor ffmpeg genisoimage growisofs handbrake-cli lsdvd mpv \
     nodejs openssl python3 python3-pip python3-serial python3-mutagen \
     python3-requests python3-pyudev python3-libdiscid python3-musicbrainzngs \
-    libdiscid0 python3-venv wodim
+    python3-numpy pulseaudio-utils libdiscid0 python3-venv wodim
 else
   printf 'Unsupported Linux package manager. Install the DiscStation dependencies manually.\n' >&2
   exit 1

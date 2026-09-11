@@ -621,6 +621,11 @@ try:
 except Exception:
     discstation_meta = None
 
+try:
+    import numpy as _np  # OLED spectrum visualizer during playback (optional)
+except Exception:
+    _np = None
+
 
 def _env_num(name, default, cast):
     try:
@@ -3299,6 +3304,80 @@ def _iter_proc_lines(proc, ser):
     reader.join(timeout=1)
 
 
+# --- OLED spectrum visualizer -----------------------------------------------
+# Taps the real audio the host is playing (PulseAudio's monitor source for
+# the default sink - not a simulation) and streams it to the remote as
+# "VU:<16 comma-separated 0-63 levels>" at ~15fps. Linux + PulseAudio +
+# numpy only; anywhere else this quietly no-ops and the remote just shows
+# its normal PLAY text screen. ponytail: gain is a fixed guess (VU_GAIN),
+# not calibrated against real playback levels - retune if bars run pinned
+# at 63 or barely move.
+VU_BARS = 16
+VU_RATE_HZ = 15
+VU_SAMPLE_RATE = 22050
+VU_GAIN = 350
+
+
+def _pulse_default_monitor():
+    try:
+        sink = subprocess.run(["pactl", "get-default-sink"], capture_output=True,
+                              text=True, timeout=2).stdout.strip()
+    except Exception:
+        return None
+    return f"{sink}.monitor" if sink else None
+
+
+def _vu_loop(ser, stop_event, pause_event):
+    monitor = _pulse_default_monitor()
+    if not monitor:
+        return
+    chunk_samples = max(256, VU_SAMPLE_RATE // VU_RATE_HZ)
+    chunk_bytes = chunk_samples * 2  # s16le, mono
+    try:
+        proc = subprocess.Popen(
+            ["parec", "--format=s16le", f"--rate={VU_SAMPLE_RATE}", "--channels=1", "-d", monitor],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return
+    try:
+        window = _np.hanning(chunk_samples)
+        freqs = _np.fft.rfftfreq(chunk_samples, d=1.0 / VU_SAMPLE_RATE)
+        # Log-spaced band edges so bass doesn't dominate a single FFT bin and
+        # treble isn't crammed into the last one - each bar gets a roughly
+        # equal-feeling slice of the spectrum instead of a linear split.
+        edges = _np.searchsorted(freqs, _np.geomspace(40, VU_SAMPLE_RATE / 2, VU_BARS + 1))
+        while not stop_event.is_set():
+            raw = proc.stdout.read(chunk_bytes)
+            if len(raw) < chunk_bytes:
+                if proc.poll() is not None:
+                    break
+                continue
+            if pause_event.is_set():
+                continue
+            samples = _np.frombuffer(raw, dtype=_np.int16).astype(_np.float32) / 32768.0
+            spectrum = _np.abs(_np.fft.rfft(samples * window))
+            levels = []
+            for i in range(VU_BARS):
+                lo, hi = edges[i], max(edges[i + 1], edges[i] + 1)
+                band = spectrum[lo:hi]
+                mag = float(band.max()) if band.size else 0.0
+                levels.append(min(63, int(mag * VU_GAIN)))
+            send(ser, "VU:" + ",".join(str(v) for v in levels))
+    finally:
+        discstation_burn.stop_process(proc)
+
+
+def start_vu_visualizer(ser):
+    """Best-effort: returns (stop_event, pause_event), or (None, None) if the
+    visualizer can't run here (no numpy, no PulseAudio, or a web-only link)."""
+    if _np is None or isinstance(ser, VirtualSerial) or discstation_host.system_name() != "linux":
+        return None, None
+    stop_event = threading.Event()
+    pause_event = threading.Event()
+    threading.Thread(target=_vu_loop, args=(ser, stop_event, pause_event), daemon=True).start()
+    return stop_event, pause_event
+
+
 def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
     try:
         os.unlink(MPV_SOCKET)
@@ -3324,6 +3403,7 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
     # socket, so none of that output is wanted.
     proc = subprocess.Popen(run_as_desktop_user(cmd), env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    vu_stop = None
 
     try:
         if not wait_for_socket(MPV_SOCKET, proc):
@@ -3343,6 +3423,7 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
         send(ser, "PLAY_MODE:AUDIO_CD" if kind == "audio_cd" else "PLAY_MODE:DEFAULT")
         send(ser, "PLAY:PLAYING")
         print(f"{label}. Short press toggles pause; long press stops.")
+        vu_stop, vu_pause = start_vu_visualizer(ser)
 
         last_ping = time.time()
         while proc.poll() is None:
@@ -3375,6 +3456,8 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
                     paused = not paused
                     mpv_command(["set_property", "pause", paused])
                     mpv_command(["set_property", "speed", 1.0])
+                    if vu_pause:
+                        vu_pause.set() if paused else vu_pause.clear()
                     send(ser, "PLAY_STATUS:PAUSED" if paused else "PLAY_STATUS:PLAYING")
 
                 elif line in ("PLAY_STOP", "EJECT"):
@@ -3447,6 +3530,8 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None):
 
             time.sleep(0.05)
     finally:
+        if vu_stop:
+            vu_stop.set()
         if proc.poll() is None:
             discstation_burn.stop_process(proc)
         try:

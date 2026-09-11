@@ -41,6 +41,9 @@
 #define SAVER_FRAME_MS   90      // screensaver frame interval (~11fps)
 #define PING_TIMEOUT_MS  30000
 
+#define VU_BARS       16   // must match the host's VU: band count
+#define VU_TIMEOUT_MS 400  // no VU: update this long -> host isn't sending (paused/stopped), fall back to text
+
 #define WIFI_RESET_HOLD_MS      10000  // hold SELECT this long on HOME to wipe Wi-Fi creds
 #define WIFI_CONNECT_TIMEOUT_MS 18000  // give a stored-creds join this long before falling to the portal
 #define WIFI_RETRY_MS           15000  // if a live link drops, force a re-join after this
@@ -86,6 +89,7 @@ private:
 
 void drawSetup();       // fwd decls (defined with the other draw* below)
 void drawWifiReset();
+void drawPlayVisualizer();
 
 String deviceSuffix() {
   uint8_t mac[6];
@@ -257,6 +261,14 @@ bool displayBlank = false;          // true = real UI hidden, disc screensaver r
 unsigned long lastSaverFrame = 0;
 int saverStep = 0;
 bool audioPlayMode = false;
+
+// Spectrum visualizer: host streams real playback levels as "VU:v0,v1,...".
+// While they keep arriving, PLAY shows full-screen bars instead of the usual
+// status text; VU_TIMEOUT_MS after they stop (paused/stopped host-side) it
+// falls back to the normal drawPlay() screen.
+uint8_t vuLevel[VU_BARS];
+bool visualizerActive = false;
+unsigned long lastVuAt = 0;
 int displayRotation = 0;
 
 // Indeterminate progress animation
@@ -593,13 +605,36 @@ bool wakeDisplay() {
     case UI_STATUS: drawStatus(); break;
     case UI_IP: drawIP(); break;
     case UI_BURN_READY: drawBurnReady(); break;
-    case UI_PLAY: drawPlay(); break;
+    case UI_PLAY:
+      if (visualizerActive && (long)(millis() - lastVuAt) < VU_TIMEOUT_MS) drawPlayVisualizer();
+      else drawPlay();
+      break;
     case UI_WAITING: drawWaiting(); break;
     case UI_STANDBY: drawStandby(); break;
     case UI_DISCONNECTED: drawDisconnected(); break;
     case UI_SETUP: drawSetup(); break;
   }
   return true;
+}
+
+// Full-screen spectrum bars, no header/chrome - maximizes bar height using
+// the whole 128x64 panel. Falls back to the normal drawPlay() text screen
+// once VU: updates stop arriving (see VU_TIMEOUT_MS in loop()).
+void drawPlayVisualizer() {
+  uiState = UI_PLAY;
+  returnToHomeAt = 0;
+  if (!displayOk) return;
+
+  display.clearDisplay();
+  const int gap = 2;
+  const int barW = (SCREEN_WIDTH - gap * (VU_BARS - 1)) / VU_BARS;
+  int x = (SCREEN_WIDTH - (barW * VU_BARS + gap * (VU_BARS - 1))) / 2;
+  for (int i = 0; i < VU_BARS; i++) {
+    int h = map(vuLevel[i], 0, 63, 0, SCREEN_HEIGHT);
+    if (h > 0) display.fillRect(x, SCREEN_HEIGHT - h, barW, h, SSD1306_WHITE);
+    x += barW + gap;
+  }
+  display.display();
 }
 
 void drawPlay() {
@@ -638,6 +673,28 @@ void parseMessage(String msg) {
     lastMsgTime = millis();
     Out.println("PONG");
     if (uiState == UI_DISCONNECTED) drawStandby();
+    return;
+  }
+
+  if (msg.startsWith("VU:")) {
+    // No wakeDisplay()/RCV echo here - this arrives ~15x/sec while playing,
+    // wakeDisplay() would draw stale bars a frame early, and echoing it
+    // would spam the serial log for no reason.
+    lastMsgTime = millis();
+    String rest = msg.substring(3);
+    for (int i = 0; i < VU_BARS; i++) vuLevel[i] = 0;
+    for (int i = 0; i < VU_BARS && rest.length() > 0; i++) {
+      int comma = rest.indexOf(',');
+      String tok = (comma < 0) ? rest : rest.substring(0, comma);
+      vuLevel[i] = (uint8_t)constrain(tok.toInt(), 0, 63);
+      if (comma < 0) break;
+      rest = rest.substring(comma + 1);
+    }
+    visualizerActive = true;
+    lastVuAt = millis();
+    lastInputTime = millis();   // the visualizer's own continuous redraw already beats the
+                                 // power-bank shutoff - no need for the screensaver too
+    if (uiState == UI_PLAY) drawPlayVisualizer();
     return;
   }
 
@@ -1193,6 +1250,12 @@ void loop() {
     lastIndeterminateAnim = millis();
     indeterminateCount = (indeterminateCount % 4) + 1;
     if (!displayBlank) drawStatus();
+  }
+
+  // --- Visualizer timeout: host stopped sending VU: (paused/stopped) ---
+  if (visualizerActive && (long)(millis() - lastVuAt) >= VU_TIMEOUT_MS) {
+    visualizerActive = false;
+    if (uiState == UI_PLAY && !displayBlank) drawPlay();
   }
 
   // --- Idle disc screensaver (HOME + STANDBY + PLAY) ---
