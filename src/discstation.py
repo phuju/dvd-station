@@ -128,6 +128,13 @@ class TcpSerial:
             if p.isdigit():
                 port = int(p)
         self._sock = socket.create_connection((host, port), timeout=connect_timeout)
+        # Nagle's algorithm is on by default and holds back small writes hoping
+        # to coalesce them - the visualizer sends a ~30-50 byte VU: frame ~15x/sec,
+        # exactly the pattern that gets delayed (commonly ~200ms with delayed-ACK
+        # on the other end), which read as visualizer lag over Wi-Fi even though
+        # the visualizer itself was untouched. Never an issue on the USB path,
+        # which isn't TCP at all.
+        self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._sock.settimeout(0.05)
         self._buf = b""
         self._lock = threading.Lock()
