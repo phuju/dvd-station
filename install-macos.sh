@@ -28,7 +28,7 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 
 brew install python ffmpeg cdrdao dvdauthor node yt-dlp xorriso mpv libdiscid handbrake \
-  libdvdcss dvdbackup libcdio-paranoia
+  libdvdcss dvdbackup libcdio-paranoia blackhole-2ch
 mkdir -p "$APP_DIR" "$VENV_DIR" "$CONFIG_DIR"
 cp -R "$ROOT_DIR/src/." "$APP_DIR/"
 python3 -m venv "$VENV_DIR"
@@ -40,9 +40,12 @@ else
 fi
 # Optional metadata deps — best effort. python-libdiscid (a C extension) is
 # Linux-only in requirements-optional.txt; on macOS install the pure-Python
-# bits and let brew's libdiscid cover disc IDs via the CLI tools.
+# bits and let brew's libdiscid cover disc IDs via the CLI tools. numpy is
+# for the OLED spectrum visualizer (needs the blackhole-2ch brew package
+# above too, plus a one-time Multi-Output Device setup - see
+# docs/PLATFORM_SUPPORT.md).
 if [[ -f "$ROOT_DIR/requirements-optional.txt" ]]; then
-  "$VENV_DIR/bin/python" -m pip install musicbrainzngs tmdbsimple \
+  "$VENV_DIR/bin/python" -m pip install musicbrainzngs tmdbsimple numpy \
     || printf 'Optional metadata deps skipped (host still works).\n'
 fi
 

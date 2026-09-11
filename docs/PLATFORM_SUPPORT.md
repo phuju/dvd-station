@@ -27,6 +27,22 @@ Set `DISC_DEVICE` if automatic drive detection fails. The one known limitation
 is **audio-CD *burning*** — `cdrdao` is the only option and often cannot claim
 the drive on recent macOS; DiscStation reports this clearly instead of hanging.
 
+### ESP32 remote: OLED spectrum visualizer
+
+The visualizer needs a one-time manual setup, since macOS has no built-in
+way to tap "whatever's currently playing" the way Linux's PulseAudio does:
+
+1. `brew install blackhole-2ch` (done automatically by `install-macos.sh`).
+2. Open **Audio MIDI Setup** (in Applications/Utilities), click **+** →
+   **Create Multi-Output Device**, and check both **BlackHole 2ch** and your
+   real output (speakers/headphones).
+3. In **System Settings → Sound**, set that Multi-Output Device as the
+   default output. Audio stays audible (routed to your real device) and is
+   simultaneously tapped (via BlackHole) for the visualizer's FFT.
+
+Without this setup the visualizer silently does nothing and PLAY just shows
+its normal text screen — nothing else is affected.
+
 ## Windows
 
 Runs the same Python host and web UI as Linux/macOS, triggered the same way

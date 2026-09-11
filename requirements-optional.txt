@@ -13,7 +13,10 @@ python-libdiscid>=2.0 ; sys_platform == "linux"
 musicbrainzngs>=0.7.1
 tmdbsimple>=2.9
 
-# OLED spectrum visualizer during playback (Linux + PulseAudio only; needs
-# `parec`/`pactl`, from the pulseaudio-utils apt package). Prefer
-# python3-numpy via apt - pip installs are blocked on a system Python here.
-numpy>=1.24 ; sys_platform == "linux"
+# OLED spectrum visualizer during playback. Linux needs `parec`/`pactl`
+# (pulseaudio-utils apt package) - prefer python3-numpy via apt there, pip
+# installs are blocked on a system Python. macOS needs the BlackHole
+# loopback driver (brew install blackhole-2ch, see docs/PLATFORM_SUPPORT.md
+# for the one-time Multi-Output Device setup); numpy installs fine via pip
+# there since install-macos.sh's venv isn't externally-managed.
+numpy>=1.24 ; sys_platform == "linux" or sys_platform == "darwin"
