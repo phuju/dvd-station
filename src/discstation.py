@@ -3309,13 +3309,13 @@ def _iter_proc_lines(proc, ser):
 # the default sink - not a simulation) and streams it to the remote as
 # "VU:<16 comma-separated 0-63 levels>" at ~15fps. Linux + PulseAudio +
 # numpy only; anywhere else this quietly no-ops and the remote just shows
-# its normal PLAY text screen. ponytail: gain is a fixed guess (VU_GAIN),
-# not calibrated against real playback levels - retune if bars run pinned
-# at 63 or barely move.
+# its normal PLAY text screen.
 VU_BARS = 16   # must match the firmware's VU_BARS
 VU_RATE_HZ = 15
 VU_SAMPLE_RATE = 22050
-VU_GAIN = 350
+VU_DB_FLOOR = -40      # dB below the adaptive reference that maps to a flat bar
+VU_REF_DECAY = 0.995   # per-frame relaxation of the reference level (~a few sec to settle down)
+VU_PEAK_DECAY = 4      # bar units/frame a peak falls by when nothing louder follows
 
 
 def _pulse_default_monitor():
@@ -3352,6 +3352,8 @@ def _vu_loop(ser, stop_event, pause_event):
         # treble isn't crammed into the last one - each bar gets a roughly
         # equal-feeling slice of the spectrum instead of a linear split.
         edges = _np.searchsorted(freqs, _np.geomspace(40, VU_SAMPLE_RATE / 2, VU_BARS + 1))
+        ref_level = 1e-6   # adaptive "how loud is this track" reference (see VU_REF_DECAY)
+        shown = [0.0] * VU_BARS   # last drawn height per bar, for the peak-decay fall-off
         while not stop_event.is_set():
             raw = proc.stdout.read(chunk_bytes)
             if len(raw) < chunk_bytes:
@@ -3362,12 +3364,27 @@ def _vu_loop(ser, stop_event, pause_event):
                 continue
             samples = _np.frombuffer(raw, dtype=_np.int16).astype(_np.float32) / 32768.0
             spectrum = _np.abs(_np.fft.rfft(samples * window))
-            levels = []
+            mags = []
             for i in range(VU_BARS):
                 lo, hi = edges[i], max(edges[i + 1], edges[i] + 1)
                 band = spectrum[lo:hi]
-                mag = float(band.max()) if band.size else 0.0
-                levels.append(min(63, int(mag * VU_GAIN)))
+                mags.append(float(band.max()) if band.size else 0.0)
+            # A fixed linear gain can't win: whatever multiplier shows motion at
+            # quiet volume clips solid at 63 the moment the mix gets loud/dense.
+            # Track a slowly-adapting reference level instead and scale in dB
+            # relative to it, so "loud" always means "near this track's own
+            # ceiling" rather than one guessed constant for every track/volume.
+            ref_level = max(max(mags, default=0.0), ref_level * VU_REF_DECAY, 1e-6)
+            levels = []
+            for i, mag in enumerate(mags):
+                db = 20 * float(_np.log10(mag / ref_level + 1e-9))
+                target = max(0.0, min(63.0, (db - VU_DB_FLOOR) * 63.0 / -VU_DB_FLOOR))
+                # Peak-with-decay: jump straight up to a new peak, fall a few
+                # units/frame otherwise - the classic VU-meter look, and it's
+                # what keeps a held loud note visibly settling instead of
+                # looking stuck once it's louder than the decaying reference.
+                shown[i] = target if target > shown[i] else max(0.0, shown[i] - VU_PEAK_DECAY)
+                levels.append(int(shown[i]))
             send(ser, "VU:" + ",".join(str(v) for v in levels))
     finally:
         discstation_burn.stop_process(proc)
