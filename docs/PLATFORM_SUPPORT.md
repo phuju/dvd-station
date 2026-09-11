@@ -43,6 +43,18 @@ way to tap "whatever's currently playing" the way Linux's PulseAudio does:
 Without this setup the visualizer silently does nothing and PLAY just shows
 its normal text screen — nothing else is affected.
 
+### Troubleshooting playback ("mpv not found" / play fails to start)
+
+- **`install-macos.sh` installs `mpv` via Homebrew** — if playback fails to
+  start, confirm it actually landed: `mpv --version` in Terminal. If that
+  fails, either the installer never ran to completion or was interrupted;
+  re-run `install-macos.sh` (or `discstation-setup`) rather than installing
+  `mpv` in isolation, since other steps may be incomplete too.
+- **Apple Music auto-opening on disc insert can hold the drive**, so
+  DiscStation's own `mpv` can fail or hang trying to claim it right after.
+  System Settings → **CDs & DVDs** (only shown with an optical drive
+  connected) → set "When you insert a music CD" to **Ignore**.
+
 ## Windows
 
 Runs the same Python host and web UI as Linux/macOS, triggered the same way
