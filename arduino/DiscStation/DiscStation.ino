@@ -35,7 +35,9 @@
 #define ENC_DEBOUNCE_US 2000     // ignore encoder interrupts closer together than this (contact bounce)
 #define DONE_RESET_MS    30000
 #define STANDBY_BLANK_MS 60000
-#define IDLE_BLANK_MS    45000   // no input this long on HOME/STANDBY -> spinning-disc screensaver
+#define IDLE_BLANK_MS    15000   // no input this long on HOME/STANDBY -> spinning-disc screensaver
+                                 // (this power bank's no-load auto-shutoff trips at ~30s idle; keep this
+                                 // well under that so the screensaver's current draw beats it there)
 #define SAVER_FRAME_MS   90      // screensaver frame interval (~11fps)
 #define PING_TIMEOUT_MS  30000
 
