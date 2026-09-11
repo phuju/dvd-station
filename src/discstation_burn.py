@@ -1627,9 +1627,15 @@ def burn_audio_cd(ser, audio_files, disc_label, speed=None):
         try:
             for line in iter_proc_or_cancel(proc, ser):
                 lines.append(line)
-                m = re.search(r'(\d+)\s*%', line)
-                if m:
-                    pct = 35 + int(int(m.group(1)) * 0.65)
+                # "Wrote 12 of 650 MB (Buffers 99%  100%)." is the real write
+                # progress - matching on the first bare NN% instead (as this
+                # used to) grabs the *buffer fill* percentage, which BURN-Proof
+                # holds near 100% for virtually the whole burn, so the OLED
+                # jumped straight from "Converting" to 100% and sat there.
+                m = re.search(r'Wrote\s+(\d+)\s+of\s+(\d+)\s+MB', line)
+                if m and int(m.group(2)) > 0:
+                    frac = int(m.group(1)) / int(m.group(2))
+                    pct = 35 + int(frac * 65)
                     now = time.time()
                     if now - last_prog >= 0.2:
                         send(ser, f"PROGRESS:{pct}%")
