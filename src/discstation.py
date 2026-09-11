@@ -3312,7 +3312,7 @@ def _iter_proc_lines(proc, ser):
 # its normal PLAY text screen. ponytail: gain is a fixed guess (VU_GAIN),
 # not calibrated against real playback levels - retune if bars run pinned
 # at 63 or barely move.
-VU_BARS = 16
+VU_BARS = 8   # must match the firmware's VU_BARS
 VU_RATE_HZ = 15
 VU_SAMPLE_RATE = 22050
 VU_GAIN = 350

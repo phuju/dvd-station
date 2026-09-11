@@ -41,7 +41,7 @@
 #define SAVER_FRAME_MS   90      // screensaver frame interval (~11fps)
 #define PING_TIMEOUT_MS  30000
 
-#define VU_BARS       16   // must match the host's VU: band count
+#define VU_BARS       8    // must match the host's VU: band count
 #define VU_TIMEOUT_MS 1200 // no VU: update this long -> host isn't sending (paused/stopped), fall back to text
                            // (generous on purpose: the host's capture thread can jitter under load on a Pi -
                            // too tight and normal jitter flickers between bars and the text screen)
@@ -870,6 +870,8 @@ void setup() {
   Serial.begin(115200);
   esp_task_wdt_add(NULL);
   Wire.begin(21, 22);
+  Wire.setClock(400000);   // SSD1306 supports I2C fast-mode; the default 100kHz was too slow to
+                           // push a full 128x64 frame at the visualizer's ~15fps without stutter
   pinMode(BTN_EJECT_PIN, INPUT_PULLUP);
   pinMode(BTN_HOME_PIN, INPUT_PULLUP);
   pinMode(BTN_PLAYPAUSE_PIN, INPUT_PULLUP);
