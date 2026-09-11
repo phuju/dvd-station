@@ -1106,6 +1106,24 @@ void handlePlayPauseButton(bool longPress) {
   }
 }
 
+// Drains every line currently buffered on a link in one go instead of one
+// per loop() call. VU: frames arrive fast enough (~15/sec) that drawing each
+// one in turn made the display fall further and further behind real-time
+// once a single draw took longer than the send interval - only the last VU:
+// seen in a batch is kept/rendered, so the visualizer always shows "now"
+// instead of working through a backlog. Every other message type still gets
+// parsed in order; only VU: is collapsible like this.
+void drainAndDispatch(Stream &s) {
+  String pendingVu = "";
+  while (s.available()) {
+    String msg = s.readStringUntil('\n');
+    if (msg.length() == 0) continue;
+    if (msg.startsWith("VU:")) pendingVu = msg;
+    else parseMessage(msg);
+  }
+  if (pendingVu.length() > 0) parseMessage(pendingVu);
+}
+
 void loop() {
   if (!wifiInitDone && millis() > 3000) {
     wifiInitDone = true;
@@ -1148,15 +1166,13 @@ void loop() {
       Out.setClient(nullptr);
     }
     if (tcpClient && tcpClient.available()) {
-      String msg = tcpClient.readStringUntil('\n');
-      if (msg.length() > 0) parseMessage(msg);
+      drainAndDispatch(tcpClient);
     }
   }
 
   esp_task_wdt_reset();
   if (Serial.available()) {
-    String msg = Serial.readStringUntil('\n');
-    parseMessage(msg);
+    drainAndDispatch(Serial);
   }
 
   if (returnToHomeAt != 0 && (long)(millis() - returnToHomeAt) >= 0) {
