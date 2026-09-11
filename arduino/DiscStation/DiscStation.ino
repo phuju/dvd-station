@@ -45,6 +45,8 @@
 #define VU_TIMEOUT_MS 1200 // no VU: update this long -> host isn't sending (paused/stopped), fall back to text
                            // (generous on purpose: the host's capture thread can jitter under load on a Pi -
                            // too tight and normal jitter flickers between bars and the text screen)
+#define VU_ENTRY_DELAY_MS  10000  // stay on the text status screen this long after entering PLAY
+#define VU_RESUME_DELAY_MS  7000  // ...and this long after any input while already in PLAY
 
 #define WIFI_RESET_HOLD_MS      10000  // hold SELECT this long on HOME to wipe Wi-Fi creds
 #define WIFI_CONNECT_TIMEOUT_MS 18000  // give a stored-creds join this long before falling to the portal
@@ -271,6 +273,7 @@ bool audioPlayMode = false;
 uint8_t vuLevel[VU_BARS];
 bool visualizerActive = false;
 unsigned long lastVuAt = 0;
+unsigned long vuSuppressUntil = 0;   // bars withheld (text screen shown instead) until millis() reaches this
 int displayRotation = 0;
 
 // Indeterminate progress animation
@@ -608,7 +611,8 @@ bool wakeDisplay() {
     case UI_IP: drawIP(); break;
     case UI_BURN_READY: drawBurnReady(); break;
     case UI_PLAY:
-      if (visualizerActive && (long)(millis() - lastVuAt) < VU_TIMEOUT_MS) drawPlayVisualizer();
+      if (visualizerActive && (long)(millis() - lastVuAt) < VU_TIMEOUT_MS &&
+          (long)(millis() - vuSuppressUntil) >= 0) drawPlayVisualizer();
       else drawPlay();
       break;
     case UI_WAITING: drawWaiting(); break;
@@ -700,7 +704,7 @@ void parseMessage(String msg) {
     lastVuAt = millis();
     lastInputTime = millis();   // the visualizer's own continuous redraw already beats the
                                  // power-bank shutoff - no need for the screensaver too
-    if (uiState == UI_PLAY) drawPlayVisualizer();
+    if (uiState == UI_PLAY && (long)(millis() - vuSuppressUntil) >= 0) drawPlayVisualizer();
     return;
   }
 
@@ -760,6 +764,7 @@ void parseMessage(String msg) {
     line1 = msg.substring(5);
     line2 = "Playing disc";
     playSeekMode = false;          // always start in volume mode
+    vuSuppressUntil = millis() + VU_ENTRY_DELAY_MS;   // text screen first, bars after a beat
     Out.print("POT:");             // push the last-used volume so playback starts at it
     Out.println(playVolume);
     drawPlay();
@@ -972,6 +977,7 @@ void handleSelectPress(bool longPress) {
     drawStandby();
 
   } else if (uiState == UI_PLAY) {
+    vuSuppressUntil = millis() + VU_RESUME_DELAY_MS;   // any PLAY input -> back to text for a beat
     if (longPress) {
       Out.println("PLAY_STOP");
     } else {
@@ -1011,6 +1017,7 @@ void handleEncoderCW() {
     displayRotation = 2;
     drawStandby();
   } else if (uiState == UI_PLAY) {
+    vuSuppressUntil = millis() + VU_RESUME_DELAY_MS;   // any PLAY input -> back to text for a beat
     if (!playSeekMode) {
       playVolume = min(100, playVolume + 5);
       Out.print("POT:");
@@ -1048,6 +1055,7 @@ void handleEncoderCCW() {
     displayRotation = 0;
     drawStandby();
   } else if (uiState == UI_PLAY) {
+    vuSuppressUntil = millis() + VU_RESUME_DELAY_MS;   // any PLAY input -> back to text for a beat
     if (!playSeekMode) {
       playVolume = max(0, playVolume - 5);
       Out.print("POT:");
@@ -1092,6 +1100,7 @@ void handlePlayPauseButton(bool longPress) {
   if (wakeDisplay()) { lastInputTime = millis(); return; }
   lastInputTime = millis();
   if (uiState == UI_PLAY) {
+    vuSuppressUntil = millis() + VU_RESUME_DELAY_MS;   // any PLAY input -> back to text for a beat
     Out.println(longPress ? "PLAY_STOP" : "PLAY_BUTTON");
   } else if (uiState == UI_HOME && !longPress) {
     bool hasPlay = false;
