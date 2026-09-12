@@ -50,7 +50,7 @@ if [[ -f "$ROOT_DIR/requirements-optional.txt" ]]; then
 fi
 
 DISC_DEVICE="${DISC_DEVICE:-}"
-DISC_PORT="${DISC_PORT:-$(ls /dev/cu.usbserial-* /dev/cu.usbmodem-* 2>/dev/null | head -1)}"
+DISC_PORT="${DISC_PORT:-$(ls /dev/cu.usbserial-* /dev/cu.usbmodem-* 2>/dev/null | head -1 || true)}"
 
 if [[ ! -f "$CONFIG_DIR/server.crt" || ! -f "$CONFIG_DIR/server.key" ]]; then
   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
