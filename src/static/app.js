@@ -92,6 +92,10 @@
   function applyRemoteState(progress) {
     const hardware = progress.appliance === "hardware";
     if (hardware && !$("remote-panel").hidden) setRemoteVisible(false, true);
+    // Software mode has no other control surface at all - don't make it
+    // opt-in-via-logo-click to discover the only way to actually use the
+    // appliance. Only forces it open (never closes it back on the user).
+    if (!hardware && $("remote-panel").hidden) setRemoteVisible(true, true);
     $("remote-note").textContent = hardware
       ? "A physical remote is attached — on-screen controls are disabled."
       : "No physical remote detected — control DiscStation from here.";
@@ -141,11 +145,25 @@
     volumeTimer = setTimeout(() => sendRemoteCmd(`POT:${value}`), 150);
   });
 
+  // Mode-select buttons this server-computed list governs - CANCEL/EJECT are
+  // controls, not modes, and stay available regardless (same as hardware).
+  const MENU_MODES = ["BURN", "BURN DATA", "BURN AUDIO", "RIP", "PLAY"];
+
+  function applyMenuItems(items) {
+    if (!items) return;                    // unknown (fetch error, etc.) - leave as-is
+    const allowed = new Set(items);
+    MENU_MODES.forEach((mode) => {
+      const btn = document.querySelector(`#remote-controls [data-cmd="SELECT:${mode}"]`);
+      if (btn) btn.hidden = !allowed.has(mode);
+    });
+  }
+
   async function loadDiscInfo() {
     try {
       const response = await fetch("/disc-info", { cache: "no-store" });
       const info = await response.json();
       renderDiscStatus(info);
+      applyMenuItems(info.menu_items);
       if (info.busy) return;               // burn/rip in progress — keep current
       state.discBytes = Number(info.capacity_bytes || 0);
       state.discType = info.type || "none";

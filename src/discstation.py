@@ -304,7 +304,14 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         _burn_url_queue.put(str(upload_dir))
         size_str = f"{total / 1e6:.1f}MB" if total > 1e6 else f"{total / 1e3:.0f}KB"
         _set_web_progress("UPLOAD READY", 100)
-        self._respond(200, f'{len(files)} file(s) uploaded ({size_str}). Select BURN DATA on remote.')
+        # Used to hardcode "Select BURN DATA on remote" - wrong mode name for
+        # an audio upload, and assumes hardware that may not exist. A mode
+        # may also already be selected (the one-click remote flow queues the
+        # burn before upload finishes), so this is just a status line, not
+        # an instruction to a specific next step.
+        tip = ("Select a mode on your remote." if _appliance_mode == "hardware"
+               else "Choose a burn mode below to start.")
+        self._respond(200, f'{len(files)} file(s) uploaded ({size_str}). {tip}')
 
     def _handle_remote_button(self):
         """Web on-screen remote -> the exact same text-line protocol the
@@ -327,7 +334,9 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_disc_info(self):
         if _operation_active:
             # a burn/rip/play holds the drive — don't probe it, serve last-known.
-            self._respond(200, json.dumps({**_last_disc_info, "busy": True, "appliance": _appliance_mode}), "application/json")
+            # menu_items empty: don't invite starting a second op on top of
+            # the one already running (CANCEL/EJECT stay available regardless).
+            self._respond(200, json.dumps({**_last_disc_info, "busy": True, "menu_items": [], "appliance": _appliance_mode}), "application/json")
             return
         info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
         try:
@@ -344,6 +353,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 info["type"] = di.web_type
             info["kind"] = di.kind
             info["label"] = di.label
+            info["menu_items"] = menu_items_for_disc(device) if di.present and not di.transient else []
         except Exception as e:
             print(f"Disc info error: {e}")
         info["appliance"] = _appliance_mode
@@ -1879,7 +1889,13 @@ def menu_items_for_disc(device):
     kind = disc_kind(device)
     items = []
     if kind == "blank" or is_rewritable_disc(device):
-        items = ["BURN", "BURN DATA", "BURN AUDIO"]
+        # CD-R/RW can't hold a DVD-video authoring job (nowhere near the
+        # space) and DVD blanks can't take Red Book audio (wrong format
+        # entirely, would just fail) - offer only what's physically possible
+        # for the media that's actually in the drive.
+        props = udev_cdrom_properties(device)
+        is_cd = props.get("ID_CDROM_MEDIA_CD_R") == "1" or props.get("ID_CDROM_MEDIA_CD_RW") == "1"
+        items = ["BURN DATA", "BURN AUDIO"] if is_cd else ["BURN", "BURN DATA"]
         had = discstation_burn.WORK.rglob("movie.mpg")
         if any(True for _ in had):
             items.append("BURN MPG")
