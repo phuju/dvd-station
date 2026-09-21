@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
@@ -25,7 +25,7 @@ import { DARK, DISPLAY, LIGHT, MONO, Palette } from './src/theme';
 import { makeMetrics, Metrics } from './src/responsive';
 import * as api from './src/api';
 import { get, set } from './src/storage';
-import RemoteModal from './src/RemoteModal';
+import RemotePanel from './src/RemotePanel';
 
 const HOST_KEY = 'discstation.host';
 const THEME_KEY = 'discstation.theme';
@@ -77,6 +77,11 @@ function Screen() {
   const [conn, setConn] = useState<Conn>('checking');
   const [prog, setProg] = useState<api.Progress>({ status: 'READY', progress: -1, active: false });
   const [disc, setDisc] = useState<api.DiscInfo | null>(null);
+  // Tracks whether this software-mode session has already auto-opened the
+  // remote once, so a manual COLLAPSE sticks instead of getting overridden
+  // on the next 2s poll tick - reset when hardware appears, so it auto-opens
+  // again if the ESP32 later disconnects.
+  const autoOpenedRef = useRef(false);
 
   // ---- boot: load persisted host + theme -------------------------------------
   useEffect(() => {
@@ -107,9 +112,16 @@ function Screen() {
         // A physical remote showing up mid-session takes over - collapse the
         // on-screen one instead of leaving it open fighting for control.
         // Software mode has no other control surface at all, so open it
-        // automatically rather than leaving it opt-in-only (mirrors
-        // app.js's applyRemoteState on the web remote).
-        setRemoteOpen((open) => (p.appliance === 'hardware' ? false : p.appliance !== undefined ? true : open));
+        // automatically once (not on every poll tick - forcing it open
+        // repeatedly ignored a manual collapse and, back when this was a
+        // blocking Modal, made the burn/upload UI underneath unreachable).
+        if (p.appliance === 'hardware') {
+          autoOpenedRef.current = false;
+          setRemoteOpen(false);
+        } else if (p.appliance !== undefined && !autoOpenedRef.current) {
+          autoOpenedRef.current = true;
+          setRemoteOpen(true);
+        }
       } catch {
         if (!alive) return;
         setConn('offline');
@@ -268,6 +280,16 @@ function Screen() {
             </View>
           ))}
         </View>
+
+        {/* ---- on-screen remote (inline, not a modal - see RemotePanel.tsx) ---- */}
+        <RemotePanel
+          visible={remoteOpen}
+          onClose={() => setRemoteOpen(false)}
+          c={c}
+          m={m}
+          prog={prog}
+          disc={disc}
+        />
 
         {/* ---- burn panel ---- */}
         <View style={[s.panel, s.rule]}>
@@ -469,15 +491,6 @@ function Screen() {
           </View>
         </View>
       </Modal>
-
-      <RemoteModal
-        visible={remoteOpen}
-        onClose={() => setRemoteOpen(false)}
-        c={c}
-        m={m}
-        prog={prog}
-        disc={disc}
-      />
     </View>
   );
 }

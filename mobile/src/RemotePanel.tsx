@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { MONO, Palette } from './theme';
 import { Metrics } from './responsive';
@@ -35,11 +35,20 @@ function discStatusText(disc: api.DiscInfo | null): string {
   return `DISC: ${kind}${label}${size}`;
 }
 
-export default function RemoteModal({ visible, onClose, c, m, prog, disc }: Props) {
+// Inline section, not a modal - it used to be a full-screen Modal overlay,
+// which blocked the burn/upload UI underneath it entirely. Combined with
+// auto-opening in software mode (the only control surface with no ESP32
+// attached), that meant the burn tab was unreachable: closing the modal
+// just got overridden again on the next status poll. Rendered inline like
+// the web remote's panel instead - it can stay open alongside the rest of
+// the page without blocking anything.
+export default function RemotePanel({ visible, onClose, c, m, prog, disc }: Props) {
   const s = makeStyles(c, m);
   const [volume, setVolume] = useState(70);
   const hardware = prog.appliance === 'hardware';
   const trayOpen = !!prog.tray_open;
+
+  if (!visible) return null;
 
   const send = (cmd: string) => {
     if (hardware) return;
@@ -69,104 +78,99 @@ export default function RemoteModal({ visible, onClose, c, m, prog, disc }: Prop
   };
 
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={s.modalWrap}>
-        <View style={s.modalCard}>
+    <View style={[s.panel, s.rule]}>
+      <View style={s.panelHead}>
+        <View style={{ flexShrink: 1 }}>
           <Text style={s.kicker}>ON-SCREEN REMOTE</Text>
-          <Text style={s.h2Small}>CONTROL SURFACE</Text>
-          <Text style={s.fieldNote}>
-            {hardware
-              ? 'A physical remote is attached — on-screen controls are disabled.'
-              : 'No physical remote detected — control DiscStation from here.'}
-          </Text>
-          <View style={s.discStatus}>
-            <Text style={s.discStatusText}>{discStatusText(disc)}</Text>
-          </View>
-
-          <View style={s.grid}>
-            {visibleModeButtons.map(([label, cmd]) => (
-              <Pressable
-                key={cmd}
-                style={[s.gridBtn, hardware && s.btnDisabled]}
-                onPress={() => sendMode(cmd)}
-                disabled={hardware}
-              >
-                <Text style={s.gridBtnText}>{label}</Text>
-              </Pressable>
-            ))}
-            <Pressable
-              style={[s.gridBtn, hardware && s.btnDisabled]}
-              onPress={() => send('CANCEL')}
-              disabled={hardware}
-            >
-              <Text style={s.gridBtnText}>CANCEL / HOME</Text>
-            </Pressable>
-            <Pressable
-              style={[s.gridBtn, hardware && s.btnDisabled]}
-              onPress={() => send(trayOpen ? 'CONFIRM' : 'EJECT')}
-              disabled={hardware}
-            >
-              <Text style={s.gridBtnText}>{trayOpen ? 'CLOSE TRAY' : 'EJECT'}</Text>
-            </Pressable>
-          </View>
-
-          {!!prog.playing && (
-            <View style={s.transport}>
-              <View style={s.grid}>
-                <Pressable style={s.gridBtn} onPress={() => send('REW:BIG')}>
-                  <Text style={s.gridBtnText}>⏮ PREV</Text>
-                </Pressable>
-                <Pressable style={s.gridBtn} onPress={() => send('PLAY_BUTTON')}>
-                  <Text style={s.gridBtnText}>⏯ PLAY/PAUSE</Text>
-                </Pressable>
-                <Pressable style={s.gridBtn} onPress={() => send('FF:BIG')}>
-                  <Text style={s.gridBtnText}>⏭ NEXT</Text>
-                </Pressable>
-                <Pressable style={s.gridBtn} onPress={() => send('PLAY_STOP')}>
-                  <Text style={s.gridBtnText}>⏹ STOP</Text>
-                </Pressable>
-              </View>
-              <Text style={s.fieldLabel}>VOLUME: {volume}</Text>
-              <View style={s.grid}>
-                <Pressable style={s.gridBtn} onPress={() => stepVolume(-10)}>
-                  <Text style={s.gridBtnText}>VOL -</Text>
-                </Pressable>
-                <Pressable style={s.gridBtn} onPress={() => stepVolume(10)}>
-                  <Text style={s.gridBtnText}>VOL +</Text>
-                </Pressable>
-              </View>
-            </View>
-          )}
-
-          <Pressable style={s.linkBtn} onPress={onClose}>
-            <Text style={s.linkBtnText}>CLOSE</Text>
-          </Pressable>
+          <Text style={s.h2}>CONTROL SURFACE</Text>
         </View>
+        <Text style={s.panelIndex}>DISCSTN-02</Text>
       </View>
-    </Modal>
+      <Text style={s.fieldNote}>
+        {hardware
+          ? 'A physical remote is attached — on-screen controls are disabled.'
+          : 'No physical remote detected — control DiscStation from here.'}
+      </Text>
+      <View style={s.discStatus}>
+        <Text style={s.discStatusText}>{discStatusText(disc)}</Text>
+      </View>
+
+      <View style={s.grid}>
+        {visibleModeButtons.map(([label, cmd]) => (
+          <Pressable
+            key={cmd}
+            style={[s.gridBtn, hardware && s.btnDisabled]}
+            onPress={() => sendMode(cmd)}
+            disabled={hardware}
+          >
+            <Text style={s.gridBtnText}>{label}</Text>
+          </Pressable>
+        ))}
+        <Pressable
+          style={[s.gridBtn, hardware && s.btnDisabled]}
+          onPress={() => send('CANCEL')}
+          disabled={hardware}
+        >
+          <Text style={s.gridBtnText}>CANCEL / HOME</Text>
+        </Pressable>
+        <Pressable
+          style={[s.gridBtn, hardware && s.btnDisabled]}
+          onPress={() => send(trayOpen ? 'CONFIRM' : 'EJECT')}
+          disabled={hardware}
+        >
+          <Text style={s.gridBtnText}>{trayOpen ? 'CLOSE TRAY' : 'EJECT'}</Text>
+        </Pressable>
+      </View>
+
+      {!!prog.playing && (
+        <View style={s.transport}>
+          <View style={s.grid}>
+            <Pressable style={s.gridBtn} onPress={() => send('REW:BIG')}>
+              <Text style={s.gridBtnText}>⏮ PREV</Text>
+            </Pressable>
+            <Pressable style={s.gridBtn} onPress={() => send('PLAY_BUTTON')}>
+              <Text style={s.gridBtnText}>⏯ PLAY/PAUSE</Text>
+            </Pressable>
+            <Pressable style={s.gridBtn} onPress={() => send('FF:BIG')}>
+              <Text style={s.gridBtnText}>⏭ NEXT</Text>
+            </Pressable>
+            <Pressable style={s.gridBtn} onPress={() => send('PLAY_STOP')}>
+              <Text style={s.gridBtnText}>⏹ STOP</Text>
+            </Pressable>
+          </View>
+          <Text style={s.fieldLabel}>VOLUME: {volume}</Text>
+          <View style={s.grid}>
+            <Pressable style={s.gridBtn} onPress={() => stepVolume(-10)}>
+              <Text style={s.gridBtnText}>VOL -</Text>
+            </Pressable>
+            <Pressable style={s.gridBtn} onPress={() => stepVolume(10)}>
+              <Text style={s.gridBtnText}>VOL +</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      <Pressable style={s.linkBtn} onPress={onClose}>
+        <Text style={s.linkBtnText}>COLLAPSE</Text>
+      </Pressable>
+    </View>
   );
 }
 
 function makeStyles(c: Palette, m: Metrics) {
   const { ms, sp } = m;
   return StyleSheet.create({
-    modalWrap: {
-      flex: 1,
-      backgroundColor: 'rgba(0,0,0,0.55)',
-      justifyContent: 'center',
-      alignItems: 'center',
-      paddingHorizontal: m.gutter,
+    panel: { paddingVertical: sp(20) },
+    rule: { borderBottomWidth: 1, borderBottomColor: c.softLine },
+    panelHead: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'flex-start',
+      marginBottom: sp(10),
     },
-    modalCard: {
-      backgroundColor: c.paper,
-      borderWidth: 1,
-      borderColor: c.ink,
-      padding: sp(20),
-      width: '100%',
-      maxWidth: 460,
-    },
+    panelIndex: { color: c.muted, fontFamily: MONO, fontSize: ms(10), letterSpacing: 1 },
     kicker: { color: c.ink, fontFamily: MONO, fontSize: ms(10), fontWeight: '700', letterSpacing: 1.6 },
-    h2Small: {
+    h2: {
       color: c.ink,
       fontFamily: MONO,
       fontSize: ms(20),
