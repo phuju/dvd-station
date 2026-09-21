@@ -154,10 +154,11 @@ self-signed cert. On startup the host prints the LAN URL to open
 ## Mobile App
 
 The `mobile/` Expo app (enter the host's LAN address in its settings screen)
-has the same on-screen remote as the web UI — mode buttons, EJECT/CLOSE,
-disc status, and playback transport, tapped from the "REMOTE" tag next to
-the wordmark. Same auto-collapse behavior when a physical ESP32 shows up,
-same underlying `/remote/button` protocol.
+has the same on-screen remote as the web UI, rendered inline in the main
+screen rather than a popup — same "REMOTE" tag toggle, opens automatically
+with no ESP32 attached, mode buttons filtered to what the disc actually
+supports, and picking one starts it directly. Same auto-collapse behavior
+when a physical ESP32 shows up, same underlying `/remote/button` protocol.
 
 ## Disc Support
 
