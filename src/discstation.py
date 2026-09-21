@@ -1074,10 +1074,16 @@ def eject_disc(ser, device):
         _tray_open = True
         _tray_open_since = time.monotonic()
         safe_send(ser, "WAITING:Press SELECT/to close tray")
+        # WAITING: isn't in _record_web_status()'s prefix whitelist, so the
+        # send above never reaches the web page - _tray_open has to be
+        # published explicitly here, same as DISC: gets its own dedicated
+        # publish for the same reason.
+        _sse_publish(_status_snapshot())
         last_ping = time.time()
         deadline = time.time() + 60
         tray_was_cancelled = False
         last_status_check = 0
+        closed_confirms = 0
         # Let the eject settle before touching the drive again (the reclose guard).
         settle_until = time.time() + 3
         while time.time() < deadline:
@@ -1087,9 +1093,20 @@ def eject_disc(ser, device):
             if time.time() >= settle_until and time.time() - last_status_check >= 1.5:
                 last_status_check = time.time()
                 if drive_status(device) in ("disc", "no_disc"):
-                    print("Tray closed — continuing")
-                    _tray_open = False
-                    break
+                    # This USB-ATAPI bridge's status reporting is known flaky
+                    # (see udev_cdrom_properties' own docstring) - one read
+                    # right after an eject was seen live to falsely report
+                    # closed, reclosing the wait loop within ~11s of a real
+                    # eject. Require two consecutive agreeing reads before
+                    # believing it.
+                    closed_confirms += 1
+                    if closed_confirms >= 2:
+                        print("Tray closed — continuing")
+                        _tray_open = False
+                        _sse_publish(_status_snapshot())
+                        break
+                else:
+                    closed_confirms = 0
             line = read_serial_line(ser, timeout=0.1)
             if not line:
                 continue
@@ -1106,6 +1123,7 @@ def eject_disc(ser, device):
                         r = subprocess.run(close_cmd, timeout=10, capture_output=True)
                         if r.returncode == 0:
                             _tray_open = False
+                            _sse_publish(_status_snapshot())
                             break
                     except Exception:
                         pass
@@ -3929,6 +3947,12 @@ def play_flow(ser):
 
     if stop_reason == "eject":
         safe_send(ser, "STATUS:Ejecting...")
+        # mpv/cd-paranoia just got killed above - give the OS a moment to
+        # actually release the device handle before touching it again, or
+        # the primary `eject` command can hit "Device or resource busy" and
+        # fall back to the raw SCSI path, seen live to behave differently
+        # (the tray got marked closed again within ~11s of a real eject).
+        time.sleep(1)
         try:
             eject_disc(ser, device)
         except Exception as e:
