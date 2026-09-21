@@ -141,11 +141,15 @@ self-signed cert. On startup the host prints the LAN URL to open
 - Upload files from any device on the LAN for data DVD burning
 - Submit YouTube URLs for video DVD burning
 - Dark theme, mobile-responsive, PWA (installable on phone)
-- **On-screen remote** — click the "REMOTE" tag next to the DiscStation
-  wordmark to reveal a full control surface (mode buttons, EJECT/CLOSE
-  toggle, live disc-status readout, playback transport). Fully functional
-  with no ESP32 attached; greys out and auto-collapses the instant a
-  physical remote is detected, so the two never fight for control.
+- **On-screen remote** — opens automatically with no ESP32 attached, since
+  it's the only control surface in that case (toggle it via the "REMOTE"
+  tag next to the wordmark any time). Mode buttons only show what the disc
+  in the drive can actually do — a blank CD offers BURN DATA/BURN AUDIO, a
+  blank DVD offers BURN/BURN DATA, an already-recorded disc offers PLAY/RIP
+  — and picking one starts it directly, no separate confirm step. Also has
+  EJECT/CLOSE toggle, a live disc-status readout, and full playback
+  transport. Greys out and auto-collapses the instant a physical remote is
+  detected, so the two never fight for control.
 
 ## Mobile App
 
