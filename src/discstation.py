@@ -59,6 +59,7 @@ _web_status = "READY"
 _web_progress = -1
 _web_progress_active = False
 _web_playing = False  # a play_flow is currently active (transport controls apply)
+_web_op_verb = "BURNING"  # progress-bar verb for the current PROGRESS: stream
 _operation_active = False  # a burn/rip/play flow is holding the drive
 _last_disc_info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
 _active_ser = None
@@ -775,7 +776,7 @@ def _record_web_status(msg):
         _web_progress_active = True
     elif msg.startswith("PROGRESS:"):
         value = msg[9:].strip()
-        _web_status = f"BURNING {value}"
+        _web_status = f"{_web_op_verb} {value}"
         match = re.search(r"(\d+(?:\.\d+)?)", value)
         if match:
             _web_progress = min(100, max(0, int(float(match.group(1)))))
@@ -4504,7 +4505,7 @@ def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
 
 
 def station_loop(ser, url, artist_hint=None, album_hint=None):
-    global _last_burn_result, _last_burn_result_time, _tray_open, _tray_open_since, _operation_active
+    global _last_burn_result, _last_burn_result_time, _tray_open, _tray_open_since, _operation_active, _web_op_verb
     discstation_burn.cleanup_old_jobs()
     try:
         device = discstation_burn.disc_device()
@@ -4732,6 +4733,7 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
 
         mode = line.split(":", 1)[1].strip().upper()
         print(f"Selected: {mode}")
+        _web_op_verb = "RIPPING" if mode == "RIP" else "BURNING"
         # The web remote's mode buttons queue START right behind SELECT: for a
         # one-click burn (see app.js) - if an earlier selection was abandoned
         # before its own START got consumed (e.g. never uploaded/confirmed a
