@@ -48,6 +48,7 @@ export type DiscInfo = {
   label?: string;
   busy?: boolean;
   appliance?: 'hardware' | 'software';
+  menu_items?: string[]; // which mode buttons are valid for the current disc
 };
 
 export async function getProgress(): Promise<Progress> {

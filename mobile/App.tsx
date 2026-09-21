@@ -106,7 +106,10 @@ function Screen() {
         setConn('online');
         // A physical remote showing up mid-session takes over - collapse the
         // on-screen one instead of leaving it open fighting for control.
-        setRemoteOpen((open) => (p.appliance === 'hardware' ? false : open));
+        // Software mode has no other control surface at all, so open it
+        // automatically rather than leaving it opt-in-only (mirrors
+        // app.js's applyRemoteState on the web remote).
+        setRemoteOpen((open) => (p.appliance === 'hardware' ? false : p.appliance !== undefined ? true : open));
       } catch {
         if (!alive) return;
         setConn('offline');

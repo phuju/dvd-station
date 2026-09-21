@@ -14,18 +14,20 @@ type Props = {
   disc: api.DiscInfo | null;
 };
 
+// Server-computed via menu_items_for_disc() (discstation.py) and sent as
+// disc.menu_items - CANCEL/HOME is a control, not a mode, and stays
+// unconditional (same split as the web remote's remote-grid).
 const MODE_BUTTONS: [string, string][] = [
   ['BURN', 'SELECT:BURN'],
   ['BURN DATA', 'SELECT:BURN DATA'],
   ['BURN AUDIO', 'SELECT:BURN AUDIO'],
   ['RIP', 'SELECT:RIP'],
   ['PLAY', 'SELECT:PLAY'],
-  ['CANCEL / HOME', 'CANCEL'],
 ];
 
 function discStatusText(disc: api.DiscInfo | null): string {
   if (!disc) return 'DISC: UNKNOWN';
-  if (disc.busy) return 'DISC: BUSY (see status above)';
+  if (disc.busy) return 'DISC: BUSY';
   if (!disc.disc_present) return 'DISC: NONE';
   const kind = (disc.type || disc.kind || 'unknown').toUpperCase();
   const label = disc.label ? ` "${disc.label}"` : '';
@@ -45,6 +47,20 @@ export default function RemoteModal({ visible, onClose, c, m, prog, disc }: Prop
       /* next poll tick reflects reality, same as the web remote */
     });
   };
+
+  // On real hardware START is a long-press of the encoder on the burn-ready
+  // review screen, not its own button - picking a mode here is meant to be
+  // the whole action, so chase SELECT straight through to START instead of
+  // leaving nothing left to press (mirrors app.js's web remote).
+  const sendMode = (cmd: string) => {
+    send(cmd);
+    if (cmd.startsWith('SELECT:BURN')) send('START');
+  };
+
+  const allowedModes = disc?.menu_items;
+  const visibleModeButtons = allowedModes
+    ? MODE_BUTTONS.filter(([, cmd]) => allowedModes.includes(cmd.slice('SELECT:'.length)))
+    : MODE_BUTTONS;
 
   const stepVolume = (delta: number) => {
     const next = Math.max(0, Math.min(100, volume + delta));
@@ -68,16 +84,23 @@ export default function RemoteModal({ visible, onClose, c, m, prog, disc }: Prop
           </View>
 
           <View style={s.grid}>
-            {MODE_BUTTONS.map(([label, cmd]) => (
+            {visibleModeButtons.map(([label, cmd]) => (
               <Pressable
                 key={cmd}
                 style={[s.gridBtn, hardware && s.btnDisabled]}
-                onPress={() => send(cmd)}
+                onPress={() => sendMode(cmd)}
                 disabled={hardware}
               >
                 <Text style={s.gridBtnText}>{label}</Text>
               </Pressable>
             ))}
+            <Pressable
+              style={[s.gridBtn, hardware && s.btnDisabled]}
+              onPress={() => send('CANCEL')}
+              disabled={hardware}
+            >
+              <Text style={s.gridBtnText}>CANCEL / HOME</Text>
+            </Pressable>
             <Pressable
               style={[s.gridBtn, hardware && s.btnDisabled]}
               onPress={() => send(trayOpen ? 'CONFIRM' : 'EJECT')}
