@@ -564,14 +564,13 @@ def start_web_server(port=8080):
 
 
 def local_ip():
-    try:
-        result = subprocess.run(['hostname', '-I'], capture_output=True, text=True, timeout=2)
-        ips = result.stdout.strip().split()
-        for ip in ips:
-            if ip.count('.') == 3 and not ip.startswith('127.'):
-                return ip
-    except Exception:
-        pass
+    # `hostname -I`'s first non-loopback address used to be the shortcut here,
+    # but it lists every interface with no notion of "the real one" - once
+    # Docker's docker0/br-* bridges (172.17/18.x, unreachable from outside
+    # this machine) exist, they can sort before the actual LAN NIC and get
+    # picked instead, showing a dead URL on the OLED/web remote. Asking the
+    # kernel what source address it'd use to reach the outside world sidesteps
+    # that entirely - Docker's bridges aren't in that route, no filtering needed.
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(('8.8.8.8', 80))
@@ -973,7 +972,16 @@ def check_serial_alive(ser=None):
     """Raise serial.SerialException if the ESP32 link looks dead, so main()'s
     reconnect loop can re-scan for the (possibly renumbered) serial port.
     Call this inside any long poll loop that would otherwise spin forever on a
-    stale handle (writes to a re-enumerated /dev/ttyUSBN fail silently)."""
+    stale handle (writes to a re-enumerated /dev/ttyUSBN fail silently).
+
+    Meaningless (and actively harmful) in pure web/software mode - there's no
+    ESP32 to go quiet, and serial_activity_age() only advances on real
+    incoming bytes, so a user just reading the screen for >35s before
+    clicking the next button on the web remote looked identical to a dead
+    link and killed the burn ("ESP32 not responding") with no ESP32 in the
+    picture at all."""
+    if isinstance(ser, VirtualSerial):
+        return
     if discstation_burn.serial_write_failed():
         raise serial.SerialException("serial write failed (ESP32 link lost)")
     if discstation_burn.serial_activity_age() >= 35:
