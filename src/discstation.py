@@ -3556,6 +3556,10 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None, s
         current_volume = None
         current_track = None
         last_track_poll = 0
+        # Set to "eject" below when EJECT (not PLAY_STOP/CANCEL/HOME) is what
+        # ended playback - returned to the caller so it can actually eject
+        # the tray afterward, not just return to the menu.
+        stop_reason = None
         track_titles = track_titles or []
         track_starts = track_starts or []
         send(ser, "PLAY_MODE:AUDIO_CD" if kind == "audio_cd" else "PLAY_MODE:DEFAULT")
@@ -3598,12 +3602,18 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None, s
                         vu_pause.set() if paused else vu_pause.clear()
                     send(ser, "PLAY_STATUS:PAUSED" if paused else "PLAY_STATUS:PLAYING")
 
-                elif line in ("PLAY_STOP", "EJECT"):
-                    # EJECT during playback = stop first; the web remote has no
-                    # separate stop button, and without this the command is
-                    # silently dropped here and playback never ends.
+                elif line in ("PLAY_STOP", "EJECT", "CANCEL", "HOME"):
+                    # All four end playback - EJECT alone also pops the tray
+                    # afterward (the web remote has its own dedicated STOP
+                    # button now, so EJECT no longer needs to double as one -
+                    # a user pressing eject while music plays wants the disc
+                    # out, not just silence). CANCEL/HOME return to the menu
+                    # exactly like they do everywhere else - previously
+                    # unhandled here, so they were silently dropped mid-play.
                     send(ser, "STATUS:Stopping play")
                     discstation_burn.stop_process(proc)
+                    if line == "EJECT":
+                        stop_reason = "eject"
                     break
 
                 elif line == "FF:BIG":
@@ -3678,6 +3688,7 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None, s
             os.unlink(MPV_SOCKET)
         except OSError:
             pass
+    return stop_reason
 
 
 def _play_audio_cd_windows(ser, device, track_titles):
@@ -3798,7 +3809,12 @@ def play_flow(ser):
         except FileNotFoundError:
             raise RuntimeError("mpv not found")
 
+    # "eject" once a play loop reports EJECT ended it (see _run_mpv) - acted
+    # on once, after the kind dispatch below, regardless of which branch ran.
+    stop_reason = None
+
     def play_vob_fallback():
+        nonlocal stop_reason
         # No DVD-menu engine available (libdvdnav missing, or on Windows
         # where the plain mpv build never has it) - play the main title's
         # VOBs directly off the mounted volume instead (no menus).
@@ -3818,7 +3834,7 @@ def play_flow(ser):
                 "--idle=no",
                 *[str(path) for path in files],
             ]
-            _run_mpv(ser, cmd, "Playing DVD", kind)
+            stop_reason = _run_mpv(ser, cmd, "Playing DVD", kind)
 
     if kind == "dvd_video":
         if discstation_host.system_name() == "darwin":
@@ -3831,7 +3847,7 @@ def play_flow(ser):
                     "--dvd-device=" + rip_device(device),
                     "dvdnav://",
                 ]
-                _run_mpv(ser, cmd, "Playing DVD", kind)
+                stop_reason = _run_mpv(ser, cmd, "Playing DVD", kind)
             except RuntimeError:
                 # libdvdnav couldn't open the disc.
                 play_vob_fallback()
@@ -3877,7 +3893,7 @@ def play_flow(ser):
             if audio_device:
                 cmd.insert(1, "--audio-device=" + audio_device)
                 print(f"Audio CD output: {audio_device}")
-            _run_mpv(ser, cmd, "Playing audio CD", kind, track_titles, track_starts, stdin_proc=rip_proc)
+            stop_reason = _run_mpv(ser, cmd, "Playing audio CD", kind, track_titles, track_starts, stdin_proc=rip_proc)
         else:
             audio_device = discstation_host.audio_output_device()
             cmd = [
@@ -3892,7 +3908,7 @@ def play_flow(ser):
             if audio_device:
                 cmd.insert(1, "--audio-device=" + audio_device)
                 print(f"Audio CD output: {audio_device}")
-            _run_mpv(ser, cmd, "Playing audio CD", kind, track_titles, track_starts)
+            stop_reason = _run_mpv(ser, cmd, "Playing audio CD", kind, track_titles, track_starts)
 
     elif kind in ("vcd", "svcd", "video_data"):
         with mounted_disc(device) as mount_dir:
@@ -3906,11 +3922,17 @@ def play_flow(ser):
                 "--idle=no",
                 *[str(path) for path in files],
             ]
-            _run_mpv(ser, cmd, f"Playing {kind.upper()}", kind)
+            stop_reason = _run_mpv(ser, cmd, f"Playing {kind.upper()}", kind)
 
     else:
         raise RuntimeError(f"Unsupported disc: {kind}")
 
+    if stop_reason == "eject":
+        safe_send(ser, "STATUS:Ejecting...")
+        try:
+            eject_disc(ser, device)
+        except Exception as e:
+            print(f"Eject after play failed: {e}")
     safe_send(ser, "DONE:Playback stopped")
     time.sleep(3)
 

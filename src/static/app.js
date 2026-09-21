@@ -179,7 +179,7 @@
     const el = $("remote-disc-status");
     if (!el) return;
     if (!info) { el.textContent = "DISC: UNKNOWN"; return; }
-    if (info.busy) { el.textContent = "DISC: BUSY (see status above)"; return; }
+    if (info.busy) { el.textContent = "DISC: BUSY"; return; }
     if (!info.disc_present) { el.textContent = "DISC: NONE"; return; }
     const kind = (info.type || info.kind || "unknown").toUpperCase();
     const label = info.label ? ` "${info.label}"` : "";
