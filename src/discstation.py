@@ -85,6 +85,14 @@ class VirtualSerial:
         with self._lock:
             self._buf += text.encode(errors="ignore").strip() + b"\n"
 
+    def clear(self):
+        """Drop any unconsumed input - used when a fresh SELECT: comes in so a
+        START that was queued for an abandoned earlier selection (the web
+        remote's mode buttons queue it right behind SELECT: so a one-click
+        burn works) can't leak forward and fire a different, unintended burn."""
+        with self._lock:
+            self._buf = b""
+
     @property
     def in_waiting(self):
         with self._lock:
@@ -4662,6 +4670,13 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
 
         mode = line.split(":", 1)[1].strip().upper()
         print(f"Selected: {mode}")
+        # The web remote's mode buttons queue START right behind SELECT: for a
+        # one-click burn (see app.js) - if an earlier selection was abandoned
+        # before its own START got consumed (e.g. never uploaded/confirmed a
+        # URL), that stale START would otherwise sit buffered and fire this
+        # new, different selection instead. Drop anything unconsumed first.
+        if isinstance(ser, VirtualSerial):
+            ser.clear()
 
         # The user picked a mode — they want to act on a disc, so the drive is
         # fair game again even if it was ejected from the OLED earlier.

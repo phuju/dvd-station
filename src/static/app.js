@@ -119,9 +119,20 @@
   });
   setRemoteVisible(localStorage.getItem(remoteKey) === "1");
 
-  $("remote-controls").addEventListener("click", (event) => {
+  $("remote-controls").addEventListener("click", async (event) => {
     const button = event.target.closest("[data-cmd]");
-    if (button && !button.disabled) sendRemoteCmd(button.dataset.cmd);
+    if (!button || button.disabled) return;
+    const cmd = button.dataset.cmd;
+    await sendRemoteCmd(cmd);
+    // On real hardware START is a long-press of the encoder on the burn-ready
+    // review screen, not its own button - a one-click "BURN AUDIO"/"BURN
+    // DATA"/"BURN" here is the whole point of the web remote, so chase the
+    // mode select straight through to starting the burn instead of leaving
+    // the user stuck with nothing left to press. (The backend queues this
+    // harmlessly if files/URL aren't in yet - it's only consumed once the
+    // burn's actually at its own "waiting for start" step, and gets flushed
+    // if a different mode gets selected first so it can't fire the wrong burn.)
+    if (cmd.startsWith("SELECT:BURN")) await sendRemoteCmd("START");
   });
   let volumeTimer;
   $("remote-volume").addEventListener("input", (event) => {
