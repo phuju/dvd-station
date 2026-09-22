@@ -51,8 +51,8 @@ export default function RemotePanel({ visible, onClose, c, m, prog, disc }: Prop
   if (!visible) return null;
 
   const send = (cmd: string) => {
-    if (hardware) return;
-    api.postButton(cmd).catch(() => {
+    if (hardware) return Promise.resolve();
+    return api.postButton(cmd).catch(() => {
       /* next poll tick reflects reality, same as the web remote */
     });
   };
@@ -60,10 +60,14 @@ export default function RemotePanel({ visible, onClose, c, m, prog, disc }: Prop
   // On real hardware START is a long-press of the encoder on the burn-ready
   // review screen, not its own button - picking a mode here is meant to be
   // the whole action, so chase SELECT straight through to START instead of
-  // leaving nothing left to press (mirrors app.js's web remote).
-  const sendMode = (cmd: string) => {
-    send(cmd);
-    if (cmd.startsWith('SELECT:BURN')) send('START');
+  // leaving nothing left to press (mirrors app.js's web remote). Must await
+  // the SELECT: request before sending START - firing both at once races
+  // over the network, and if START lands first it gets wiped the moment
+  // SELECT: is processed (station_loop clears any stale buffered input on
+  // a fresh mode selection), leaving the burn stuck at "waiting for start."
+  const sendMode = async (cmd: string) => {
+    await send(cmd);
+    if (cmd.startsWith('SELECT:BURN')) await send('START');
   };
 
   const allowedModes = disc?.menu_items;
