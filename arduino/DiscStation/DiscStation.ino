@@ -272,6 +272,7 @@ uint8_t vuLevel[VU_BARS];
 bool visualizerActive = false;
 unsigned long lastVuAt = 0;
 unsigned long vuSuppressUntil = 0;   // bars withheld (text screen shown instead) until millis() reaches this
+bool playPaused = false;   // last PLAY_STATUS was PAUSED - the only PLAY state the idle screensaver may take over
 bool vuSeenReal = false;   // has this PLAY session ever gotten a VU: frame with a nonzero bar -
                            // a session-level fact (macOS: never; Linux: within the first frame or
                            // two), decided once and left alone. Deliberately separate from
@@ -827,6 +828,9 @@ void parseMessage(String msg) {
     lastVuAt = 0;                  // fresh session - unknown yet whether the host even sends VU: at all
     visualizerActive = false;
     vuSeenReal = false;            // unknown yet whether this session ever gets a real (nonzero) frame
+    playPaused = false;
+    displayBlank = false;          // a fresh session must never inherit a running screensaver
+    lastInputTime = millis();
     Out.print("POT:");             // push the last-used volume so playback starts at it
     Out.println(playVolume);
     drawPlay();
@@ -838,6 +842,9 @@ void parseMessage(String msg) {
   } else if (msg.startsWith("PLAY_STATUS:")) {
     line1 = msg.substring(12);
     if (line1.length() > 20) line1 = line1.substring(0, 20);
+    playPaused = (line1 == "PAUSED");
+    if (playPaused) lastInputTime = millis();   // idle timer starts from the pause
+    else displayBlank = false;                  // resumed (even from the web remote) - drop the screensaver
     if (line1 == "PLAYING" || line1 == "PAUSED" || (audioPlayMode && line1.startsWith("TRACK "))) {
       playStatusTemp = false;
     } else {
@@ -1353,24 +1360,13 @@ void loop() {
     if (uiState == UI_PLAY && !displayBlank) drawPlay();
   }
 
-  // --- Idle disc screensaver (HOME + STANDBY + PLAY) ---
-  // PLAY is included because a static "PLAYING" screen is just as low-current
-  // as HOME/STANDBY were - the power bank doesn't care what's on screen, only
-  // that the draw stays static this long.
-  //
-  // In PLAY specifically, if this session has never gotten a single REAL
-  // (nonzero) VU: frame (!vuSeenReal - the host/platform doesn't support the
-  // visualizer, e.g. macOS today), don't make the user wait out the full
-  // generic idle timer for an animation - drop into the spinning-disc
-  // screensaver as soon as the text-hold window (vuSuppressUntil) expires.
-  // vuSeenReal (not lastVuAt, which now updates on every frame including
-  // all-zero ones) is deliberately a session-level, decided-once fact, so
-  // this can't re-trigger mid-playback and flicker against the bars.
-  bool playSkippingToScreensaver = (uiState == UI_PLAY) && !vuSeenReal &&
-      (long)(millis() - vuSuppressUntil) >= 0;
+  // --- Idle disc screensaver (HOME + STANDBY, or PLAY while paused) ---
+  // Never while a track is actually playing - the track/volume status (or
+  // visualizer) owns the screen then. A static screen is what the power bank
+  // needs to see stay drawing, so the saver covers every idle/paused state.
   if (displayOk && !displayBlank &&
-      (uiState == UI_HOME || uiState == UI_STANDBY || uiState == UI_PLAY) &&
-      ((long)(millis() - lastInputTime) >= IDLE_BLANK_MS || playSkippingToScreensaver)) {
+      (uiState == UI_HOME || uiState == UI_STANDBY || (uiState == UI_PLAY && playPaused)) &&
+      (long)(millis() - lastInputTime) >= IDLE_BLANK_MS) {
     displayBlank = true;
     saverStep = 0;
     lastSaverFrame = 0;
