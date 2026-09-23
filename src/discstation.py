@@ -12,10 +12,6 @@ import json
 import mimetypes
 import os
 import signal
-try:
-    import pwd
-except ImportError:
-    pwd = None
 import re
 import shutil
 import socket
@@ -817,53 +813,6 @@ def safe_send(ser, msg):
 
 # Route every serial line the burn/rip pipeline emits into the web/SSE status.
 discstation_burn.status_sink = _record_web_status
-
-
-def run_as_desktop_user(cmd):
-    if os.name != "posix" or pwd is None:
-        return cmd
-    sudo_user = os.environ.get("SUDO_USER")
-    if os.geteuid() == 0 and sudo_user and sudo_user != "root":
-        home = Path(discstation_burn.USER_HOME)
-        uid = pwd.getpwnam(sudo_user).pw_uid
-        return [
-            "sudo", "-u", sudo_user,
-            "env",
-            "DISPLAY=" + os.environ.get("DISPLAY", ":0"),
-            "XAUTHORITY=" + str(home / ".Xauthority"),
-            "XDG_RUNTIME_DIR=/run/user/" + str(uid),
-            *cmd,
-        ]
-    return cmd
-
-
-def chown_to_sudo_user(path):
-    sudo_user = os.environ.get("SUDO_USER")
-    if os.name != "posix" or pwd is None or not hasattr(os, "geteuid"):
-        return
-    if os.geteuid() != 0 or not sudo_user or sudo_user == "root":
-        return
-
-    try:
-        pw_record = pwd.getpwnam(sudo_user)
-    except KeyError:
-        return
-
-    uid = pw_record.pw_uid
-    gid = pw_record.pw_gid
-    root_path = Path(path)
-
-    for current_root, dirs, files in os.walk(root_path):
-        try:
-            os.chown(current_root, uid, gid)
-        except OSError:
-            pass
-        for name in dirs + files:
-            item = Path(current_root) / name
-            try:
-                os.chown(item, uid, gid)
-            except OSError:
-                pass
 
 
 def _mpv_ipc(payload, timeout=None):
@@ -2632,7 +2581,6 @@ def retag_audio_rip(rip_dir, artist_hint, album_hint):
         tag_flac(out_file, track_meta, metadata, cover_path)
         renamed.append(out_file)
 
-    chown_to_sudo_user(target_dir)
     return target_dir, cover_path, renamed
 
 
@@ -3466,7 +3414,7 @@ def _run_mpv(ser, cmd, label, kind=None, track_titles=None, track_starts=None, s
     # floods journald until the pipe backs up and our own print()/status
     # writes block, wedging the whole play loop. We drive mpv over the IPC
     # socket, so none of that output is wanted.
-    proc = subprocess.Popen(run_as_desktop_user(cmd), env=env,
+    proc = subprocess.Popen(cmd, env=env,
                             stdin=(stdin_proc.stdout if stdin_proc else None),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if stdin_proc:
@@ -4077,7 +4025,6 @@ def rip_flow(ser, artist_hint=None, album_hint=None):
         safe_send(ser, "DONE:Rip complete!")
         print(f"Rip complete: {out_dir}")
         out_dir = _finalize_video_rip(ser, out_dir, device, "dvd_video")
-        chown_to_sudo_user(out_dir)
         time.sleep(3)
         return
 
@@ -4102,7 +4049,6 @@ def rip_flow(ser, artist_hint=None, album_hint=None):
         safe_send(ser, "DONE:Rip complete!")
         print(f"Rip complete: {out_dir}")
         out_dir = _finalize_video_rip(ser, out_dir, device, "dvd_video")
-        chown_to_sudo_user(out_dir)
         time.sleep(3)
         return
 
@@ -4160,7 +4106,6 @@ def rip_flow(ser, artist_hint=None, album_hint=None):
     safe_send(ser, "DONE:Rip complete!")
     print(f"Rip complete: {out_dir}")
     out_dir = _finalize_video_rip(ser, out_dir, device, "dvd_video")
-    chown_to_sudo_user(out_dir)
     time.sleep(3)
 
 
@@ -4200,7 +4145,6 @@ def rip_video_disc(ser, device, kind):
     safe_send(ser, "DONE:Rip complete!")
     print(f"Video rip complete: {out_dir}")
     out_dir = _finalize_video_rip(ser, out_dir, device, kind)
-    chown_to_sudo_user(out_dir)
     time.sleep(3)
 
 
@@ -4275,7 +4219,6 @@ def _rip_audio_cd_macos(ser, device, chapters, metadata, cover_path, out_dir):
     shutil.rmtree(str(wav_dir), ignore_errors=True)
     safe_send(ser, "PROGRESS:100%")
     safe_send(ser, "DONE:Rip complete!")
-    chown_to_sudo_user(out_dir)
     time.sleep(3)
 
 
@@ -4415,7 +4358,6 @@ def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
     safe_send(ser, "PROGRESS:100%")
     safe_send(ser, "DONE:Rip complete!")
     print(f"Audio rip complete: {out_dir}")
-    chown_to_sudo_user(out_dir)
     time.sleep(3)
 
 
