@@ -221,6 +221,8 @@ String discLine = "Disc: none";
 String line1 = "Status: READY";
 String line2 = "";
 String line3 = "";
+bool trayOpen = false;        // host says the tray is open (eject wait / STANDBY:Tray open) - EJECT button then closes it
+bool waitingIsTray = false;   // the WAITING screen is the eject "close tray" wait, not the pre-burn confirm
 String waitingLine1 = "";
 String waitingLine2 = "";
 int progressPercent = -1;
@@ -456,7 +458,7 @@ void drawWaiting() {
   printUpper(waitingLine2);
 
   display.setCursor(2, 49);
-  display.print("SHORT // GO");
+  display.print(waitingIsTray ? "EJECT BTN // CLOSE" : "SHORT // GO");
 
   display.display();
 }
@@ -774,6 +776,7 @@ void parseMessage(String msg) {
   Out.println(msg);
 
   if (msg.startsWith("HOME:")) {
+    trayOpen = false;
     drawHome();
 
   } else if (msg.startsWith("DISC:")) {
@@ -802,6 +805,7 @@ void parseMessage(String msg) {
     if (uiState == UI_HOME) drawHome();
 
   } else if (msg.startsWith("STANDBY:")) {
+    trayOpen = msg.substring(8) == "Tray open";
     drawStandby();
 
   } else if (msg.startsWith("TITLE:")) {
@@ -855,8 +859,13 @@ void parseMessage(String msg) {
   } else if (msg.startsWith("WAITING:")) {
     returnToHomeAt = 0;
     String rest = msg.substring(8);
+    waitingIsTray = rest.indexOf("close tray") >= 0;
+    if (waitingIsTray) trayOpen = true;
     int slash = rest.indexOf('/');
-    if (slash >= 0) {
+    if (waitingIsTray) {
+      waitingLine1 = "TRAY OPEN";
+      waitingLine2 = "";
+    } else if (slash >= 0) {
       waitingLine1 = "Data: " + rest.substring(0, slash);
       waitingLine1.trim();
       waitingLine2 = "Disc: " + rest.substring(slash + 1);
@@ -989,14 +998,6 @@ void handleSelectPress(bool longPress) {
       drawStatus();
     }
 
-  } else if (uiState == UI_STANDBY) {
-    Out.println("EJECT");
-    line1 = "Ejecting...";
-    line2 = "";
-    line3 = "";
-    returnToHomeAt = millis() + 5000;
-    drawStatus();
-
   } else if (uiState == UI_STATUS && line1 == "Ejecting...") {
     // Manual escape if stuck on eject screen with no app response
     drawStandby();
@@ -1011,7 +1012,7 @@ void handleSelectPress(bool longPress) {
     if (longPress) {
       Out.println("CANCEL");
       drawHome();
-    } else {
+    } else if (!waitingIsTray) {   // tray close moved to the EJECT button
       Out.println("CONFIRM");
       line1 = "Confirmed!";
       line2 = "";
@@ -1144,7 +1145,15 @@ void handleEncoderCCW() {
 void handleEjectButton() {
   if (wakeDisplay()) { lastInputTime = millis(); return; }
   lastInputTime = millis();
-  if (uiState == UI_HOME || uiState == UI_STANDBY || uiState == UI_DISCONNECTED || uiState == UI_PLAY) {
+  if (trayOpen && (uiState == UI_STANDBY || uiState == UI_HOME || (uiState == UI_WAITING && waitingIsTray))) {
+    Out.println("CONFIRM");            // host closes the tray
+    trayOpen = false;
+    line1 = "Closing tray...";
+    line2 = "";
+    line3 = "";
+    returnToHomeAt = millis() + 5000;
+    drawStatus();
+  } else if (uiState == UI_HOME || uiState == UI_STANDBY || uiState == UI_DISCONNECTED || uiState == UI_PLAY) {
     Out.println("EJECT");
     line1 = "Ejecting...";
     line2 = "";

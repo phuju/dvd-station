@@ -1025,7 +1025,7 @@ def eject_disc(ser, device):
     if ok:
         _tray_open = True
         _tray_open_since = time.monotonic()
-        safe_send(ser, "WAITING:Press SELECT/to close tray")
+        safe_send(ser, "WAITING:Press EJECT/to close tray")
         # WAITING: isn't in _record_web_status()'s prefix whitelist, so the
         # send above never reaches the web page - _tray_open has to be
         # published explicitly here, same as DISC: gets its own dedicated
@@ -1064,7 +1064,7 @@ def eject_disc(ser, device):
                 continue
             if line == "PONG":
                 continue
-            if line == "CONFIRM":
+            if line in ("CONFIRM", "EJECT"):   # EJECT button doubles as close while the tray is out
                 print("Closing tray...")
                 safe_send(ser, "STATUS:Closing tray...")
                 for close_cmd in (
@@ -4137,6 +4137,9 @@ def station_loop(ser):
         if line.startswith("MENU:"):
             print(f"Menu: {line.split(':', 1)[1]}")
             continue
+
+        if line == "EJECT" and _tray_open:
+            line = "CONFIRM"   # EJECT is a toggle: with the tray already out, close it
 
         if line == "EJECT":
             try:
