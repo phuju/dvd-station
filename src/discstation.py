@@ -2219,58 +2219,6 @@ def musicbrainz_lookup(device, track_count):
     return None
 
 
-def musicbrainz_lookup_by_album_hints(album_artist, album, track_count):
-    if not album:
-        return None
-
-    if _mb is not None:
-        fields = {"release": album}
-        if album_artist:
-            fields["artist"] = album_artist
-        try:
-            hits = _mb.search_releases(limit=8, **fields).get("release-list", [])
-        except _mb.WebServiceError as e:
-            print(f"MusicBrainz search failed: {e}")
-            hits = []
-        for hit in hits:
-            release_id = hit.get("id")
-            if not release_id:
-                continue
-            try:
-                details = musicbrainz_release_details(release_id)
-            except Exception:
-                continue
-            metadata = _release_meta(details, track_count)
-            if metadata:
-                metadata["source"] = "musicbrainz-search"
-                return metadata
-        return None
-
-    # --- fallback: raw ws/2 search ---
-    query_parts = [f'release:"{album}"']
-    if album_artist:
-        query_parts.append(f'artist:"{album_artist}"')
-    response = requests.get(
-        "https://musicbrainz.org/ws/2/release/",
-        params={"query": " AND ".join(query_parts), "fmt": "json", "limit": 8},
-        headers={"User-Agent": USER_AGENT}, timeout=20,
-    )
-    response.raise_for_status()
-    for release in response.json().get("releases", []):
-        release_id = release.get("id")
-        if not release_id:
-            continue
-        try:
-            details = musicbrainz_release_details(release_id)
-        except Exception:
-            continue
-        metadata = _release_meta(details, track_count)
-        if metadata:
-            metadata["source"] = "musicbrainz-search"
-            return metadata
-        time.sleep(1)
-    return None
-
 def cddb_sum(value):
     return sum(int(ch) for ch in str(value))
 
@@ -2403,7 +2351,7 @@ def musicbrainz_release_id_search(album_artist, album):
     return releases[0].get("id") if releases else None
 
 
-def audio_metadata_lookup(device, track_count, artist_hint=None, album_hint=None):
+def audio_metadata_lookup(device, track_count):
     metadata = None
 
     for attempt in range(2):
@@ -2415,17 +2363,6 @@ def audio_metadata_lookup(device, track_count, artist_hint=None, album_hint=None
             if attempt == 0:
                 print(f"MusicBrainz lookup failed, retrying... ({e})")
                 time.sleep(1)
-
-    if not metadata and album_hint:
-        for attempt in range(2):
-            try:
-                metadata = musicbrainz_lookup_by_album_hints(artist_hint, album_hint, track_count)
-                if metadata:
-                    break
-            except Exception as e:
-                if attempt == 0:
-                    print(f"MusicBrainz album search failed, retrying... ({e})")
-                    time.sleep(1)
 
     if metadata and not metadata.get("release_id"):
         try:
@@ -2541,59 +2478,6 @@ def tag_flac(path, track_meta, album_meta, cover_path):
     audio.save()
 
 
-def retag_audio_rip(rip_dir, artist_hint, album_hint):
-    rip_dir = Path(rip_dir)
-    flacs = sorted(rip_dir.glob("*.flac"))
-    if not flacs:
-        raise RuntimeError(f"No FLAC files found in {rip_dir}")
-    if not album_hint:
-        raise RuntimeError("Retag needs --album")
-
-    metadata = musicbrainz_lookup_by_album_hints(artist_hint, album_hint, len(flacs))
-    if not metadata:
-        raise RuntimeError("Could not find album metadata")
-
-    target_dir = unique_dir(RIP_ROOT / safe_path_name(f"{metadata['album_artist']} - {metadata['album']}"))
-    if rip_dir != target_dir:
-        rip_dir.rename(target_dir)
-    else:
-        target_dir = rip_dir
-
-    write_album_info(target_dir, metadata)
-    cover_path = download_cover_art(
-        metadata.get("release_id"),
-        target_dir,
-        metadata.get("release_group_id"),
-    )
-
-    renamed = []
-    for index, src in enumerate(sorted(target_dir.glob("*.flac")), start=1):
-        if index > len(metadata["tracks"]):
-            break
-
-        track_meta = metadata["tracks"][index - 1]
-        out_file = target_dir / f"{index:02d} - {safe_path_name(track_meta['title'])}.flac"
-        if src != out_file:
-            if out_file.exists():
-                out_file.unlink()
-            src.rename(out_file)
-
-        tag_flac(out_file, track_meta, metadata, cover_path)
-        renamed.append(out_file)
-
-    return target_dir, cover_path, renamed
-
-
-def latest_audio_rip_dir():
-    candidates = sorted(
-        path for path in RIP_ROOT.glob("audio_cd_*")
-        if path.is_dir() and list(path.glob("*.flac"))
-    )
-    if not candidates:
-        raise RuntimeError("No audio_cd_* rip folders found")
-    return candidates[-1]
-
-
 def parse_ffmpeg_time(line):
     marker = "time="
     if marker not in line:
@@ -2692,33 +2576,22 @@ def directory_size_bytes(path):
     return total
 
 
-def _stdin_is_tty():
-    """sys.stdin is None under pythonw.exe (no console) - plain .isatty() would
-    AttributeError. Also guards a closed/redirected stdin under systemd/launchd."""
-    try:
-        return sys.stdin is not None and sys.stdin.isatty()
-    except (AttributeError, ValueError, OSError):
-        return False
+def _wait_for_source(ser, missing="URL or file path"):
+    """Block until the web remote supplies a source (an upload dir or a pasted
+    URL/path). Returns None - after telling the remote why - if the user
+    cancelled or sent nothing."""
+    url = wait_for_web_url(ser)
+    if url is None:
+        safe_send(ser, "CANCELLED:Cancelled")
+    elif not url:
+        safe_send(ser, f"ERROR:Need {missing}")
+    return url or None
 
 
-def burn_flow(ser, url):
+def burn_flow(ser):
+    url = _wait_for_source(ser)
     if not url:
-        if _stdin_is_tty():
-            safe_send(ser, "STATUS:Enter URL or file path in terminal")
-            print("=== Enter URL or file path below, then press Enter ===")
-            try:
-                url = sys.stdin.readline().strip()
-            except (EOFError, KeyboardInterrupt, OSError):
-                safe_send(ser, "CANCELLED:Cancelled")
-                return
-        else:
-            url = wait_for_web_url(ser)
-            if url is None:
-                safe_send(ser, "CANCELLED:Cancelled")
-                return
-            if not url:
-                safe_send(ser, "ERROR:Need URL or file path")
-                return
+        return
 
     device = discstation_burn.disc_device()
     disc_bytes = discstation_burn.disc_capacity_bytes(device)
@@ -2878,25 +2751,9 @@ def _copy_to_job(ser, src, dst_dir):
 def burn_data_flow(ser):
     global _last_upload_label
 
-    if _stdin_is_tty():
-        safe_send(ser, "STATUS:Enter URL or file path in terminal")
-        print("=== Enter URL or file path below, then press Enter ===")
-        try:
-            url = sys.stdin.readline().strip()
-        except (EOFError, KeyboardInterrupt, OSError):
-            safe_send(ser, "CANCELLED:Cancelled")
-            return
-        if not url:
-            safe_send(ser, "ERROR:Need URL or file path")
-            return
-    else:
-        url = wait_for_web_url(ser)
-        if url is None:
-            safe_send(ser, "CANCELLED:Cancelled")
-            return
-        if not url:
-            safe_send(ser, "ERROR:Need URL or file path")
-            return
+    url = _wait_for_source(ser)
+    if not url:
+        return
 
     device = discstation_burn.disc_device()
     dl_info = discstation_burn.detect_disc_type(device)
@@ -3043,25 +2900,9 @@ def burn_data_flow(ser):
 
 
 def burn_audio_flow(ser):
-    if _stdin_is_tty():
-        safe_send(ser, "STATUS:Enter path to audio files in terminal")
-        print("=== Enter path to audio files/folder, then press Enter ===")
-        try:
-            url = sys.stdin.readline().strip()
-        except (EOFError, KeyboardInterrupt, OSError):
-            safe_send(ser, "CANCELLED:Cancelled")
-            return
-        if not url:
-            safe_send(ser, "ERROR:Need path to audio files")
-            return
-    else:
-        url = wait_for_web_url(ser)
-        if url is None:
-            safe_send(ser, "CANCELLED:Cancelled")
-            return
-        if not url:
-            safe_send(ser, "ERROR:Need path to audio files")
-            return
+    url = _wait_for_source(ser, "path to audio files")
+    if not url:
+        return
 
     src_path = Path(url)
     if not src_path.exists():
@@ -3962,12 +3803,12 @@ def handbrake_rip_main_feature(ser, device, out_dir, title_index):
     return dest
 
 
-def rip_flow(ser, artist_hint=None, album_hint=None):
+def rip_flow(ser):
     device = discstation_burn.disc_device()
     kind = disc_kind(device)
 
     if kind == "audio_cd":
-        rip_audio_cd(ser, device, artist_hint, album_hint)
+        rip_audio_cd(ser, device)
         return
 
     if kind in ("vcd", "svcd", "video_data"):
@@ -4222,14 +4063,14 @@ def _rip_audio_cd_macos(ser, device, chapters, metadata, cover_path, out_dir):
     time.sleep(3)
 
 
-def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
+def rip_audio_cd(ser, device):
     chapters = audio_cd_chapters(device)
     metadata = None
     cover_path = None
 
     _raise_if_cancelled(ser)
     send(ser, "STATUS:Looking up CD...")
-    metadata = audio_metadata_lookup(device, len(chapters), artist_hint, album_hint)
+    metadata = audio_metadata_lookup(device, len(chapters))
     _raise_if_cancelled(ser)
 
     if metadata:
@@ -4361,7 +4202,7 @@ def rip_audio_cd(ser, device, artist_hint=None, album_hint=None):
     time.sleep(3)
 
 
-def station_loop(ser, url, artist_hint=None, album_hint=None):
+def station_loop(ser):
     global _last_burn_result, _last_burn_result_time, _tray_open, _tray_open_since, _operation_active, _web_op_verb
     discstation_burn.cleanup_old_jobs()
     try:
@@ -4605,12 +4446,12 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
         _operation_active = True  # stop /disc-info probing the drive during the flow
         try:
             if mode == "BURN":
-                burn_flow(ser, url)
+                burn_flow(ser)
                 _last_burn_result = "Burn complete"
             elif mode == "PLAY":
                 play_flow(ser)
             elif mode == "RIP":
-                rip_flow(ser, artist_hint, album_hint)
+                rip_flow(ser)
                 _last_burn_result = "Rip complete"
             elif mode == "BURN DATA":
                 burn_data_flow(ser)
@@ -4679,15 +4520,7 @@ def check_pidfile():
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Physical DVD station controller")
-    parser.add_argument("--artist", help="Audio CD album artist hint for metadata fallback")
-    parser.add_argument("--album", help="Audio CD album title hint for metadata fallback")
-    parser.add_argument(
-        "--retag-latest-audio",
-        action="store_true",
-        help="Retag the newest generic audio_cd_* rip using --artist/--album, then exit",
-    )
     parser.add_argument("--port", type=int, default=8080, help="Web interface port")
-    parser.add_argument("url", nargs="?", help="YouTube URL or file path for burn mode")
     return parser.parse_args()
 
 
@@ -4701,15 +4534,6 @@ def main():
     exit_code = 0
 
     try:
-        if args.retag_latest_audio:
-            rip_dir = latest_audio_rip_dir()
-            new_dir, cover_path, renamed = retag_audio_rip(rip_dir, args.artist, args.album)
-            print(f"Retagged: {new_dir}")
-            print(f"Cover: {cover_path or 'not found'}")
-            for path in renamed:
-                print(path.name)
-            return
-
         start_web_server(args.port)
 
         while True:
@@ -4755,7 +4579,7 @@ def main():
                 # one now so a connected web remote learns about a newly-attached
                 # ESP32 immediately instead of only on its next reload.
                 _sse_publish(_status_snapshot())
-                station_loop(ser, args.url, args.artist, args.album)
+                station_loop(ser)
             except _HardwareAttached:
                 print("ESP32 detected - handing off from the web remote to hardware.")
             except (serial.SerialException, OSError, termios.error) as e:
