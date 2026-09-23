@@ -14,7 +14,8 @@ fi
 if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update
   sudo apt-get install -y \
-    cdrdao dvdauthor ffmpeg genisoimage growisofs handbrake-cli lsdvd mpv \
+    cdrdao dvdauthor dvdbackup eject ffmpeg genisoimage growisofs handbrake-cli \
+    lsdvd mpv sg3-utils \
     nodejs openssl python3 python3-pip python3-serial python3-mutagen \
     python3-requests python3-pyudev python3-libdiscid python3-musicbrainzngs \
     python3-numpy pulseaudio-utils libdiscid0 python3-venv wodim
