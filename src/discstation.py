@@ -3068,11 +3068,11 @@ def _iter_proc_lines(proc, ser):
 
 # --- OLED spectrum visualizer -----------------------------------------------
 # Taps the real audio the host is playing - PulseAudio's monitor source on
-# Linux, a BlackHole loopback device on macOS (see docs/PLATFORM_SUPPORT.md
-# for the one-time setup) - not a simulation, and streams it to the remote as
+# Linux - not a simulation, and streams it to the remote as
 # "VU:<16 comma-separated 0-63 levels>" at ~15fps. Needs numpy; anywhere else
-# (or without the capture source set up) this quietly no-ops and the remote
-# just shows its normal PLAY text screen.
+# (macOS can't capture system audio without a signed helper - see
+# docs/PLATFORM_SUPPORT.md) this quietly no-ops and the remote just shows its
+# normal PLAY text screen.
 VU_BARS = 16   # must match the firmware's VU_BARS
 VU_RATE_HZ = 15
 VU_SAMPLE_RATE = 22050
@@ -3090,55 +3090,19 @@ def _pulse_default_monitor():
     return f"{sink}.monitor" if sink else None
 
 
-def _darwin_blackhole_input():
-    """Index of the 'BlackHole' avfoundation audio device, or None if it's not
-    installed. macOS has no built-in loopback source - this requires the user
-    to `brew install blackhole-2ch` and set a Multi-Output Device (BlackHole +
-    real speakers) as the system's default output, so audio is both audible
-    and tapped (see docs/PLATFORM_SUPPORT.md)."""
-    try:
-        # Device list is on stderr; ffmpeg exits non-zero here, that's normal.
-        out = subprocess.run(["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-                              capture_output=True, text=True, timeout=5).stderr
-    except Exception:
-        return None
-    in_audio = False
-    for line in out.splitlines():
-        if "AVFoundation audio devices" in line:
-            in_audio = True
-            continue
-        if in_audio:
-            m = re.search(r"\[(\d+)\]\s+(.*)", line)
-            if m and "blackhole" in m.group(2).lower():
-                return m.group(1)
-    return None
-
-
 def _vu_capture_cmd():
-    """subprocess argv that streams raw s16le mono PCM at VU_SAMPLE_RATE on
-    stdout for whatever's currently playing, or None if this OS/setup can't
-    do it. One capture source per platform; the FFT/scaling pipeline below is
-    the same regardless of where the bytes came from."""
-    system = discstation_host.system_name()
-    if system == "linux":
-        monitor = _pulse_default_monitor()
-        if not monitor:
-            return None
-        # --latency-msec=50: PulseAudio's default capture buffer is several
-        # hundred ms to seconds (tuned for robust recording, not streaming) -
-        # without this, parec hands us data in ~1.5-2s bursts instead of a
-        # steady trickle, which starves the visualizer for longer than the
-        # firmware's fallback timeout and flickers back to the text screen.
-        return ["parec", "--format=s16le", f"--rate={VU_SAMPLE_RATE}", "--channels=1",
-                "--latency-msec=50", "-d", monitor]
-    if system == "darwin":
-        idx = _darwin_blackhole_input()
-        if idx is None:
-            return None
-        return ["ffmpeg", "-f", "avfoundation", "-i", f":{idx}",
-                "-ac", "1", "-ar", str(VU_SAMPLE_RATE), "-f", "s16le",
-                "-loglevel", "error", "-"]
-    return None
+    """parec argv streaming raw s16le mono PCM at VU_SAMPLE_RATE from the
+    default sink's monitor, or None if PulseAudio has no default sink."""
+    monitor = _pulse_default_monitor()
+    if not monitor:
+        return None
+    # --latency-msec=50: PulseAudio's default capture buffer is several
+    # hundred ms to seconds (tuned for robust recording, not streaming) -
+    # without this, parec hands us data in ~1.5-2s bursts instead of a
+    # steady trickle, which starves the visualizer for longer than the
+    # firmware's fallback timeout and flickers back to the text screen.
+    return ["parec", "--format=s16le", f"--rate={VU_SAMPLE_RATE}", "--channels=1",
+            "--latency-msec=50", "-d", monitor]
 
 
 def _vu_loop(ser, stop_event, pause_event):
@@ -3198,11 +3162,9 @@ def _vu_loop(ser, stop_event, pause_event):
 
 def start_vu_visualizer(ser):
     """Best-effort: returns (stop_event, pause_event), or (None, None) if the
-    visualizer can't run here (no numpy, no capture source, or a web-only
-    link). Linux (PulseAudio) and macOS (BlackHole, see
-    docs/PLATFORM_SUPPORT.md) only - _vu_capture_cmd() returns None anywhere
-    else, or if the OS-specific capture device isn't set up."""
-    if _np is None or isinstance(ser, VirtualSerial) or discstation_host.system_name() not in ("linux", "darwin"):
+    visualizer can't run here (no numpy, no PulseAudio, or a web-only link).
+    Linux only."""
+    if _np is None or isinstance(ser, VirtualSerial) or discstation_host.system_name() != "linux":
         return None, None
     stop_event = threading.Event()
     pause_event = threading.Event()

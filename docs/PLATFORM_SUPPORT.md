@@ -27,37 +27,19 @@ Set `DISC_DEVICE` if automatic drive detection fails. The one known limitation
 is **audio-CD *burning*** — `cdrdao` is the only option and often cannot claim
 the drive on recent macOS; DiscStation reports this clearly instead of hanging.
 
-### ESP32 remote: OLED spectrum visualizer — not currently working on macOS
+### ESP32 remote: OLED spectrum visualizer — Linux only
 
-**Confirmed broken, not just a setup step.** The visualizer's macOS capture
-path (`ffmpeg -f avfoundation` reading the BlackHole loopback device) was
-built and the BlackHole/Multi-Output-Device routing was set up and verified
-correct on real hardware — but `ffmpeg`'s capture consistently returns
-silence (valid-looking output, zero errors, every sample exactly `0`) even
-with the native macOS Sound input level meter confirmed showing real,
-moving signal on BlackHole at the same moment. That combination — real
-signal present at the OS/driver level, silently zeroed once it reaches an
-app's capture buffer — is macOS's system-audio-capture privacy protection
-muting an untrusted capturer, not a permission checkbox that was missed:
-Microphone and Screen & System Audio Recording were both granted to
-`ffmpeg` with no change.
-
-The legitimate modern API for this (CoreAudio's Process Tap,
-`AudioHardwareCreateProcessTap`, macOS 14.2+) requires a properly
-code-signed app bundle requesting a specific entitlement, with its own
-dedicated system consent dialog — a bare ad-hoc-signed Homebrew CLI binary
-like `ffmpeg` structurally cannot satisfy that, regardless of which Privacy
-& Security toggles are flipped. Making the visualizer work on macOS would
-mean building a small signed helper app around that API — a real, separate
-project, not started.
-
-**Everything else works normally** — audio-CD/DVD/video playback, ripping,
-burning, and the web UI are all unaffected. PLAY just always shows the
-normal text status screen on macOS instead of ever switching to bars.
-
-If BlackHole is already installed from an earlier attempt at this, it's
-harmless to leave in place — it just won't do anything useful for
-DiscStation until/unless the above gets built.
+The bars need a way to tap the audio being played. On Linux that's PulseAudio's
+monitor source (`parec`). macOS has no equivalent a plain CLI tool can use: a
+capture through a loopback driver (BlackHole + `ffmpeg -f avfoundation`) was
+built and verified end to end on real hardware, and returns pure silence
+(every sample `0`, no errors) even while the native Sound input meter shows
+signal — macOS's system-audio-capture privacy protection mutes untrusted
+capturers, and no Privacy & Security toggle changes that. The supported route
+is CoreAudio's Process Tap (`AudioHardwareCreateProcessTap`, macOS 14.2+),
+which needs a code-signed app bundle with its own consent dialog — a separate
+project, not started, so the capture code was removed. PLAY just shows the
+normal text status screen on macOS; everything else is unaffected.
 
 ### Troubleshooting playback ("mpv not found" / play fails to start)
 
