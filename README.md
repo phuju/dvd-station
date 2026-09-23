@@ -47,7 +47,7 @@ remote can talk to the host over Wi-Fi instead of a USB cable.
 | **Burn Video DVD** | YouTube URL or local file → ffmpeg 2-pass → DVD-Video disc |
 | **Burn Data DVD** | Any files/folders → ISO/Joliet data disc (no quality loss) |
 | **Burn MPG** | Re-burn a previously converted movie.mpg |
-| **Play** | Playback via mpv (DVD-Video, Audio CD, VCD, SVCD) — the OLED remote shows a live spectrum visualizer of the actual audio (Linux only for now; see `docs/PLATFORM_SUPPORT.md`) |
+| **Play** | Playback via mpv (DVD-Video, Audio CD, VCD, SVCD) — the OLED remote shows a live spectrum visualizer of the actual audio (Linux only for now; see `docs/PLATFORM_SUPPORT.md`); while a track plays the OLED keeps the track/volume screen (or the visualizer) up — the spinning-disc screensaver only appears on the home/standby screens or after playback has been paused for 15 s |
 | **Rip** | Audio CD → FLAC (MusicBrainz); DVD-Video → VIDEO_TS mirror or HandBrake MKV (TMDb naming) |
 
 ## Project Structure
@@ -94,7 +94,9 @@ dock/taskbar icon on macOS, Linux, and Windows.
 **Updating:** `npm install -g discstation` alone now redeploys and restarts
 the already-running service automatically (a `postinstall` hook copies the
 updated files over and restarts it) — no need to re-run `discstation-setup`
-after every update. `discstation-setup` itself is still what performs the
+after every update. Note this deploys whatever version is *published*, so installing an
+older published release over a newer git checkout rolls the running service
+back to it until you publish (or re-copy `src/`) again. `discstation-setup` itself is still what performs the
 first install (system packages, venv, cert, service registration).
 
 Support by OS:
