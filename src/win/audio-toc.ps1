@@ -6,15 +6,7 @@ param([Parameter(Mandatory = $true)] [string] $Drive)
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "_json.ps1")
 
-function Get-Recorder([string]$letter) {
-    $master = New-Object -ComObject "IMAPI2.MsftDiscMaster2"
-    for ($i = 0; $i -lt $master.Count; $i++) {
-        $rec = New-Object -ComObject "IMAPI2.MsftDiscRecorder2"
-        $rec.InitializeDiscRecorder($master.Item($i))
-        foreach ($p in $rec.VolumePathNames) { if ($p -and $p.TrimEnd('\') -ieq $letter) { return $rec } }
-    }
-    throw "No optical recorder for $letter"
-}
+. (Join-Path $PSScriptRoot "_imapi.ps1")
 
 $rec = Get-Recorder $Drive
 $raw = New-Object -ComObject "IMAPI2.MsftDiscFormat2RawCD"
