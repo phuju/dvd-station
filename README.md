@@ -46,7 +46,6 @@ remote can talk to the host over Wi-Fi instead of a USB cable.
 |------|-------------|
 | **Burn Video DVD** | YouTube URL or local file → ffmpeg 2-pass → DVD-Video disc |
 | **Burn Data DVD** | Any files/folders → ISO/Joliet data disc (no quality loss) |
-| **Burn MPG** | Re-burn a previously converted movie.mpg |
 | **Play** | Playback via mpv (DVD-Video, Audio CD, VCD, SVCD) — the OLED remote shows a live spectrum visualizer of the actual audio (Linux only for now; see `docs/PLATFORM_SUPPORT.md`); while a track plays the OLED keeps the track/volume screen (or the visualizer) up — the spinning-disc screensaver only appears on the home/standby screens or after playback has been paused for 15 s |
 | **Rip** | Audio CD → FLAC (MusicBrainz); DVD-Video → VIDEO_TS mirror or HandBrake MKV (TMDb naming) |
 

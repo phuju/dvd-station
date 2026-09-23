@@ -1915,9 +1915,6 @@ def menu_items_for_disc(device):
         props = udev_cdrom_properties(device)
         is_cd = props.get("ID_CDROM_MEDIA_CD_R") == "1" or props.get("ID_CDROM_MEDIA_CD_RW") == "1"
         items = ["BURN DATA", "BURN AUDIO"] if is_cd else ["BURN", "BURN DATA"]
-        had = discstation_burn.WORK.rglob("movie.mpg")
-        if any(True for _ in had):
-            items.append("BURN MPG")
     elif kind in ("dvd_video", "audio_cd", "vcd", "svcd", "video_data", "data_disc", "data_cd"):
         items = ["PLAY", "RIP"]
     else:
@@ -2916,84 +2913,6 @@ def burn_flow(ser, url):
         raise
 
     time.sleep(3)
-
-
-def _mpg_label(job_dir):
-    label = "DVD_VIDEO"
-    dl = job_dir / "download"
-    if dl.is_dir():
-        for f in sorted(dl.iterdir()):
-            if f.suffix.lower() in discstation_burn.VIDEO_EXTS:
-                label = discstation_burn.sanitize_disc_label(f.stem)
-                break
-        else:
-            for f in sorted(dl.iterdir()):
-                label = discstation_burn.sanitize_disc_label(f.stem)
-                break
-    if label == "DVD_VIDEO" or not label:
-        label = discstation_burn.sanitize_disc_label(job_dir.name)
-    return label
-
-
-def burn_mpg_flow(ser):
-    jobs = sorted(discstation_burn.WORK.glob("job_*"), reverse=True)
-    candidates = []
-    for jd in jobs:
-        mpg = jd / "movie.mpg"
-        if mpg.exists():
-            label = _mpg_label(jd)
-            candidates.append((mpg, label))
-    names = [c[1][:20] for c in candidates] + ["Enter path..."]
-    safe_send(ser, f"MENU_ITEMS:{','.join(names)}")
-    safe_send(ser, "HOME:Select MPG to burn")
-    mpg = None
-    disc_label = None
-    while True:
-        line = read_serial_line(ser, timeout=0.5)
-        if not line:
-            continue
-        if line.startswith("SELECT:"):
-            sel = line.split(":", 1)[1].strip()
-            if sel == "Enter path...":
-                path_str = wait_for_web_url(ser)
-                if path_str is None:
-                    refresh_main_menu(ser)
-                    return
-                path_str = path_str.strip()
-                p = Path(path_str)
-                if not p.exists():
-                    safe_send(ser, "ERROR:Path not found")
-                    time.sleep(2)
-                    continue
-                if p.is_dir():
-                    mpg = p / "movie.mpg"
-                    if not mpg.exists():
-                        safe_send(ser, "ERROR:No movie.mpg in dir")
-                        time.sleep(2)
-                        continue
-                elif p.suffix.lower() == ".mpg":
-                    mpg = p
-                else:
-                    safe_send(ser, "ERROR:Not an .mpg file")
-                    time.sleep(2)
-                    continue
-                disc_label = discstation_burn.sanitize_disc_label(mpg.stem)
-                break
-            else:
-                idx = next((i for i, n in enumerate(candidates) if n[1][:20] == sel), None)
-                if idx is not None:
-                    mpg, disc_label = candidates[idx]
-                    break
-        elif line == "CANCEL":
-            safe_send(ser, "CANCELLED:Cancelled")
-            refresh_main_menu(ser)
-            return
-        time.sleep(0.05)
-
-    device = discstation_burn.disc_device()
-    dl_info = discstation_burn.detect_disc_type(device)
-    disc_bytes = dl_info["capacity"]
-    discstation_burn.remux_and_burn(ser, mpg, disc_label, disc_bytes, dl_info)
 
 
 def _copy_to_job(ser, src, dst_dir):
@@ -4751,9 +4670,6 @@ def station_loop(ser, url, artist_hint=None, album_hint=None):
             elif mode == "RIP":
                 rip_flow(ser, artist_hint, album_hint)
                 _last_burn_result = "Rip complete"
-            elif mode == "BURN MPG":
-                burn_mpg_flow(ser)
-                _last_burn_result = "Burn complete"
             elif mode == "BURN DATA":
                 burn_data_flow(ser)
                 _last_burn_result = "Burn complete"

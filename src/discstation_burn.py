@@ -1820,10 +1820,8 @@ def remux_and_author(ser, mpg, disc_label, disc_capacity, dvd_aspect=None):
     silent blocking subprocess call that lets the ESP32's 30s watchdog
     flip the display to "disconnected" partway through.
 
-    This is the single place the remux+author sequence lives — the
-    full download/convert pipeline, the OLED burn_mpg_flow picker, and
-    any CLI entry point all call this (via remux_and_burn below, or
-    directly), so a fix here only has to happen once.
+    This is the single place the remux+author sequence lives (burn_flow
+    calls it after the download/convert pipeline).
     """
     check_encoded_size(ser, mpg, disc_capacity)
     send(ser, f"TITLE:{disc_label}")
@@ -1873,10 +1871,3 @@ def remux_and_author(ser, mpg, disc_label, disc_capacity, dvd_aspect=None):
     dvd_dir = author(ser, fixed, fixed.parent, dvd_aspect)
     check_dvd_size(ser, dvd_dir, disc_capacity)
     return dvd_dir
-
-def remux_and_burn(ser, mpg, disc_label, disc_capacity, dl_info, burn_speed=None, dvd_aspect=None):
-    dvd_dir = remux_and_author(ser, mpg, disc_label, disc_capacity, dvd_aspect)
-    wait_for_burn_confirm(ser, dvd_dir, disc_capacity)
-    burn(ser, dvd_dir, disc_label, burn_speed, dl_info["is_dual_layer"])
-    safe_send(ser, "DONE:Burn complete!")
-    print(f"Burned {mpg} as {disc_label}")
