@@ -33,7 +33,6 @@
 #define LONG_PRESS_MS    1000
 #define ENC_CLICK_GUARD_MS 200  // ignore new SW presses this soon after a rotation tick (rotation vibration can bounce SW low)
 #define DONE_RESET_MS    30000
-#define STANDBY_BLANK_MS 60000
 #define IDLE_BLANK_MS    15000   // no input this long on HOME/STANDBY -> spinning-disc screensaver
                                  // (this power bank's no-load auto-shutoff trips at ~30s idle; keep this
                                  // well under that so the screensaver's current draw beats it there)

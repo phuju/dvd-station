@@ -2217,10 +2217,6 @@ def _release_meta(release, track_count, toc=None):
     return None
 
 
-# Back-compat alias (older name).
-metadata_from_musicbrainz_release = _release_meta
-
-
 def musicbrainz_release_details(release_id):
     if _mb is not None:
         return _mb.get_release_by_id(

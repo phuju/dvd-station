@@ -20,7 +20,6 @@
   "scripts": {
     "start": "expo start --port 8090",
     "start:tunnel": "expo start --tunnel --port 8090",
-    "start:lan": "EXPO_PACKAGER_HOSTNAME=192.168.0.111 expo start --port 8090",
     "android": "expo start --android --port 8090",
     "ios": "expo start --ios --port 8090",
     "web": "expo start --web --port 8090"

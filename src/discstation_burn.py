@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-import datetime
 import json
 import os
 import re
 import serial
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import unicodedata
@@ -169,24 +167,6 @@ def reset_drive(device=None):
     print("reset_drive: no matching USB optical device found to reset")
     return False
 
-def _esp32_port_from_sysfs():
-    """Find the ESP32's USB serial port by matching VID/PID 303a:1001
-    in sysfs. Returns the device path (e.g. /dev/ttyACM0) or None."""
-    for tty in Path("/sys/class/tty").glob("ttyACM*"):
-        uevent = tty / "device" / "uevent"
-        if uevent.exists():
-            modalias = uevent.read_text()
-            if "303a/1001" in modalias or "303a:1001" in modalias:
-                dev = Path("/dev") / tty.name
-                if dev.exists():
-                    return str(dev)
-    return None
-
-
-def detect_esp32_port():
-    return discstation_host.serial_port() or ""
-
-PORT = detect_esp32_port()
 BAUD   = 115200
 
 
@@ -238,7 +218,6 @@ def iter_proc_or_cancel(proc, ser):
     reader.join(timeout=1)
 
 
-DVD_DEVICE = os.environ.get("DISC_DEVICE") or os.environ.get("DVD_DEVICE")
 DISC_SPEED = os.environ.get("DISC_SPEED")
 DISC_DISC_BYTES = 4_700_000_000
 DVD_DL_BYTES = 8_500_000_000
@@ -1901,156 +1880,3 @@ def remux_and_burn(ser, mpg, disc_label, disc_capacity, dl_info, burn_speed=None
     burn(ser, dvd_dir, disc_label, burn_speed, dl_info["is_dual_layer"])
     safe_send(ser, "DONE:Burn complete!")
     print(f"Burned {mpg} as {disc_label}")
-
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 discstation_burn.py 'video URL or file path'")
-        sys.exit(1)
-    url = sys.argv[1]
-    WORK.mkdir(parents=True, exist_ok=True)
-    job_dir = WORK / time.strftime("job_%Y%m%d_%H%M%S")
-    job_dir.mkdir()
-    ser = None
-    try:
-        ser = serial.Serial(PORT, BAUD, timeout=1)
-        reset_serial_state()
-        time.sleep(2)
-        print("Connected to DiscStation")
-        print("Running preflight...")
-        send(ser, "STATUS:Preflight...")
-        info = get_video_info(url, ser)
-        title = info["title"]
-        duration = info["duration"]
-        duration_line, fit_line, can_fit = preflight_lines(duration)
-        print(f"Title: {title}")
-        print(f"Duration: {format_duration(duration)}")
-        print(f"Preflight: {fit_line}")
-        print(f"DVD drive: {disc_device()}")
-        disc_label = sanitize_disc_label(title)
-        print(f"Disc label: {disc_label}")
-        send(ser, f"TITLE:{title}")
-        send(ser, f"META:{duration_line}")
-        send(ser, f"FIT:{fit_line}")
-        if not can_fit:
-            raise RuntimeError("Video too long for DVD5")
-
-        device = disc_device()
-        dl_info = detect_disc_type(device)
-        if dl_info["is_dual_layer"]:
-            sl_target = int(os.environ.get("DISC_TARGET_BYTES", "4300000000"))
-            try:
-                sl_plan = bitrate_plan(duration, "AUTO", sl_target)
-                if sl_plan:
-                    warn = f"DL disc for SL content"
-                    print(f"WARNING: {warn}")
-                    safe_send(ser, f"WARNING:{warn}")
-                    time.sleep(3)
-            except RuntimeError:
-                pass
-
-        print("Waiting for button press...")
-        selected_mode = "AUTO"
-        burn_speed = None
-        while True:
-            if ser.in_waiting:
-                resp = ser.readline().decode(errors='ignore').strip()
-                note_serial_activity()
-                if resp == "CANCEL":
-                    print("Cancelled by user")
-                    safe_send(ser, "CANCELLED:Cancelled")
-                    sys.exit(130)
-                elif resp.startswith("MODE:"):
-                    selected_mode = normalize_mode(resp.split(":", 1)[1])
-                    print(f"Mode: {selected_mode}")
-                elif resp.startswith("SPEED:"):
-                    burn_speed = resp.split(":", 1)[1].strip()
-                    print(f"Burn speed: {burn_speed}")
-                elif resp == "START" or resp.startswith("START:"):
-                    if ":" in resp:
-                        selected_mode = normalize_mode(resp.split(":", 1)[1])
-                    print(f"Button pressed - starting in {selected_mode} mode!")
-                    send(ser, f"STATUS:Starting {selected_mode}...")
-                    break
-            time.sleep(0.1)
-
-        start_time = time.time()
-        disc_type_label = "DL" if dl_info["is_dual_layer"] else "SL"
-        try:
-            disc_bytes = dl_info["capacity"]
-            plan = bitrate_plan(duration, selected_mode, disc_bytes)
-            video  = download(ser, url, job_dir)
-            mpg, dvd_aspect = convert(ser, video, job_dir, selected_mode, disc_bytes)
-            dvd    = remux_and_author(ser, mpg, disc_label, disc_bytes, dvd_aspect)
-            if plan["burn"]:
-                burn(ser, dvd, disc_label, burn_speed, dl_info["is_dual_layer"])
-                send(ser, "DONE:Disc complete!")
-                print("Done!")
-            else:
-                send(ser, "DONE:Test complete!")
-                print("Test complete. DVD folder was built but not burned.")
-            append_history({
-                "timestamp": datetime.datetime.now().isoformat(),
-                "title": title,
-                "disc_type": disc_type_label,
-                "mode": selected_mode,
-                "speed": burn_speed or "Auto",
-                "success": True,
-                "duration_s": round(time.time() - start_time),
-            })
-        except (KeyboardInterrupt, SystemExit):
-            append_history({
-                "timestamp": datetime.datetime.now().isoformat(),
-                "title": title,
-                "disc_type": disc_type_label,
-                "mode": selected_mode,
-                "speed": burn_speed or "Auto",
-                "success": False,
-                "error": "Cancelled",
-                "duration_s": round(time.time() - start_time),
-            })
-            raise
-        except Exception as e:
-            append_history({
-                "timestamp": datetime.datetime.now().isoformat(),
-                "title": title,
-                "disc_type": disc_type_label,
-                "mode": selected_mode,
-                "speed": burn_speed or "Auto",
-                "success": False,
-                "error": str(e)[:100],
-                "duration_s": round(time.time() - start_time),
-            })
-            raise
-    except (KeyboardInterrupt, SystemExit):
-        safe_send(ser, "CANCELLED:Stopped")
-        print("Cancelled")
-        sys.exit(130)
-    except RuntimeError as e:
-        msg = str(e)
-        if msg == "Cancelled":
-            safe_send(ser, "CANCELLED:Stopped")
-        else:
-            safe_send(ser, f"ERROR:{msg[:20]}")
-        print(f"Error: {e}")
-        sys.exit(1)
-    except Exception as e:
-        safe_send(ser, f"ERROR:{str(e)[:20]}")
-        print(f"Error: {e}")
-        sys.exit(1)
-    finally:
-        if ser:
-            ser.close()
-
-
-BURN_HISTORY = WORK / "burn_history.jsonl"
-
-
-def append_history(entry):
-    BURN_HISTORY.parent.mkdir(parents=True, exist_ok=True)
-    with open(BURN_HISTORY, "a") as f:
-        f.write(json.dumps(entry) + "\n")
-
-
-if __name__ == "__main__":
-    main()
