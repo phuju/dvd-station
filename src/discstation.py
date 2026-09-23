@@ -3,6 +3,7 @@ import argparse
 import atexit
 import collections
 import concurrent.futures
+import contextlib
 import errno
 try:
     import fcntl  # POSIX-only; used only in drive_status()'s Linux branch
@@ -23,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import datetime
 from pathlib import Path
 from queue import Queue, Empty, Full
@@ -1121,6 +1123,67 @@ def append_burn_history(entry):
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(HISTORY_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+@contextlib.contextmanager
+def _burn_history(entry, swallow_cancel=False):
+    """Record a burn attempt in the history file however the block ends
+    (success / cancelled / error). `entry` holds the fixed fields (title,
+    disc_type, mode, speed, ...). A cancelled burn re-raises unless
+    swallow_cancel, in which case the caller checks `.cancelled` and returns."""
+    start = time.time()
+    outcome = types.SimpleNamespace(cancelled=False)
+
+    def record(ok, error=None):
+        row = {"timestamp": datetime.datetime.now().isoformat(), **entry,
+               "success": ok, "duration_s": round(time.time() - start)}
+        if error:
+            row["error"] = error
+        append_burn_history(row)
+
+    try:
+        yield outcome
+    except (KeyboardInterrupt, SystemExit):
+        record(False, "Cancelled")
+        raise
+    except CancelError:
+        record(False, "Cancelled")
+        if not swallow_cancel:
+            raise
+        outcome.cancelled = True
+    except Exception as e:
+        record(False, str(e)[:100])
+        raise
+    else:
+        record(True)
+
+
+def _wait_for_start(ser, starting=None, mode=None):
+    """Wait on the remote for START (CANCEL/STOP aborts). Returns
+    (mode, speed) - speed is None unless a SPEED: line came first - or None if
+    the user cancelled. A non-None `mode` (the video flow's) may also be set by
+    MODE:<m> / START:<m>. `starting` names the burn in the status line
+    (defaults to the mode)."""
+    speed = None
+    print("Waiting for burn START button...")
+    while True:
+        line = wait_for_button(ser)
+        if line in ("CANCEL", "PLAY_STOP"):
+            safe_send(ser, "CANCELLED:Cancelled")
+            print("Burn cancelled by user")
+            return None
+        if line.startswith("MODE:") and mode is not None:
+            mode = discstation_burn.normalize_mode(line.split(":", 1)[1])
+            print(f"Burn mode: {mode}")
+        elif line.startswith("SPEED:"):
+            speed = line.split(":", 1)[1].strip()
+            print(f"Burn speed: {speed}")
+        elif line == "START" or line.startswith("START:"):
+            if mode is not None and ":" in line:
+                mode = discstation_burn.normalize_mode(line.split(":", 1)[1])
+            print(f"Starting {starting or mode} burn")
+            send(ser, f"STATUS:Starting {starting or mode}...")
+            return mode, speed
 
 
 def run_probe(cmd, timeout=8, name=None):
@@ -2651,31 +2714,13 @@ def burn_flow(ser):
         except RuntimeError:
             pass
 
-    selected_mode = "AUTO"
-    burn_speed = None
-    print("Waiting for burn START button...")
-    while True:
-        line = wait_for_button(ser)
-        if line == "CANCEL" or line == "PLAY_STOP":
-            safe_send(ser, "CANCELLED:Cancelled")
-            print("Burn cancelled by user")
-            return
-        if line.startswith("MODE:"):
-            selected_mode = discstation_burn.normalize_mode(line.split(":", 1)[1])
-            print(f"Burn mode: {selected_mode}")
-        elif line.startswith("SPEED:"):
-            burn_speed = line.split(":", 1)[1].strip()
-            print(f"Burn speed: {burn_speed}")
-        elif line == "START" or line.startswith("START:"):
-            if ":" in line:
-                selected_mode = discstation_burn.normalize_mode(line.split(":", 1)[1])
-            print(f"Starting burn flow in {selected_mode} mode")
-            send(ser, f"STATUS:Starting {selected_mode}...")
-            break
+    started = _wait_for_start(ser, mode="AUTO")
+    if not started:
+        return
+    selected_mode, burn_speed = started
 
-    start_time = time.time()
     disc_type_label = "DL" if dl_info["is_dual_layer"] else "SL"
-    try:
+    with _burn_history({"title": title, "disc_type": disc_type_label, "mode": selected_mode, "speed": burn_speed or "Auto"}):
         plan = discstation_burn.bitrate_plan(duration, selected_mode, disc_bytes)
         video = discstation_burn.download(ser, url, job_dir)
         mpg, dvd_aspect = discstation_burn.convert(ser, video, job_dir, selected_mode, disc_bytes)
@@ -2698,40 +2743,6 @@ def burn_flow(ser):
         else:
             safe_send(ser, "DONE:Test complete!")
             print(f"Test complete. DVD folder: {dvd_dir}")
-
-        append_burn_history({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "title": title,
-            "disc_type": disc_type_label,
-            "mode": selected_mode,
-            "speed": burn_speed or "Auto",
-            "success": True,
-            "duration_s": round(time.time() - start_time),
-        })
-    except (KeyboardInterrupt, SystemExit):
-        append_burn_history({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "title": title,
-            "disc_type": disc_type_label,
-            "mode": selected_mode,
-            "speed": burn_speed or "Auto",
-            "success": False,
-            "error": "Cancelled",
-            "duration_s": round(time.time() - start_time),
-        })
-        raise
-    except Exception as e:
-        append_burn_history({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "title": title,
-            "disc_type": disc_type_label,
-            "mode": selected_mode,
-            "speed": burn_speed or "Auto",
-            "success": False,
-            "error": str(e)[:100],
-            "duration_s": round(time.time() - start_time),
-        })
-        raise
 
     time.sleep(3)
 
@@ -2782,21 +2793,10 @@ def burn_data_flow(ser):
 
     send(ser, f"TITLE:{title}")
 
-    burn_speed = None
-    print("Waiting for burn START button...")
-    while True:
-        line = wait_for_button(ser)
-        if line == "CANCEL" or line == "PLAY_STOP":
-            safe_send(ser, "CANCELLED:Cancelled")
-            print("Burn cancelled by user")
-            return
-        if line.startswith("SPEED:"):
-            burn_speed = line.split(":", 1)[1].strip()
-            print(f"Burn speed: {burn_speed}")
-        elif line == "START" or line.startswith("START:"):
-            print("Starting data burn...")
-            send(ser, "STATUS:Starting data burn...")
-            break
+    started = _wait_for_start(ser, "data burn")
+    if not started:
+        return
+    burn_speed = started[1]
 
     if not can_burn_disc(device):
         raise RuntimeError("No writable disc in drive")
@@ -2807,8 +2807,7 @@ def burn_data_flow(ser):
     download_dir = job_dir / "download"
     download_dir.mkdir()
 
-    start_time = time.time()
-    try:
+    with _burn_history({"title": title, "disc_type": "Data DVD", "mode": "DATA", "speed": burn_speed or "Auto"}, swallow_cancel=True) as h:
         is_dir = local_path.is_dir() if local_path.exists() else False
         if is_dir:
             files_to_burn = [local_path]
@@ -2850,52 +2849,8 @@ def burn_data_flow(ser):
         safe_send(ser, "DONE:Data disc complete!")
         print("Data burn complete.")
 
-        append_burn_history({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "title": title,
-            "disc_type": "Data DVD",
-            "mode": "DATA",
-            "speed": burn_speed or "Auto",
-            "success": True,
-            "duration_s": round(time.time() - start_time),
-        })
-    except (KeyboardInterrupt, SystemExit):
-        append_burn_history({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "title": title,
-            "disc_type": "Data DVD",
-            "mode": "DATA",
-            "speed": burn_speed or "Auto",
-            "success": False,
-            "error": "Cancelled",
-            "duration_s": round(time.time() - start_time),
-        })
-        raise
-    except CancelError:
-        append_burn_history({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "title": title,
-            "disc_type": "Data DVD",
-            "mode": "DATA",
-            "speed": burn_speed or "Auto",
-            "success": False,
-            "error": "Cancelled",
-            "duration_s": round(time.time() - start_time),
-        })
+    if h.cancelled:
         return
-    except Exception as e:
-        append_burn_history({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "title": title,
-            "disc_type": "Data DVD",
-            "mode": "DATA",
-            "speed": burn_speed or "Auto",
-            "success": False,
-            "error": str(e)[:100],
-            "duration_s": round(time.time() - start_time),
-        })
-        raise
-
     time.sleep(3)
 
 
@@ -2965,18 +2920,10 @@ def burn_audio_flow(ser):
     send(ser, f"META:Dur {mins}m{secs}s")
     send(ser, f"FIT:CD-R {fits}")
 
-    burn_speed = None
-    print("Waiting for START button...")
-    while True:
-        line = wait_for_button(ser)
-        if line == "CANCEL" or line == "PLAY_STOP":
-            safe_send(ser, "CANCELLED:Cancelled")
-            return
-        if line.startswith("SPEED:"):
-            burn_speed = line.split(":", 1)[1].strip()
-        elif line == "START" or line.startswith("START:"):
-            send(ser, "STATUS:Starting audio burn...")
-            break
+    started = _wait_for_start(ser, "audio burn")
+    if not started:
+        return
+    burn_speed = started[1]
 
     device = discstation_burn.disc_device()
     if not can_burn_disc(device):
@@ -2984,52 +2931,13 @@ def burn_audio_flow(ser):
     if total_dur > 4740:
         raise RuntimeError(f"Too long for CD-R: {int(total_dur/60)}m{int(total_dur%60)}s > 79m")
 
-    start_time = time.time()
-    try:
+    entry = {"title": disc_label, "fingerprint": fingerprint, "track_titles": track_titles,
+             "disc_type": "Audio CD", "mode": "AUDIO", "speed": burn_speed or "Auto"}
+    with _burn_history(entry, swallow_cancel=True) as h:
         discstation_burn.burn_audio_cd(ser, audio_files, disc_label, burn_speed)
         safe_send(ser, "DONE:Audio CD complete!")
-        append_burn_history({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "title": disc_label,
-            "fingerprint": fingerprint,
-            "track_titles": track_titles,
-            "disc_type": "Audio CD",
-            "mode": "AUDIO",
-            "speed": burn_speed or "Auto",
-            "success": True,
-            "duration_s": round(time.time() - start_time),
-        })
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except CancelError:
-        append_burn_history({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "title": disc_label,
-            "fingerprint": fingerprint,
-            "track_titles": track_titles,
-            "disc_type": "Audio CD",
-            "mode": "AUDIO",
-            "speed": burn_speed or "Auto",
-            "success": False,
-            "error": "Cancelled",
-            "duration_s": round(time.time() - start_time),
-        })
+    if h.cancelled:
         return
-    except Exception as e:
-        append_burn_history({
-            "timestamp": datetime.datetime.now().isoformat(),
-            "title": disc_label,
-            "fingerprint": fingerprint,
-            "track_titles": track_titles,
-            "disc_type": "Audio CD",
-            "mode": "AUDIO",
-            "speed": burn_speed or "Auto",
-            "success": False,
-            "error": str(e)[:100],
-            "duration_s": round(time.time() - start_time),
-        })
-        raise
-
     time.sleep(3)
 
 

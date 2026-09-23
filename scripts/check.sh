@@ -17,6 +17,31 @@ d._record_web_status("PROGRESS:42%")
 assert d._status_snapshot()["progress"] == 42
 d._record_web_status("DONE:ok")
 assert d._status_snapshot()["playing"] is False
+
+# Burn-flow helpers: history recording for every exit path, START/SPEED/MODE/CANCEL.
+import json, pathlib, tempfile
+d.HISTORY_FILE = pathlib.Path(tempfile.mkdtemp()) / "h.jsonl"
+with d._burn_history({"title": "t"}):
+    pass
+try:
+    with d._burn_history({"title": "t"}):
+        raise RuntimeError("boom")
+except RuntimeError:
+    pass
+with d._burn_history({"title": "t"}, swallow_cancel=True) as h:
+    raise d.CancelError("x")
+assert h.cancelled
+rows = [json.loads(l) for l in open(d.HISTORY_FILE)]
+assert [r["success"] for r in rows] == [True, False, False] and rows[1]["error"] == "boom"
+ser = d.VirtualSerial()
+for line in ("SPEED:6x", "START"):
+    ser.push_line(line)
+assert d._wait_for_start(ser, "audio burn") == (None, "6x")
+for line in ("MODE:BEST", "START"):
+    ser.push_line(line)
+assert d._wait_for_start(ser, mode="AUTO") == ("BEST", None)
+ser.push_line("CANCEL")
+assert d._wait_for_start(ser, "x") is None
 print("smoke ok")
 EOF
 )
