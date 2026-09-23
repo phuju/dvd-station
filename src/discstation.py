@@ -887,7 +887,7 @@ def read_serial_line(ser, timeout=0.1):
     # Always make at least one non-blocking pass, even for timeout<=0 - the
     # `remaining <= 0: break` at the bottom still ends it after that pass.
     # (`while time.monotonic() < deadline` used to skip the body entirely for
-    # timeout=0, which is exactly how _check_cancel() calls this - so cancel
+    # timeout=0, which is exactly how check_cancel() calls this - so cancel
     # detection during rips silently never read the port.)
     while True:
         if _line_buf:
@@ -2556,41 +2556,22 @@ def parse_ffmpeg_time(line):
 from discstation_burn import CancelError
 
 
-def _check_cancel(ser):
-    try:
-        line = read_serial_line(ser, timeout=0)
-        return line in ("CANCEL", "PLAY_STOP") if line else False
-    except OSError:
-        return False
-
-
 def _raise_if_cancelled(ser):
     """Poll for a CANCEL press between blocking phases that have no
     subprocess loop of their own (metadata lookups, scans, cover-art
     downloads). Doesn't interrupt a call in progress, but catches the press
     the moment the phase returns."""
-    if _check_cancel(ser):
+    if discstation_burn.check_cancel(ser):
         raise CancelError
 
 
 def iter_process_events(proc, idle_seconds=1.0, ser=None):
-    lines = Queue()
-    finished = object()
-
-    def read_output():
-        try:
-            for line in proc.stdout:
-                lines.put(line.rstrip("\r\n"))
-        finally:
-            lines.put(finished)
-
-    reader = threading.Thread(target=read_output, daemon=True)
-    reader.start()
+    lines, finished = discstation_burn.proc_line_queue(proc)
     last_ping = time.time()
     output_done = False
     while proc.poll() is None or not output_done:
         if ser is not None:
-            if _check_cancel(ser):
+            if discstation_burn.check_cancel(ser):
                 discstation_burn.stop_process(proc)
                 raise CancelError
             if time.time() - last_ping >= 5:
@@ -2605,7 +2586,6 @@ def iter_process_events(proc, idle_seconds=1.0, ser=None):
             output_done = True
         else:
             yield line
-    reader.join(timeout=1)
 
 
 def rip_device(device):
@@ -2941,39 +2921,6 @@ def burn_audio_flow(ser):
     time.sleep(3)
 
 
-def _iter_proc_lines(proc, ser):
-    lines = Queue()
-    finished = object()
-
-    def read_output():
-        try:
-            for line in proc.stdout:
-                lines.put(line.rstrip("\r\n"))
-        finally:
-            lines.put(finished)
-
-    reader = threading.Thread(target=read_output, daemon=True)
-    reader.start()
-    last_ping = time.time()
-    output_done = False
-    while proc.poll() is None or not output_done:
-        if time.time() - last_ping >= 5:
-            discstation_burn.send(ser, "PING")
-            last_ping = time.time()
-        if _check_cancel(ser):
-            discstation_burn.stop_process(proc)
-            return
-        try:
-            line = lines.get(timeout=0.5)
-        except Empty:
-            continue
-        if line is finished:
-            output_done = True
-        else:
-            yield line
-    reader.join(timeout=1)
-
-
 # --- OLED spectrum visualizer -----------------------------------------------
 # Taps the real audio the host is playing - PulseAudio's monitor source on
 # Linux - not a simulation, and streams it to the remote as
@@ -3295,16 +3242,7 @@ def _play_audio_cd_windows(ser, device, track_titles):
     cmd, kwargs = discstation_host.ps_cmd("play-audio-cd.ps1", device, str(cmd_file))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kwargs)
 
-    lines = Queue()
-
-    def read_output():
-        try:
-            for line in proc.stdout:
-                lines.put(line.rstrip("\r\n"))
-        finally:
-            lines.put(None)
-
-    threading.Thread(target=read_output, daemon=True).start()
+    lines, eof = discstation_burn.proc_line_queue(proc)
 
     def send_cmd(text):
         cmd_file.write_text(text + "\n")
@@ -3326,6 +3264,8 @@ def _play_audio_cd_windows(ser, device, track_titles):
             try:
                 line = lines.get(timeout=0.1)
             except Empty:
+                line = None
+            if line is eof:
                 line = None
             if line:
                 if line.startswith("TRACK:"):
@@ -3886,7 +3826,7 @@ def _rip_audio_cd_macos(ser, device, chapters, metadata, cover_path, out_dir):
     )
     output = []
     try:
-        for line in _iter_proc_lines(proc, ser):
+        for line in discstation_burn.iter_proc_or_cancel(proc, ser):
             output.append(line)
             count = len(list(wav_dir.glob("*.wav")))
             if count:
@@ -4016,7 +3956,7 @@ def rip_audio_cd(ser, device):
     )
 
     try:
-        for line in _iter_proc_lines(proc, ser):
+        for line in discstation_burn.iter_proc_or_cancel(proc, ser):
             print(line, end="")
             secs = parse_ffmpeg_time(line)
             if secs is not None and rip_duration > 0:

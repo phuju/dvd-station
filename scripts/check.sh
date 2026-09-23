@@ -42,6 +42,19 @@ for line in ("MODE:BEST", "START"):
 assert d._wait_for_start(ser, mode="AUTO") == ("BEST", None)
 ser.push_line("CANCEL")
 assert d._wait_for_start(ser, "x") is None
+
+# Subprocess-output iterators (shared reader thread) + cancel handling.
+import subprocess, sys
+def spawn(code):
+    return subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+assert list(d.discstation_burn.iter_proc_or_cancel(spawn("print('a');print('b')"), ser)) == ["a", "b"]
+assert [e for e in d.iter_process_events(spawn("print('x')"), idle_seconds=0.2, ser=ser) if e] == ["x"]
+ser.push_line("CANCEL")
+try:
+    list(d.iter_process_events(spawn("import time;time.sleep(30)"), idle_seconds=0.2, ser=ser))
+    raise SystemExit("cancel not raised")
+except d.CancelError:
+    pass
 print("smoke ok")
 EOF
 )

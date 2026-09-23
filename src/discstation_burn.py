@@ -184,19 +184,26 @@ def check_cancel(ser):
     return False
 
 
-def iter_proc_or_cancel(proc, ser):
-    lines = Queue()
-    finished = object()
+def proc_line_queue(proc):
+    """Pump proc.stdout into a Queue from a daemon thread. Returns
+    (queue, done): `done` is the sentinel put on the queue at EOF."""
+    lines, done = Queue(), object()
 
-    def read_output():
+    def pump():
         try:
             for line in proc.stdout:
                 lines.put(line.rstrip("\r\n"))
         finally:
-            lines.put(finished)
+            lines.put(done)
 
-    reader = threading.Thread(target=read_output, daemon=True)
-    reader.start()
+    threading.Thread(target=pump, daemon=True).start()
+    return lines, done
+
+
+def iter_proc_or_cancel(proc, ser):
+    """Yield proc's output lines, PINGing the remote every 5s; a CANCEL from
+    the remote stops the process and ends the iteration."""
+    lines, done = proc_line_queue(proc)
     last_ping = time.time()
     output_done = False
     while proc.poll() is None or not output_done:
@@ -211,11 +218,10 @@ def iter_proc_or_cancel(proc, ser):
             line = lines.get(timeout=0.2)
         except Empty:
             continue
-        if line is finished:
+        if line is done:
             output_done = True
         else:
             yield line
-    reader.join(timeout=1)
 
 
 DISC_SPEED = os.environ.get("DISC_SPEED")
@@ -1716,18 +1722,7 @@ def _run_windows_burn(ser, script, *script_args):
     cmd, kwargs = discstation_host.ps_cmd(script, *script_args)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kwargs)
 
-    lines = Queue()
-    finished = object()
-
-    def read_output():
-        try:
-            for line in proc.stdout:
-                lines.put(line.rstrip("\r\n"))
-        finally:
-            lines.put(finished)
-
-    reader = threading.Thread(target=read_output, daemon=True)
-    reader.start()
+    lines, finished = proc_line_queue(proc)
 
     out_lines, last_pct, last_real_progress, start = [], -1, 0.0, time.time()
     last_ping, output_done = time.time(), False
@@ -1763,7 +1758,6 @@ def _run_windows_burn(ser, script, *script_args):
                 if est_pct > last_pct:
                     last_pct = est_pct
                     send(ser, f"PROGRESS:{est_pct}%")
-        reader.join(timeout=1)
     except (KeyboardInterrupt, SystemExit):
         stop_process(proc)
         raise
