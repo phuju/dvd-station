@@ -1305,60 +1305,6 @@ def _device_present(device):
         return False
 
 
-def _tray_closed_with_disc(device):
-    if not device:
-        return False
-    global _tray_open
-    if not _device_present(device):
-        return False
-    properties = udev_cdrom_properties(device)
-    if properties.get("ID_CDROM_MEDIA") == "1":
-        _tray_open = False
-        return True
-    if properties.get("ID_CDROM_MEDIA_STATE") == "blank":
-        _tray_open = False
-        return True
-    return False
-
-
-def disc_present(device):
-    if not device:
-        return False
-    if _tray_closed_with_disc(device):
-        return True
-    if _tray_open:
-        return False
-    if not _device_present(device):
-        return False
-    if discstation_host.system_name() != "linux":
-        properties = udev_cdrom_properties(device)
-        return properties.get("ID_CDROM_MEDIA") == "1"
-
-    toc = run_probe(["wodim", "-toc", "dev=" + device], name="wodim-toc", timeout=PROBE_TIMEOUT_WODIM_TOC)
-    toc_text = ensure_text(toc.stdout) + ensure_text(toc.stderr)
-    no_media_markers = _NO_MEDIA_MARKERS
-    if toc.returncode == 124:
-        return is_blank_disc(device)
-    if toc_text.strip() and any(marker in toc_text.lower() for marker in no_media_markers):
-        return False
-
-    dvd = run_probe(["lsdvd", device], name="lsdvd", timeout=PROBE_TIMEOUT_LSDVD)
-    if dvd.returncode == 0:
-        return True
-
-    fs = run_probe(["blkid", "-o", "value", "-s", "TYPE", device], name="blkid", timeout=PROBE_TIMEOUT_BLKID)
-    if fs.returncode == 0 and ensure_text(fs.stdout).strip():
-        return True
-
-    if "first:" in toc_text and "track:" in toc_text:
-        return True
-
-    if toc_text.strip() and not any(marker in toc_text.lower() for marker in no_media_markers):
-        return True
-
-    return is_blank_disc(device)
-
-
 def is_blank_disc(device):
     if not device:
         return False
@@ -3749,7 +3695,7 @@ def rip_flow(ser):
         raise
 
     if proc.wait() != 0:
-        if not disc_present(device):
+        if drive_status(device) in ("open", "no_disc"):
             raise RuntimeError("Disc was removed during rip")
         raise RuntimeError("Rip failed")
 
@@ -3973,7 +3919,7 @@ def rip_audio_cd(ser, device):
         safe_send(ser, "CANCELLED:Rip cancelled")
         return
     elif proc.returncode != 0:
-        if not disc_present(device):
+        if drive_status(device) in ("open", "no_disc"):
             raise RuntimeError("Disc was removed during rip")
         raise RuntimeError("Audio CD rip failed")
 

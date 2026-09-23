@@ -62,6 +62,7 @@ remote can talk to the host over Wi-Fi instead of a USB cable.
 ├── mobile/                   # Expo (React Native) companion app
 ├── arduino/DiscStation/     # ESP32 DevKit remote firmware
 ├── scripts/setup.mjs         # `discstation-setup` — cross-OS installer dispatch
+├── scripts/check.sh          # static checks + smoke test (run before committing)
 ├── docs/                     # Platform support notes
 ├── install.sh / install-macos.sh / install-windows.ps1
 ├── requirements.txt / requirements-optional.txt
