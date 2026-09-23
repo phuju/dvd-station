@@ -52,6 +52,10 @@ if [[ ! -f "$CONFIG_DIR/server.crt" || ! -f "$CONFIG_DIR/server.key" ]]; then
 fi
 
 sudo usermod -aG dialout,cdrom "$USER" || true
+# Don't let the kernel re-close an ejected tray whenever some process (a desktop
+# volume monitor, a disc probe) opens the drive.
+echo 'dev.cdrom.autoclose = 0' | sudo tee /etc/sysctl.d/90-discstation.conf >/dev/null \
+  && sudo sysctl -q -w dev.cdrom.autoclose=0 || true
 mkdir -p "$HOME/.config/systemd/user"
 cp "$ROOT_DIR/systemd/discstation.service" "$HOME/.config/systemd/user/discstation.service"
 systemctl --user daemon-reload

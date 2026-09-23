@@ -1002,28 +1002,39 @@ def eject_disc(ser, device):
             safe_send(ser, "ERROR:Eject failed")
             safe_send(ser, "STANDBY:Insert disc")
         return ok
-    subprocess.run(["sync"], timeout=5)
+    # The kernel closes the tray again (dev.cdrom.autoclose) when anything opens
+    # the drive while it's out, and every disc probe (blkid/lsdvd/wodim/mediainfo,
+    # driven by the background poll and by the web/phone /disc-info requests)
+    # does exactly that. So: mark the tray open BEFORE the eject command runs (new
+    # probes now bail out) and hold _detect_lock so any probe already in flight
+    # finishes first - otherwise a probe landing inside the few seconds the eject
+    # takes shuts the tray right after it opens.
+    with _detect_lock:
+        _tray_open = True
+        _tray_open_since = time.monotonic()
+        subprocess.run(["sync"], timeout=5)
 
-    subprocess.run(["sg_raw", device, "1e", "00", "00", "00", "00", "00"],
-                   timeout=5, capture_output=True)
+        subprocess.run(["sg_raw", device, "1e", "00", "00", "00", "00", "00"],
+                       timeout=5, capture_output=True)
 
-    ok = False
-    for cmd in (["eject", device], ["sg_raw", device, "1b", "00", "00", "00", "02", "00"]):
-        if ok:
-            break
-        try:
-            r = subprocess.run(cmd, timeout=10, capture_output=True)
-            ok = r.returncode == 0
+        ok = False
+        for cmd in (["eject", device], ["sg_raw", device, "1b", "00", "00", "00", "02", "00"]):
             if ok:
-                print(f"{cmd[0]} eject ok")
-            else:
-                err = (r.stderr or r.stdout or b"failed").decode(errors="ignore").strip()[:40]
-                print(f"{cmd[0]} eject failed: {err}")
-        except Exception as e:
-            print(f"{cmd[0]} eject error: {e}")
+                break
+            try:
+                r = subprocess.run(cmd, timeout=10, capture_output=True)
+                ok = r.returncode == 0
+                if ok:
+                    print(f"{cmd[0]} eject ok")
+                else:
+                    err = (r.stderr or r.stdout or b"failed").decode(errors="ignore").strip()[:40]
+                    print(f"{cmd[0]} eject failed: {err}")
+            except Exception as e:
+                print(f"{cmd[0]} eject error: {e}")
+        if not ok:
+            _tray_open = False
 
     if ok:
-        _tray_open = True
         _tray_open_since = time.monotonic()
         safe_send(ser, "WAITING:Press EJECT/to close tray")
         # WAITING: isn't in _record_web_status()'s prefix whitelist, so the
@@ -1265,7 +1276,7 @@ def _refresh_udev(device):
 def udev_cdrom_properties(device, refresh=False):
     if discstation_host.system_name() != "linux":
         return discstation_host.media_properties(device)
-    overlay = _refresh_udev(device) if refresh else {}
+    overlay = _refresh_udev(device) if refresh and not _tray_open else {}
     properties = _udev_props_via_pyudev(device)
     if properties is None:
         # pyudev unavailable — fall back to parsing `udevadm info` output.
@@ -1306,7 +1317,7 @@ def _device_present(device):
 
 
 def is_blank_disc(device):
-    if not device:
+    if not device or _tray_open:   # probing an open tray re-closes it
         return False
     if not _device_present(device):
         return False
@@ -1357,7 +1368,7 @@ def is_blank_disc(device):
 
 
 def is_rewritable_disc(device):
-    if not device:
+    if not device or _tray_open:   # probing an open tray re-closes it
         return False
     """Return whether the inserted medium can be overwritten."""
     if not _device_present(device):
@@ -1714,6 +1725,8 @@ def _maybe_reset_stuck_drive(device, failed_probes):
 
 
 def _detect_disc_locked(device, settle, budget):
+    if _tray_open:   # an eject started while we waited for the lock
+        return _disc_info(False, "none")
     deadline = time.monotonic() + (DISC_DETECT_BUDGET if budget is None else budget)
     props = udev_cdrom_properties(device, refresh=True)
 
