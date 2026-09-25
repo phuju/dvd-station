@@ -98,6 +98,7 @@ if ($winget -and -not $IsWin7) {
 # --- 3. App files + venv ------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $Base, $App | Out-Null
 Copy-Item -Recurse -Force (Join-Path $Root "src\*") $App
+if (Test-Path (Join-Path $Root "arduino\firmware")) { Copy-Item -Recurse -Force (Join-Path $Root "arduino\firmware") $App }
 & $PyExe @PyArgs -m venv $Venv
 $Py = Join-Path $Venv "Scripts\python.exe"
 & $Py -m pip install --upgrade pip

@@ -31,6 +31,8 @@ brew install python ffmpeg cdrdao dvdauthor node yt-dlp xorriso mpv libdiscid ha
   libdvdcss dvdbackup libcdio-paranoia
 mkdir -p "$APP_DIR" "$VENV_DIR" "$CONFIG_DIR"
 cp -R "$ROOT_DIR/src/." "$APP_DIR/"
+# remote firmware image for over-the-air updates (built by scripts/build-firmware.sh)
+if [[ -d "$ROOT_DIR/arduino/firmware" ]]; then cp -R "$ROOT_DIR/arduino/firmware" "$APP_DIR/firmware"; fi
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
 if [[ -f "$ROOT_DIR/requirements.txt" ]]; then

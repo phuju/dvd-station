@@ -75,6 +75,8 @@ if (!existsSync(appDir) || !alreadyInstalled()) {
 
 try {
   cpSync(join(ROOT, 'src'), appDir, { recursive: true, force: true });
+  const fw = join(ROOT, 'arduino', 'firmware');
+  if (existsSync(fw)) cpSync(fw, join(appDir, 'firmware'), { recursive: true, force: true });
   restartService();
   console.log('\ndiscstation: redeployed the updated host and restarted the service.\n');
 } catch (e) {

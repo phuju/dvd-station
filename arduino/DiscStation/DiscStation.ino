@@ -8,6 +8,8 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <ArduinoOTA.h>
+#include <HTTPClient.h>
+#include <Update.h>
 #include "qrcode_lite.h"
 
 // Optional build-time Wi-Fi override for power users: copy secrets.h.example
@@ -15,6 +17,16 @@
 // If WIFI_SSID is defined the runtime setup portal is skipped entirely.
 #if __has_include("secrets.h")
   #include "secrets.h"
+#endif
+
+// Injected by scripts/build-firmware.sh as -DFW_VERSION=x.y.z (an unquoted pp-number,
+// which survives the build system's shell quoting); ad-hoc builds are "dev".
+#define FW_STR_(x) #x
+#define FW_STR(x) FW_STR_(x)
+#ifdef FW_VERSION
+  #define FW_VERSION_STR FW_STR(FW_VERSION)
+#else
+  #define FW_VERSION_STR "dev"
 #endif
 
 #define SCREEN_WIDTH 128
@@ -66,6 +78,7 @@ bool wifiConnected = false;
 bool wifiInitDone = false;
 bool portalActive = false;
 bool otaEnabled = false;
+bool msgViaTcp = false;   // which link the message being parsed arrived on (set by drainAndDispatch)
 bool credsJustSaved = false;
 bool wifiResetArmed = false;
 unsigned long wifiDropAt = 0;
@@ -716,6 +729,81 @@ void drawPlay() {
   display.display();
 }
 
+void drawOtaProgress(int pct) {
+  if (!displayOk) return;
+  display.clearDisplay();
+  drawHeader();
+  display.setCursor(2, 18);
+  display.print("UPDATING FIRMWARE");
+  display.drawRect(4, 32, 120, 10, SSD1306_WHITE);
+  display.fillRect(6, 34, (116 * pct) / 100, 6, SSD1306_WHITE);
+  display.setCursor(2, 50);
+  display.print("DO NOT POWER OFF");
+  display.display();
+}
+
+// Host-driven update: "OTA_URL:<http url>|<size>|<md5>". Streams the image into the
+// inactive app slot; Update verifies the MD5 and image header before switching, so a
+// bad download never boots and the running firmware stays.
+void runOta(const String& arg) {
+  int b = arg.lastIndexOf('|');
+  int a = b > 0 ? arg.lastIndexOf('|', b - 1) : -1;
+  if (a <= 0) { Out.println("OTA:ERR bad request"); return; }
+  String url = arg.substring(0, a);
+  size_t size = arg.substring(a + 1, b).toInt();
+  String md5 = arg.substring(b + 1);
+  if (size == 0 || md5.length() != 32) { Out.println("OTA:ERR bad request"); return; }
+  if (!wifiConnected) { Out.println("OTA:ERR remote not on Wi-Fi"); return; }
+  if (msgViaTcp) {
+    // Over Wi-Fi only take an image from the host that is already driving us.
+    String host = url.substring(url.indexOf("//") + 2);
+    host = host.substring(0, host.indexOf('/'));
+    if (host.indexOf(':') > 0) host = host.substring(0, host.indexOf(':'));
+    if (host != tcpClient.remoteIP().toString()) { Out.println("OTA:ERR host mismatch"); return; }
+  }
+  HTTPClient http;
+  http.begin(url);
+  if (http.GET() != 200 || (size_t)http.getSize() != size) {
+    http.end();
+    Out.println("OTA:ERR download");
+    return;
+  }
+  if (!Update.begin(size)) { http.end(); Out.println("OTA:ERR no space"); return; }
+  Update.setMD5(md5.c_str());
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t buf[1024];
+  size_t done = 0;
+  int lastPct = -1;
+  unsigned long lastData = millis();
+  drawOtaProgress(0);
+  while (done < size) {
+    int n = stream->readBytes(buf, min(sizeof(buf), size - done));
+    if (n <= 0) {
+      if (millis() - lastData > 15000 || !http.connected()) break;
+      continue;
+    }
+    lastData = millis();
+    if (Update.write(buf, n) != (size_t)n) break;
+    done += n;
+    esp_task_wdt_reset();
+    int pct = done * 100 / size;
+    if (pct != lastPct && pct % 5 == 0) {
+      lastPct = pct;
+      Out.print("OTA:"); Out.println(pct);
+      drawOtaProgress(pct);
+    }
+  }
+  http.end();
+  if (done == size && Update.end(true)) {
+    Out.println("OTA:DONE");
+    delay(500);
+    ESP.restart();
+  }
+  Update.abort();
+  Out.println("OTA:ERR verify failed");
+  drawStandby();
+}
+
 void parseMessage(String msg) {
   msg.trim();
 
@@ -723,6 +811,17 @@ void parseMessage(String msg) {
     lastMsgTime = millis();
     Out.println("PONG");
     if (uiState == UI_DISCONNECTED) drawStandby();
+    return;
+  }
+
+  if (msg == "VERSION") {
+    Out.print("VERSION:"); Out.println(FW_VERSION_STR);
+    return;
+  }
+
+  if (msg.startsWith("OTA_URL:")) {
+    lastMsgTime = millis();
+    runOta(msg.substring(8));
     return;
   }
 
@@ -1201,6 +1300,7 @@ void handlePlayPauseButton(bool longPress) {
 // instead of working through a backlog. Every other message type still gets
 // parsed in order; only VU: is collapsible like this.
 void drainAndDispatch(Stream &s) {
+  msgViaTcp = (&s == (Stream*)&tcpClient);
   String pendingVu = "";
   while (s.available()) {
     String msg = s.readStringUntil('\n');

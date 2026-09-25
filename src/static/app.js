@@ -90,6 +90,7 @@
   }
 
   function applyRemoteState(progress) {
+    applyFirmwareState(progress);
     const hardware = progress.appliance === "hardware";
     if (hardware && !$("remote-panel").hidden) setRemoteVisible(false, true);
     // Software mode has no other control surface at all - don't make it
@@ -106,6 +107,32 @@
     ejectBtn.textContent = open ? "CLOSE TRAY" : "EJECT";
     ejectBtn.dataset.cmd = open ? "CONFIRM" : "EJECT";
   }
+
+  // Firmware row: outside the remote panel on purpose - a hardware remote hides
+  // that panel, and hardware is exactly when there is a remote to update.
+  function applyFirmwareState(progress) {
+    const state = progress.remote_update;
+    const msg = progress.remote_update_msg;
+    const text = $("fw-update-text");
+    const btn = $("fw-update-btn");
+    const updating = progress.active && /^UPDATING REMOTE/.test(progress.status || "");
+    let line = "";
+    if (state === "available") line = `Remote firmware ${progress.remote_fw} — ${progress.remote_fw_latest} is available.`;
+    else if (state === "unknown") line = "This remote's firmware can't update itself yet — flash it once with a USB cable, then future updates are one click.";
+    if (msg) line += ` Update failed (${msg}).`;
+    text.textContent = line;
+    btn.hidden = state !== "available";
+    btn.disabled = !!updating;
+    $("fw-update").hidden = !line;
+  }
+
+  $("fw-update-btn").addEventListener("click", async () => {
+    $("fw-update-btn").disabled = true;
+    try {
+      const r = await fetch("/remote/update", { method: "POST" });
+      if (!r.ok) $("fw-update-text").textContent = await r.text();
+    } catch (_) { /* SSE/poll shows the real state */ }
+  });
 
   async function sendRemoteCmd(cmd) {
     try {

@@ -55,6 +55,17 @@ try:
     raise SystemExit("cancel not raised")
 except d.CancelError:
     pass
+
+# Remote OTA state: available only for a real, older release; dev builds never nag.
+d._appliance_mode = "hardware"
+d._firmware_image = lambda: (None, {"version": "0.2.0", "size": 1, "md5": "x"})
+for fw, want in (("0.1.0", "available"), ("dev", "current"), ("0.2.0", "current"), ("0.3.0", "current")):
+    d._remote_fw = fw
+    assert d._remote_update_state() == want, (fw, d._remote_update_state())
+d._remote_fw, d._remote_fw_asked = None, 0.0
+assert d._remote_update_state() == "unknown"
+d._appliance_mode = "software"
+assert d._remote_update_state() == ""
 print("smoke ok")
 EOF
 )

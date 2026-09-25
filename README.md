@@ -16,6 +16,31 @@ use every mode.
   (greyed out, auto-collapsing) the moment one appears.
 - **Drive:** ATAPI DVD writer (e.g. iHAS124) over USB
 
+### Updating the remote's firmware (over the air)
+
+No cable needed once a remote runs this firmware: every host release ships the
+matching firmware image (built by `npm publish` via `scripts/build-firmware.sh`).
+When the attached remote is older, the web page and the phone app show
+**"Remote firmware X — Y is available" + UPDATE REMOTE**. The remote downloads the
+image from the host over Wi-Fi, checks its MD5, writes it to its spare firmware
+slot and reboots (about 10 s; the OLED shows progress). It works whether the
+remote is linked by USB or Wi-Fi, as long as it has joined your network, and it
+is refused while a burn/rip/play is running.
+
+- **One cable flash first:** remotes flashed before this feature can't update
+  themselves; the page says so. Flash once with
+  `arduino-cli compile --upload -b esp32:esp32:esp32 -p <port> arduino/DiscStation`
+  and every later update is one click.
+- **Safety:** a corrupt or wrong-checksum image is rejected and the running
+  firmware keeps working. There is no automatic rollback for a firmware that
+  boots but misbehaves - recover with a cable flash. Over Wi-Fi the remote only
+  accepts an image from the host that is already driving it.
+- **Manual fallback (per remote, from any computer):** set `OTA_PASSWORD` in
+  `secrets.h`, then
+  `arduino-cli upload -b esp32:esp32:esp32 -p discstation-xxxx.local --protocol network --upload-field password=<pw> arduino/DiscStation`.
+- **Headroom:** the image uses ~96% of the 1.31 MB app slot; if it grows past
+  that, updates will be refused until the partition scheme is changed (cable flash).
+
 ### Wi-Fi remote (optional)
 
 The firmware also serves the same line protocol over TCP 2323, so the

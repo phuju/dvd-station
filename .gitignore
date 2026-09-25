@@ -31,3 +31,4 @@ arduino/**/bootloader/
 # Mobile app
 mobile/node_modules/
 mobile/.expo/
+arduino/firmware/

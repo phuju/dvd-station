@@ -38,6 +38,10 @@ export type Progress = {
   appliance?: 'hardware' | 'software';
   playing?: boolean;
   tray_open?: boolean;
+  remote_fw?: string | null;
+  remote_fw_latest?: string | null;
+  remote_update?: '' | 'unknown' | 'current' | 'available';
+  remote_update_msg?: string;
 };
 export type DiscInfo = {
   disc_present: boolean;
@@ -94,6 +98,12 @@ export async function postButton(cmd: string): Promise<void> {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'cmd=' + encodeURIComponent(cmd),
   });
+}
+
+/** Ask the host to push its bundled firmware to the attached hardware remote. */
+export async function startRemoteUpdate(): Promise<void> {
+  const r = await req('/remote/update', { method: 'POST' });
+  if (!r.ok) throw new Error((await r.text()) || 'Update failed');
 }
 
 export type PickedFile = { uri: string; name: string; size?: number; mimeType?: string };

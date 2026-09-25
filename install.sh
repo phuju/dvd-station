@@ -26,6 +26,8 @@ fi
 
 mkdir -p "$APP_DIR" "$CONFIG_DIR" "$VENV_DIR"
 cp -R "$ROOT_DIR/src/." "$APP_DIR/"
+# remote firmware image for over-the-air updates (built by scripts/build-firmware.sh)
+if [[ -d "$ROOT_DIR/arduino/firmware" ]]; then cp -R "$ROOT_DIR/arduino/firmware" "$APP_DIR/firmware"; fi
 if [[ ! -f "$CONFIG_DIR/discstation.env" && -f "$ROOT_DIR/discstation.env.example" ]]; then
   cp "$ROOT_DIR/discstation.env.example" "$CONFIG_DIR/discstation.env"
 fi

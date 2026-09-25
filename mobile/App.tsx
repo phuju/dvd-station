@@ -26,6 +26,7 @@ import { makeMetrics, Metrics } from './src/responsive';
 import * as api from './src/api';
 import { get, set } from './src/storage';
 import RemotePanel from './src/RemotePanel';
+import FirmwareRow from './src/FirmwareRow';
 
 const HOST_KEY = 'discstation.host';
 const THEME_KEY = 'discstation.theme';
@@ -280,6 +281,8 @@ function Screen() {
             </View>
           ))}
         </View>
+
+        <FirmwareRow c={c} m={m} prog={prog} />
 
         {/* ---- on-screen remote (inline, not a modal - see RemotePanel.tsx) ---- */}
         <RemotePanel

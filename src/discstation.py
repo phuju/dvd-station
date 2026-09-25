@@ -5,6 +5,7 @@ import collections
 import concurrent.futures
 import contextlib
 import errno
+import functools
 try:
     import fcntl  # POSIX-only; used only in drive_status()'s Linux branch
 except ImportError:
@@ -61,6 +62,10 @@ _web_op_verb = "BURNING"  # progress-bar verb for the current PROGRESS: stream
 _operation_active = False  # a burn/rip/play flow is holding the drive
 _last_disc_info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
 _active_ser = None
+_remote_fw = None         # firmware version the attached remote reported (None = old firmware / not asked yet)
+_remote_fw_asked = 0.0    # when VERSION was requested; a silent remote later than this = pre-OTA firmware
+_ota_msg = ""             # last over-the-air update error, shown next to the Update button
+_HTTP_PORT = 0            # plain-HTTP listener port; the remote pulls its firmware image from it
 _appliance_mode = "hardware"  # "hardware" (real ESP32) or "software" (web remote only)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -149,6 +154,10 @@ class TcpSerial:
         self._reader = threading.Thread(target=self._pump, daemon=True)
         self._reader.start()
 
+    def local_addr(self):
+        """This machine's address on the connection to the remote."""
+        return self._sock.getsockname()[0]
+
     def _pump(self):
         while self._alive:
             try:
@@ -225,6 +234,8 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             self._serve_disc_info()
         elif path == '/events':
             self._serve_sse()
+        elif path == '/firmware.bin':
+            self._serve_firmware()
         elif path == '/sw.js':
             self._serve_sw()
         elif path == '/manifest.json':
@@ -246,6 +257,8 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             self._handle_set_label()
         elif path == '/remote/button':
             self._handle_remote_button()
+        elif path == '/remote/update':
+            self._handle_remote_update()
         else:
             self.send_error(404)
 
@@ -330,6 +343,41 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         else:
             self._respond(409, 'A hardware remote is attached')
 
+    def _serve_firmware(self):
+        image, _ = _firmware_image()
+        if not image:
+            self.send_error(404)
+            return
+        data = image.read_bytes()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/octet-stream')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _handle_remote_update(self):
+        """Tell the attached remote to download the firmware image this host ships
+        (OTA_URL:<url>|<size>|<md5>). The remote verifies the MD5 before switching."""
+        global _ota_msg
+        ser = _active_ser
+        image, meta = _firmware_image()
+        if ser is None or isinstance(ser, VirtualSerial):
+            self._respond(409, 'No hardware remote attached')
+        elif _operation_active:
+            self._respond(409, 'Wait until the current operation finishes')
+        elif not image or not _HTTP_PORT:
+            self._respond(409, 'This host has no firmware image to send')
+        elif _remote_update_state() != "available":
+            self._respond(409, 'The remote is already up to date' if _remote_fw else 'This remote needs one cable flash first')
+        else:
+            # the address the remote reaches us on: for the Wi-Fi link that is the
+            # socket's own local address (also what the firmware checks it against)
+            host = ser.local_addr() if hasattr(ser, "local_addr") else local_ip()
+            _ota_msg = ""
+            discstation_burn.safe_send(ser, f"OTA_URL:http://{host}:{_HTTP_PORT}/firmware.bin|{meta['size']}|{meta['md5']}")
+            _record_ota("0")
+            self._respond(200, 'OK')
+
     def _serve_disc_info(self):
         if _operation_active:
             # a burn/rip/play holds the drive — don't probe it, serve last-known.
@@ -406,7 +454,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('discstation-v17').then(c => c.addAll(['/','/static/style.css?v=17','/static/app.js?v=17']));
+  caches.open('discstation-v18').then(c => c.addAll(['/','/static/style.css?v=18','/static/app.js?v=18']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
@@ -415,7 +463,7 @@ self.addEventListener('fetch', e => {
   if (path === '/' || path.startsWith('/static/')) {
     e.respondWith(fetch(e.request).then(r => {
       const copy = r.clone();
-      caches.open('discstation-v17').then(c => c.put(e.request, copy));
+      caches.open('discstation-v18').then(c => c.put(e.request, copy));
       return r;
     }).catch(() => caches.match(e.request)));
   } else {
@@ -523,6 +571,7 @@ self.addEventListener('fetch', e => {
 
 
 def start_web_server(port=8080):
+    global _HTTP_PORT
     global _web_server, _web_port
     if _web_server:
         return _web_server
@@ -569,6 +618,7 @@ def start_web_server(port=8080):
             threading.Thread(target=plain.serve_forever, daemon=True).start()
             print(f"Plain HTTP (mobile app) on http://0.0.0.0:{http_port}")
             plain_http_up = True
+            _HTTP_PORT = http_port
         except OSError as e:
             print(f"Plain HTTP listener not started on {http_port}: {e}")
 
@@ -730,10 +780,65 @@ _sse_subs = set()          # of Queue
 _sse_lock = threading.Lock()
 
 
+@functools.lru_cache(maxsize=1)
+def _firmware_image():
+    """(image path, {version,size,md5}) for the remote firmware shipped with this
+    host (scripts/build-firmware.sh), or (None, None)."""
+    here = Path(__file__).resolve().parent
+    for d in (here / "firmware", here.parent / "arduino" / "firmware"):
+        try:
+            meta = json.loads((d / "firmware.json").read_text())
+            if (d / "discstation.bin").is_file():
+                return d / "discstation.bin", meta
+        except (OSError, ValueError):
+            pass
+    return None, None
+
+
+def _remote_update_state():
+    """'' no hardware remote / still asking, 'unknown' the remote never answered
+    VERSION (pre-OTA firmware: needs one cable flash), 'current', 'available'."""
+    if _appliance_mode != "hardware":
+        return ""
+    _, meta = _firmware_image()
+    if _remote_fw is None:
+        return "unknown" if meta and time.time() - _remote_fw_asked > 14 else ""
+    try:
+        newer = tuple(map(int, meta["version"].split("."))) > tuple(map(int, _remote_fw.split(".")))
+    except (TypeError, ValueError):  # "dev" builds (or an unparsable version) never nag
+        newer = False
+    return "available" if newer else "current"
+
+
 def _status_snapshot():
+    _, meta = _firmware_image()
     return {"status": _web_status or "READY", "progress": _web_progress,
             "active": _web_progress_active, "appliance": _appliance_mode,
-            "playing": _web_playing, "tray_open": _tray_open}
+            "playing": _web_playing, "tray_open": _tray_open,
+            "remote_fw": _remote_fw, "remote_fw_latest": meta["version"] if meta else None,
+            "remote_update": _remote_update_state(), "remote_update_msg": _ota_msg}
+
+
+def _set_remote_fw(version):
+    global _remote_fw, _web_status, _web_progress
+    _remote_fw = version
+    if (_web_status or "").startswith("REMOTE UPDATED"):
+        _web_status, _web_progress = "READY", -1
+    _sse_publish(_status_snapshot())
+
+
+def _record_ota(msg):
+    """OTA:<pct> | OTA:DONE | OTA:ERR <why> lines from the remote while it updates."""
+    global _web_status, _web_progress, _web_progress_active, _ota_msg, _remote_fw, _remote_fw_asked
+    if msg.isdigit():
+        _web_status, _web_progress, _web_progress_active = f"UPDATING REMOTE {msg}%", int(msg), True
+    elif msg == "DONE":
+        _web_status, _web_progress, _web_progress_active = "REMOTE UPDATED - RESTARTING", 100, False
+        _remote_fw, _remote_fw_asked = None, time.time()  # the USB link survives the reboot: ask again
+    else:
+        _web_status, _web_progress, _web_progress_active = "REMOTE UPDATE FAILED", -1, False
+        _ota_msg = msg.removeprefix("ERR").strip()
+    _sse_publish(_status_snapshot())
 
 
 def _sse_publish(event):
@@ -3988,6 +4093,10 @@ def station_loop(ser):
             break
 
     safe_send(ser, "STANDBY:Starting...")
+    if not isinstance(ser, VirtualSerial):
+        global _remote_fw, _remote_fw_asked
+        _remote_fw, _remote_fw_asked = None, time.time()
+        safe_send(ser, "VERSION")
 
     last_disc_line = None
     last_disc_poll = 0
@@ -4102,6 +4211,8 @@ def station_loop(ser):
         if now - last_ping >= 5:
             last_ping = now
             safe_send(ser, "PING")
+            if _remote_fw is None and not isinstance(ser, VirtualSerial):
+                safe_send(ser, "VERSION")  # the first ask can land while the remote is still booting
             if isinstance(ser, VirtualSerial):
                 # Safe point (no flow active) to check whether a real link -
                 # USB serial or the Wi-Fi remote - has appeared, and hand off
@@ -4145,6 +4256,14 @@ def station_loop(ser):
             continue
 
         if line == "PONG":
+            continue
+
+        if line.startswith("VERSION:"):
+            _set_remote_fw(line[8:].strip())
+            continue
+
+        if line.startswith("OTA:"):
+            _record_ota(line[4:].strip())
             continue
 
         if line.startswith("MENU:"):
