@@ -136,7 +136,7 @@ function Screen() {
       }
     };
     poll();
-    const id = setInterval(poll, 2000);
+    const id = setInterval(poll, 1000);
     const sub = AppState.addEventListener('change', (st) => {
       if (st === 'active') poll();
     });

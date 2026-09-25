@@ -66,6 +66,24 @@ d._remote_fw, d._remote_fw_asked = None, 0.0
 assert d._remote_update_state() == "unknown"
 d._appliance_mode = "software"
 assert d._remote_update_state() == ""
+
+# HybridSerial: web side when no remote, replay keeps the current screen, an unplug detaches quietly.
+d._replay.clear()
+for m in ("DISC:Audio CD", "HOME:Select mode", "PLAY_MODE:AUDIO_CD", "PLAY:PLAYING", "VU:1,2", "PING"):
+    d._remember(m)
+assert list(d._replay.values()) == ["DISC:Audio CD", "PLAY_MODE:AUDIO_CD", "PLAY:PLAYING"]
+d._remember("HOME:Select mode")
+assert list(d._replay.values()) == ["DISC:Audio CD", "HOME:Select mode"]
+h = d.HybridSerial()
+h.virtual.push_line("PLAY_BUTTON")
+assert h.in_waiting and h.readline() == b"PLAY_BUTTON\n" and h.write(b"x") == 1
+class Unplugged:
+    @property
+    def in_waiting(self): raise OSError("gone")
+    def close(self): pass
+d._appliance_mode = "hardware"
+h.hw = Unplugged()
+assert h.in_waiting == 0 and h.hw is None and d._appliance_mode == "software"
 print("smoke ok")
 EOF
 )

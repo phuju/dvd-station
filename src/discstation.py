@@ -151,6 +151,7 @@ class TcpSerial:
         self._buf = b""
         self._lock = threading.Lock()
         self._alive = True
+        self.last_rx = time.monotonic()   # link monitor: silent this long = the remote is gone
         self._reader = threading.Thread(target=self._pump, daemon=True)
         self._reader.start()
 
@@ -168,6 +169,7 @@ class TcpSerial:
                 break
             if not chunk:
                 break
+            self.last_rx = time.monotonic()
             with self._lock:
                 self._buf += chunk
         self._alive = False
@@ -214,10 +216,199 @@ class TcpSerial:
         pass
 
 
-class _HardwareAttached(Exception):
-    """Raised out of station_loop when a real link (USB serial or the Wi-Fi
-    remote) appears while running on a VirtualSerial, so main() can hand
-    control over to it."""
+# What the remote's screen needs to be told again when it is plugged in mid-run:
+# the last message per prefix, so a remote attached during PLAY lands on the PLAY
+# screen instead of "Starting...". Activity messages belong to one operation and are
+# forgotten when a terminal message (back to a menu/standby, done, error) arrives.
+_REPLAY_ACTIVITY = ("PLAY_MODE", "PLAY_STATUS", "PLAY", "STATUS", "PROGRESS", "WAITING",
+                    "INFO", "TITLE", "META", "FIT", "WARNING")
+_REPLAY_TERMINAL = ("HOME", "STANDBY", "DONE", "ERROR", "CANCELLED")
+_REPLAY_STICKY = ("DISC", "DISC_NAME", "MENU_ITEMS", "IP")
+_replay = collections.OrderedDict()
+_replay_lock = threading.Lock()
+
+
+def _remember(msg):
+    prefix = msg.split(":", 1)[0]
+    if prefix in _REPLAY_TERMINAL:
+        drop = _REPLAY_ACTIVITY + _REPLAY_TERMINAL
+    elif prefix in _REPLAY_ACTIVITY:
+        drop = _REPLAY_TERMINAL   # the screen left the menu
+    elif prefix in _REPLAY_STICKY:
+        drop = ()
+    else:
+        return                    # VU frames, PING, VERSION, ...
+    with _replay_lock:
+        for k in drop:
+            _replay.pop(k, None)
+        _replay.pop(prefix, None)  # re-insert so dict order is send order
+        _replay[prefix] = msg
+
+
+class HybridSerial:
+    """The one link object station_loop and every flow hold for the life of the
+    process. It routes to the physical remote (USB serial or Wi-Fi) when one is
+    attached and to the web/app remote otherwise, and the link monitor swaps the
+    remote in and out underneath running flows - so plugging or unplugging it never
+    interrupts a burn/rip/play and never needs station_loop to restart."""
+
+    def __init__(self):
+        self.virtual = VirtualSerial()
+        self.hw = None
+
+    def detach(self, hw):
+        global _appliance_mode, _line_buf
+        if self.hw is not hw:
+            return
+        self.hw = None
+        _appliance_mode = "software"
+        _line_buf = b""
+        discstation_burn.reset_serial_state()
+        try:
+            hw.close()
+        except Exception:
+            pass
+        print("Remote disconnected - the web/app remote is active again.")
+        _sse_publish(_status_snapshot())
+
+    def _through(self, method, *args, default=b""):
+        hw = self.hw
+        if hw is None:
+            return getattr(self.virtual, method)(*args)
+        try:
+            return getattr(hw, method)(*args)
+        except (serial.SerialException, OSError):
+            self.detach(hw)
+            return default
+
+    @property
+    def in_waiting(self):
+        hw = self.hw
+        if hw is None:
+            return self.virtual.in_waiting
+        try:
+            return hw.in_waiting
+        except (serial.SerialException, OSError):
+            self.detach(hw)
+            return 0
+
+    def read(self, n=1):
+        return self._through("read", n)
+
+    def readline(self):
+        return self._through("readline")
+
+    def write(self, data):
+        if self.hw is None:
+            return len(data) if data else 0
+        return self._through("write", data, default=len(data) if data else 0)
+
+    def close(self):
+        hw = self.hw
+        if hw is not None:
+            try:
+                hw.close()
+            except Exception:
+                pass
+
+
+def _open_remote_link(look_for_wifi):
+    """Open the physical remote (USB serial wins, else the Wi-Fi remote) and wait for
+    its boot to finish. Returns the link or None. Runs on the monitor thread only."""
+    port = discstation_host.serial_port()
+    if port:
+        print(f"Using ESP32 serial port: {port}")
+        ser = serial.Serial(port, discstation_burn.BAUD, timeout=1, write_timeout=2)
+        if discstation_host.system_name() == "linux":
+            ser.setDTR(False)
+            time.sleep(0.1)
+            ser.setDTR(True)
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            line = ser.readline().decode(errors="ignore").strip()
+            if line:
+                print(f"ESP32: {line}")
+            if "DISCSTATION_READY" in line:
+                break
+        return ser
+    if look_for_wifi:
+        remote = discstation_host.remote_host()
+        if remote:
+            try:
+                print(f"Connecting to Wi-Fi remote at {remote}:2323 ...")
+                link = TcpSerial(remote)
+                print(f"Wi-Fi remote link up ({remote}).")
+                return link
+            except OSError as e:
+                print(f"Wi-Fi remote {remote} unreachable ({e}); using web remote.")
+    return None
+
+
+def _attach_remote(hybrid, hw):
+    """Bring a freshly opened remote up to date and make it the active link."""
+    global _appliance_mode, _line_buf, _remote_fw, _remote_fw_asked
+    with discstation_burn.SERIAL_WRITE_LOCK:   # flows' sends wait, so none is lost mid-attach
+        with _replay_lock:
+            lines = list(_replay.values())
+        try:
+            for msg in lines + ["VERSION"]:
+                hw.write((msg + "\n").encode())
+        except (serial.SerialException, OSError):
+            try:
+                hw.close()
+            except Exception:
+                pass
+            return
+        _remote_fw, _remote_fw_asked = None, time.time()
+        discstation_burn.reset_serial_state()
+        _line_buf = b""
+        hybrid.hw = hw
+        hybrid.attached_at = time.monotonic()
+        _appliance_mode = "hardware"
+    print("Remote attached - control handed to the hardware remote.")
+    _sse_publish(_status_snapshot())
+
+
+def _link_monitor(hybrid, first_pass=False):
+    """Watches for the remote being plugged in / removed while flows run.
+    Not attached: look for USB every second, the Wi-Fi remote (mDNS) every 5 s.
+    Attached: keep it alive with PINGs and notice a dead link within seconds
+    (USB unplug shows up as an ioctl error at once; a Wi-Fi remote that goes
+    silent for 15 s is treated as gone)."""
+    last_wifi = last_ping = 0.0
+    logged_error = False
+    while True:
+        try:
+            hw = hybrid.hw
+            now = time.monotonic()
+            if hw is None:
+                wifi_due = now - last_wifi >= 5
+                if wifi_due:
+                    last_wifi = now
+                link = _open_remote_link(wifi_due)
+                logged_error = False
+                if link is not None:
+                    _attach_remote(hybrid, link)
+            else:
+                hw.in_waiting   # raises once the device is gone; does not consume bytes
+                silent = now - getattr(hw, "last_rx", now)
+                if silent > 15 and now - getattr(hybrid, "attached_at", now) > 15:
+                    raise serial.SerialException("remote stopped answering")
+                if now - last_ping >= 3:
+                    last_ping = now
+                    with discstation_burn.SERIAL_WRITE_LOCK:
+                        hw.write(b"PING\n")
+        except (serial.SerialException, OSError):
+            if hybrid.hw is not None:
+                hybrid.detach(hybrid.hw)
+            elif not logged_error:
+                logged_error = True
+                print("Remote found but could not be opened yet; retrying.")
+        except Exception as e:
+            print(f"Link monitor error: {e}")
+        if first_pass:
+            return
+        time.sleep(1)
 
 
 class _WebHandler(http.server.BaseHTTPRequestHandler):
@@ -337,8 +528,8 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         if not cmd:
             self._respond(400, 'Missing cmd')
             return
-        if isinstance(_active_ser, VirtualSerial):
-            _active_ser.push_line(cmd)
+        if _active_ser is not None and _active_ser.hw is None:
+            _active_ser.virtual.push_line(cmd)
             self._respond(200, 'OK')
         else:
             self._respond(409, 'A hardware remote is attached')
@@ -361,7 +552,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         global _ota_msg
         ser = _active_ser
         image, meta = _firmware_image()
-        if ser is None or isinstance(ser, VirtualSerial):
+        if ser is None or ser.hw is None:
             self._respond(409, 'No hardware remote attached')
         elif _operation_active:
             self._respond(409, 'Wait until the current operation finishes')
@@ -372,7 +563,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         else:
             # the address the remote reaches us on: for the Wi-Fi link that is the
             # socket's own local address (also what the firmware checks it against)
-            host = ser.local_addr() if hasattr(ser, "local_addr") else local_ip()
+            host = ser.hw.local_addr() if hasattr(ser.hw, "local_addr") else local_ip()
             _ota_msg = ""
             discstation_burn.safe_send(ser, f"OTA_URL:http://{host}:{_HTTP_PORT}/firmware.bin|{meta['size']}|{meta['md5']}")
             _record_ota("0")
@@ -865,6 +1056,7 @@ def _set_web_progress(phase, percent=-1):
 
 def _record_web_status(msg):
     global _web_status, _web_progress, _web_progress_active, _web_playing
+    _remember(msg)
     if msg.startswith("DISC:"):
         _sse_publish({"type": "disc-changed"})
         return
@@ -1044,23 +1236,9 @@ discstation_burn.line_reader = read_serial_line
 
 
 def check_serial_alive(ser=None):
-    """Raise serial.SerialException if the ESP32 link looks dead, so main()'s
-    reconnect loop can re-scan for the (possibly renumbered) serial port.
-    Call this inside any long poll loop that would otherwise spin forever on a
-    stale handle (writes to a re-enumerated /dev/ttyUSBN fail silently).
-
-    Meaningless (and actively harmful) in pure web/software mode - there's no
-    ESP32 to go quiet, and serial_activity_age() only advances on real
-    incoming bytes, so a user just reading the screen for >35s before
-    clicking the next button on the web remote looked identical to a dead
-    link and killed the burn ("ESP32 not responding") with no ESP32 in the
-    picture at all."""
-    if isinstance(ser, VirtualSerial):
-        return
-    if discstation_burn.serial_write_failed():
-        raise serial.SerialException("serial write failed (ESP32 link lost)")
-    if discstation_burn.serial_activity_age() >= 35:
-        raise serial.SerialException("ESP32 not responding")
+    """Kept for the flows that call it inside long poll loops. The link monitor
+    (_link_monitor) now owns liveness and swaps a dead remote for the web remote
+    without raising, so a lost remote no longer aborts a burn/rip/play."""
 
 
 def send_disc_info(ser, device, status_line=None):
@@ -3049,7 +3227,7 @@ def _vu_loop(ser, stop_event, pause_event):
                 if proc.poll() is not None:
                     break
                 continue
-            if pause_event.is_set():
+            if pause_event.is_set() or ser.hw is None:   # nobody to draw bars for
                 continue
             samples = _np.frombuffer(raw, dtype=_np.int16).astype(_np.float32) / 32768.0
             spectrum = _np.abs(_np.fft.rfft(samples * window))
@@ -3081,9 +3259,9 @@ def _vu_loop(ser, stop_event, pause_event):
 
 def start_vu_visualizer(ser):
     """Best-effort: returns (stop_event, pause_event), or (None, None) if the
-    visualizer can't run here (no numpy, no PulseAudio, or a web-only link).
+    visualizer can't run here (no numpy, no PulseAudio).
     Linux only."""
-    if _np is None or isinstance(ser, VirtualSerial) or discstation_host.system_name() != "linux":
+    if _np is None or discstation_host.system_name() != "linux":
         return None, None
     stop_event = threading.Event()
     pause_event = threading.Event()
@@ -4084,19 +4262,7 @@ def station_loop(ser):
     except Exception:
         device = None  # empty drive (e.g. macOS after an eject) — keep the loop alive
 
-    for _ in range(50):
-        line = read_serial_line(ser, timeout=0.2)
-        if not line:
-            break
-        print(f"ESP32: {line}")
-        if "DISCSTATION_READY" in line:
-            break
-
     safe_send(ser, "STANDBY:Starting...")
-    if not isinstance(ser, VirtualSerial):
-        global _remote_fw, _remote_fw_asked
-        _remote_fw, _remote_fw_asked = None, time.time()
-        safe_send(ser, "VERSION")
 
     last_disc_line = None
     last_disc_poll = 0
@@ -4211,20 +4377,8 @@ def station_loop(ser):
         if now - last_ping >= 5:
             last_ping = now
             safe_send(ser, "PING")
-            if _remote_fw is None and not isinstance(ser, VirtualSerial):
+            if _remote_fw is None and ser.hw is not None:
                 safe_send(ser, "VERSION")  # the first ask can land while the remote is still booting
-            if isinstance(ser, VirtualSerial):
-                # Safe point (no flow active) to check whether a real link -
-                # USB serial or the Wi-Fi remote - has appeared, and hand off
-                # to it instead of the web remote.
-                try:
-                    link = discstation_host.serial_port() or discstation_host.remote_host()
-                except Exception:
-                    link = None
-                if link:
-                    raise _HardwareAttached(link)
-            else:
-                check_serial_alive(ser)
 
             # Slow full classify as a backstop (type changes, stuck "reading...").
             if (not _tray_open and _disc_poll_future is None
@@ -4328,8 +4482,7 @@ def station_loop(ser):
         # before its own START got consumed (e.g. never uploaded/confirmed a
         # URL), that stale START would otherwise sit buffered and fire this
         # new, different selection instead. Drop anything unconsumed first.
-        if isinstance(ser, VirtualSerial):
-            ser.clear()
+        ser.virtual.clear()
 
         # The user picked a mode — they want to act on a disc, so the drive is
         # fair game again even if it was ejected from the OLED earlier.
@@ -4416,7 +4569,7 @@ def parse_args():
 
 
 def main():
-    global _active_ser, _line_buf, _appliance_mode
+    global _active_ser, _appliance_mode
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     check_pidfile()
 
@@ -4427,71 +4580,35 @@ def main():
     try:
         start_web_server(args.port)
 
+        # One link object for the life of the process; the monitor thread swaps the
+        # physical remote (USB serial / Wi-Fi) in and out underneath running flows.
+        ser = HybridSerial()
+        _active_ser = ser
+        _appliance_mode = "software"
+        _link_monitor(ser, first_pass=True)   # a remote already plugged in is up before the menu starts
+        if ser.hw is None:
+            print("No ESP32 found - running in software-only mode (web remote).")
+        _sse_publish(_status_snapshot())
+        threading.Thread(target=_link_monitor, args=(ser,), daemon=True).start()
+
         while True:
             try:
-                _line_buf = b""
-                ser = None
-
-                # 1. USB serial wins whenever it's present (no mDNS scan then).
-                port = discstation_host.serial_port()
-                if port:
-                    print(f"Using ESP32 serial port: {port}")
-                    ser = serial.Serial(port, discstation_burn.BAUD, timeout=1, write_timeout=2)
-                    if discstation_host.system_name() == "linux":
-                        ser.setDTR(False)
-                        time.sleep(0.1)
-                        ser.setDTR(True)
-                    time.sleep(2)
-                    discstation_burn.reset_serial_state()
-                    _appliance_mode = "hardware"
-
-                # 2. Else look for a Wi-Fi remote (DISC_REMOTE_HOST, default auto/mDNS).
-                if ser is None:
-                    remote = discstation_host.remote_host()
-                    if remote:
-                        try:
-                            print(f"Connecting to Wi-Fi remote at {remote}:2323 ...")
-                            ser = TcpSerial(remote)
-                            discstation_burn.reset_serial_state()
-                            _appliance_mode = "hardware"
-                            print(f"Wi-Fi remote link up ({remote}).")
-                        except OSError as e:
-                            print(f"Wi-Fi remote {remote} unreachable ({e}); using web remote.")
-                            ser = None
-
-                # 3. Else the on-screen web/app remote is the control surface.
-                if ser is None:
-                    print("No ESP32 found - running in software-only mode (web remote).")
-                    ser = VirtualSerial()
-                    _appliance_mode = "software"
-                _active_ser = ser
-                # Nothing else publishes an SSE update purely for an appliance-
-                # mode flip (STATUS/PROGRESS/etc. events do, this doesn't) - push
-                # one now so a connected web remote learns about a newly-attached
-                # ESP32 immediately instead of only on its next reload.
-                _sse_publish(_status_snapshot())
                 station_loop(ser)
-            except _HardwareAttached:
-                print("ESP32 detected - handing off from the web remote to hardware.")
-            except (serial.SerialException, OSError, termios.error) as e:
-                print(f"Disconnected ({e}), reconnecting in 3s...")
-                time.sleep(3)
             except KeyboardInterrupt:
                 raise
-            finally:
-                _active_ser = None
-                if ser:
-                    try:
-                        ser.close()
-                    except Exception:
-                        pass
-                    ser = None
+            except (serial.SerialException, OSError, termios.error) as e:
+                print(f"Station loop error ({e}), restarting...")
+                time.sleep(1)
     except KeyboardInterrupt:
         print("\nStopped.")
         exit_code = 130
     except Exception as e:
         print(f"Error: {e}")
         exit_code = 1
+    finally:
+        _active_ser = None
+        if ser:
+            ser.close()
 
     if exit_code:
         sys.exit(exit_code)
