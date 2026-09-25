@@ -8,7 +8,7 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <ArduinoOTA.h>
-#include <QRCode.h>
+#include "qrcode_lite.h"
 
 // Optional build-time Wi-Fi override for power users: copy secrets.h.example
 // to secrets.h (git-ignored) and set WIFI_SSID / WIFI_PASS / OTA_PASSWORD.

@@ -114,7 +114,6 @@ Support by OS:
 ./install.sh
 
 # Arduino (ESP32 DevKit remote)
-arduino-cli lib install QRCode
 arduino-cli compile --upload -b esp32:esp32:esp32 -p /dev/ttyUSB0 arduino/DiscStation
 
 # macOS host
