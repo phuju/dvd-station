@@ -291,7 +291,7 @@ def disc_device():
             return str(drives[0])
     elif system == "darwin":
         try:
-            status = subprocess.run(["/usr/bin/drutil", "status"], capture_output=True, text=True, check=False, timeout=3)
+            status = subprocess.run(["/usr/bin/drutil", "status"], capture_output=True, text=True, check=False, timeout=15)
         except (OSError, subprocess.TimeoutExpired):
             status = None
         if status:
@@ -323,7 +323,7 @@ def drive_status():
         return "unknown"
     try:
         r = subprocess.run(["/usr/bin/drutil", "status"], capture_output=True,
-                           text=True, check=False, timeout=4)
+                           text=True, check=False, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         return "unknown"
     text = (r.stdout + r.stderr).lower()
@@ -349,7 +349,7 @@ def _tag_rewritable(props, media_type):
 
 
 def _drutil_media_properties():
-    result = subprocess.run(["/usr/bin/drutil", "status"], capture_output=True, text=True, check=False, timeout=3)
+    result = subprocess.run(["/usr/bin/drutil", "status"], capture_output=True, text=True, check=False, timeout=15)
     text = result.stdout + result.stderr
     lowered = text.lower()
     if result.returncode != 0 or "no media" in lowered:
@@ -401,7 +401,9 @@ def media_properties(device):
         mount_point = fields.get("Mount Point", "")
         if mount_point and mount_point != "Not applicable":
             props["ID_MOUNT_POINT"] = mount_point
-        if label.lower() == "audio cd":
+        if label.lower() == "audio cd" or props.get("ID_FS_TYPE") == "cddafs":
+            # cddafs is macOS's filesystem for Red Book audio - the only signal
+            # that works for a burned CD-R, whose media type ("CD-R") has an "r".
             props["ID_CDROM_MEDIA_TYPE"] = "audio"
         elif "cd" in optical.lower() and "r" not in optical.lower():
             props["ID_CDROM_MEDIA_TYPE"] = "audio"
@@ -449,7 +451,7 @@ def media_capacity_bytes(device):
         try:
             result = subprocess.run(["/usr/sbin/diskutil", "info", device], capture_output=True, text=True, check=False, timeout=3)
         except subprocess.TimeoutExpired:
-            result = subprocess.run(["/usr/bin/drutil", "status"], capture_output=True, text=True, check=False, timeout=3)
+            result = subprocess.run(["/usr/bin/drutil", "status"], capture_output=True, text=True, check=False, timeout=15)
             match = re.search(r"blocks:\s*(\d+)\s*/", result.stdout + result.stderr, re.IGNORECASE)
             if match:
                 return int(match.group(1)) * 2048
