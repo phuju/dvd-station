@@ -184,6 +184,22 @@ def _mac_optical_device():
 
 _last_disc_device = None
 
+
+class NoMediaError(FileNotFoundError):
+    """The optical drive is present but has no disc it can see."""
+
+
+def _mac_drive_name():
+    """Drive model from ioreg, which lists it whether or not a disc is loaded
+    (the /dev/diskN node only exists while media is)."""
+    try:
+        out = subprocess.run(["/usr/sbin/ioreg", "-r", "-c", "IODVDServices", "-l"],
+                             capture_output=True, text=True, check=False, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r'"Product Name"="([^"]+)"', out)
+    return m.group(1) if m else None
+
 # --- Windows: IMAPI2 / WMI probes via bundled PowerShell helpers ---------------
 _WIN_DIR = Path(__file__).resolve().parent / "win"
 _win_info_cache = (0.0, None)
@@ -259,6 +275,9 @@ def disc_device():
         # known node so the caller can still probe it (it just reports no media).
         if _last_disc_device:
             return _last_disc_device
+        drive = _mac_drive_name()
+        if drive:
+            raise NoMediaError(f"Drive found ({drive}) but no disc is readable")
     elif override:
         return override
 
