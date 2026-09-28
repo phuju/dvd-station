@@ -318,7 +318,9 @@ function Screen() {
             <View style={s.globalProgress}>
               <View style={s.progRow}>
                 <Text style={s.progPhase}>{(prog.status || 'READY').toUpperCase()}</Text>
-                <Text style={s.progPhase}>{prog.progress >= 0 ? `${prog.progress}%` : '...'}</Text>
+                <Text style={s.progPhase}>
+                  {prog.progress >= 0 ? `${Math.min(100, Math.max(0, Math.round(prog.progress)))}%` : '...'}
+                </Text>
               </View>
               <Bar c={c} m={m} pct={prog.progress} />
             </View>

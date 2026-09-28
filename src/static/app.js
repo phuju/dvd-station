@@ -51,11 +51,16 @@
   function setProgress(phase, percent, active = true) {
     const panel = $("global-progress");
     const fill = $("progress-fill");
-    panel.hidden = !active && percent < 0;
+    // Clamp here, the one place this renders - a browser's own upload
+    // "progress" event isn't guaranteed to stop exactly at loaded===total
+    // (seen reading past 100%), and this is the single choke point every
+    // caller (upload, burn/rip progress, SSE) goes through either way.
+    const shown = percent >= 0 ? Math.min(100, Math.max(0, Math.round(percent))) : -1;
+    panel.hidden = !active && shown < 0;
     $("progress-phase").textContent = (phase || "READY").toUpperCase();
-    $("progress-value").textContent = percent >= 0 ? `${percent}%` : "...";
-    fill.style.width = percent >= 0 ? `${Math.min(100, percent)}%` : "34%";
-    fill.classList.toggle("indeterminate", percent < 0);
+    $("progress-value").textContent = shown >= 0 ? `${shown}%` : "...";
+    fill.style.width = shown >= 0 ? `${shown}%` : "34%";
+    fill.classList.toggle("indeterminate", shown < 0);
   }
 
   async function pollStatus() {
@@ -154,16 +159,11 @@
     const button = event.target.closest("[data-cmd]");
     if (!button || button.disabled) return;
     const cmd = button.dataset.cmd;
+    // One-click burn: the server queues START right behind SELECT:BURN* in the
+    // same request now (was two separate POSTs from here, which raced against
+    // the server clearing stale input the instant it read SELECT and could
+    // silently drop the START - see _handle_remote_button in discstation.py).
     await sendRemoteCmd(cmd);
-    // On real hardware START is a long-press of the encoder on the burn-ready
-    // review screen, not its own button - a one-click "BURN AUDIO"/"BURN
-    // DATA"/"BURN" here is the whole point of the web remote, so chase the
-    // mode select straight through to starting the burn instead of leaving
-    // the user stuck with nothing left to press. (The backend queues this
-    // harmlessly if files/URL aren't in yet - it's only consumed once the
-    // burn's actually at its own "waiting for start" step, and gets flushed
-    // if a different mode gets selected first so it can't fire the wrong burn.)
-    if (cmd.startsWith("SELECT:BURN")) await sendRemoteCmd("START");
   });
   let volumeTimer;
   $("remote-volume").addEventListener("input", (event) => {

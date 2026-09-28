@@ -530,6 +530,14 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             return
         if _active_ser is not None and _active_ser.hw is None:
             _active_ser.virtual.push_line(cmd)
+            # One-click burn: chain START right behind SELECT:BURN* in the SAME
+            # request, atomically - station_loop's SELECT handler clears any
+            # stale buffered input the instant it reads the SELECT line, and a
+            # START sent as a second, separate HTTP call can land in that exact
+            # gap and get wiped (intermittent, timing-dependent "burn never
+            # starts" bug). Queuing both lines from one call removes the gap.
+            if cmd.upper().startswith("SELECT:BURN"):
+                _active_ser.virtual.push_line("START")
             self._respond(200, 'OK')
         else:
             self._respond(409, 'A hardware remote is attached')
@@ -645,7 +653,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('discstation-v18').then(c => c.addAll(['/','/static/style.css?v=18','/static/app.js?v=18']));
+  caches.open('discstation-v20').then(c => c.addAll(['/','/static/style.css?v=20','/static/app.js?v=20']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
@@ -654,7 +662,7 @@ self.addEventListener('fetch', e => {
   if (path === '/' || path.startsWith('/static/')) {
     e.respondWith(fetch(e.request).then(r => {
       const copy = r.clone();
-      caches.open('discstation-v18').then(c => c.put(e.request, copy));
+      caches.open('discstation-v20').then(c => c.put(e.request, copy));
       return r;
     }).catch(() => caches.match(e.request)));
   } else {
@@ -845,6 +853,20 @@ def wait_for_web_url(ser):
     url = f"{protocol}://{ip}:{_web_port}"
     safe_send(ser, f"IP:{url}")
     print(f"URL displayed: {url}")
+    # The one-click remote buttons queue START right behind SELECT:BURN* (see
+    # _handle_remote_button) - when files were uploaded BEFORE the mode was
+    # picked (the normal one-click order), that START can already be sitting
+    # in the buffer by the time this runs. Check the queue before touching the
+    # serial line at all: the loop below reads and discards one line per pass
+    # looking for CANCEL/HOME, and would otherwise eat that START and throw it
+    # away, leaving the burn waiting forever for a START that already came.
+    try:
+        got = _burn_url_queue.get_nowait()
+    except Empty:
+        got = None
+    if got:
+        safe_send(ser, "STATUS:Got URL, starting...")
+        return got
     while True:
         line = read_serial_line(ser, timeout=0.5)
         if line and line.strip().upper() in ("CANCEL", "HOME"):
