@@ -175,7 +175,11 @@ self-signed cert. On startup the host prints the LAN URL to open
   — and picking one starts it directly, no separate confirm step. Also has
   EJECT/CLOSE toggle, a live disc-status readout, and full playback
   transport. Greys out and auto-collapses the instant a physical remote is
-  detected, so the two never fight for control.
+  detected, so the two never fight for control — including mid-burn/rip/play:
+  plugging the remote in hands it control without interrupting whatever's
+  running, and its screen picks up the current status instead of starting
+  over; unplugging it hands control back to the on-screen remote within a
+  second or two.
 
 ## Mobile App
 
@@ -184,7 +188,8 @@ has the same on-screen remote as the web UI, rendered inline in the main
 screen rather than a popup — same "REMOTE" tag toggle, opens automatically
 with no ESP32 attached, mode buttons filtered to what the disc actually
 supports, and picking one starts it directly. Same auto-collapse behavior
-when a physical ESP32 shows up, same underlying `/remote/button` protocol.
+when a physical ESP32 shows up — mid-operation and without interruption, same
+as the web UI — and the same underlying `/remote/button` protocol.
 
 ## Disc Support
 
