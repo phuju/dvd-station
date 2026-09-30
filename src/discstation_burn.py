@@ -370,12 +370,17 @@ def disc_device():
 
 def _udevadm_props(device):
     # Prefer the shared implementation in discstation (pyudev-backed, with a
-    # cdrom_id refresh). Lazy import to avoid the import cycle with discstation.
-    try:
-        from discstation import udev_cdrom_properties
-        return udev_cdrom_properties(device)
-    except Exception:
-        pass
+    # cdrom_id refresh), injected as udev_cdrom_properties below (same pattern
+    # as status_sink) - `from discstation import ...` here used to re-import
+    # the entry script under a second module name ("discstation" alongside
+    # the real "__main__"), silently duplicating every module-level global
+    # (_web_status et al) and leaving send()'s status_sink rebound to the
+    # duplicate's dead copy, so /progress never saw another update again.
+    if udev_cdrom_properties is not None:
+        try:
+            return udev_cdrom_properties(device)
+        except Exception:
+            pass
     if discstation_host.system_name() != "linux":
         return discstation_host.media_properties(device)
     try:
@@ -518,6 +523,11 @@ def detect_disc_type(device):
 # discstation.py sets this to _record_web_status so every serial line the burn
 # pipeline emits also updates the web/SSE status in real time.
 status_sink = None
+
+# discstation.py sets this to its own udev_cdrom_properties (pyudev-backed,
+# with a cdrom_id refresh) - see the comment in _udevadm_props for why this
+# can't just be a lazy `import discstation` instead.
+udev_cdrom_properties = None
 
 # discstation.py sets this to its buffered read_serial_line so check_cancel
 # reads the same way station_loop does (partial lines get buffered and
@@ -1180,7 +1190,13 @@ def check_dvd_size(ser, dvd_dir, disc_bytes=None):
         )
     return size
 
-def wait_for_burn_confirm(ser, dvd_dir, disc_capacity):
+def wait_for_burn_confirm(ser, dvd_dir, disc_capacity, auto_confirm=False):
+    """auto_confirm: software/one-click mode has no physical encoder to click
+    here (the confirm-before-committing gesture this gate exists for), and
+    nothing on the web side ever sends CONFIRM/START to it either - without
+    this it blocks forever, looking exactly like a frozen/stuck burn. Every
+    other flow in this app already treats picking a one-click mode as the
+    whole confirmation; this gate does the same for hardware only now."""
     data_size = tree_size(dvd_dir)
     detected_capacity = disc_capacity_bytes(disc_device())
     actual_cap = disc_output_limit_bytes(detected_capacity or disc_capacity)
@@ -1188,6 +1204,8 @@ def wait_for_burn_confirm(ser, dvd_dir, disc_capacity):
     data_gb = data_size / 1_000_000_000
     line = f"WAITING:{data_gb:.2f}GB / {cap_gb:.1f}GB"
     send(ser, line)
+    if auto_confirm:
+        return True
     last_ping = time.time()
     while True:
         if serial_write_failed():

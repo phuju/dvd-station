@@ -112,28 +112,106 @@
   }
 
   // ---- Playback panel: screen (status + VU bars), volume slider, 3 buttons ----
-  let rpBarEls = [];
-  function initRpBars() {
+  // Each bar is a fixed-width column (.rp-bar-col) holding two independently
+  // positioned pieces: the animated fill and a peak-hold cap. Both are absolutely
+  // positioned against the column's own stable full-height box (not each other),
+  // so a percentage bottom means the same thing for both regardless of the fill's
+  // current height.
+  //
+  // The backend only ever sends 16 real levels per frame (fixed wire protocol,
+  // shared with the physical OLED's own fixed-size display - not changing that
+  // here). To visually fill the screen with more, narrower bars than that, a
+  // ResizeObserver rebuilds however many ~10px columns actually fit the container's
+  // real width, and renderVuBars maps each one to its source band by nearest
+  // neighbor. #remote-panel starts `hidden` and only appears once the first
+  // hardware-detection response lands, so the container reads 0 width at page load -
+  // the observer (not a one-shot measurement) is what catches the real size once
+  // the panel actually becomes visible.
+  let rpBarFillEls = [], rpBarPeakEls = [];
+  let rpBarTargets = [], rpBarShown = [], rpPeakShown = [];
+  let rpBarRafId = null;
+  const PEAK_FALL_PER_FRAME = 0.8; // %/frame - slow drift down, classic "hang then fall"
+  const RP_BAR_WIDTH = 2, RP_BAR_GAP = 1; // must match .rp-bar-col/.rp-bars CSS
+
+  function buildRpBars(count) {
     const container = $("rp-bars");
     container.innerHTML = "";
-    rpBarEls = [];
-    for (let i = 0; i < 16; i++) {
-      const bar = document.createElement("span");
-      container.appendChild(bar);
-      rpBarEls.push(bar);
+    rpBarFillEls = []; rpBarPeakEls = [];
+    for (let i = 0; i < count; i++) {
+      const col = document.createElement("span");
+      col.className = "rp-bar-col";
+      const fill = document.createElement("span");
+      fill.className = "rp-bar-fill";
+      const peak = document.createElement("span");
+      peak.className = "rp-bar-peak";
+      col.append(fill, peak);
+      container.appendChild(col);
+      rpBarFillEls.push(fill);
+      rpBarPeakEls.push(peak);
     }
+    rpBarTargets = new Array(count).fill(0);
+    rpBarShown = new Array(count).fill(0);
+    rpPeakShown = new Array(count).fill(0);
   }
 
+  function initRpBars() {
+    buildRpBars(16); // usable default before the panel's real width is known
+    new ResizeObserver((entries) => {
+      const width = entries[0].contentRect.width;
+      if (width <= 0) return;
+      const count = Math.max(16, Math.floor((width + RP_BAR_GAP) / (RP_BAR_WIDTH + RP_BAR_GAP)));
+      if (count !== rpBarFillEls.length) buildRpBars(count);
+    }).observe($("rp-bars"));
+  }
+
+  // VU frames arrive over SSE at a genuinely irregular interval (measured live:
+  // clustered around 5/42/85/127ms, not a steady rate - PulseAudio's own delivery
+  // fragments don't evenly divide our desired chunk size). A fixed-duration CSS
+  // transition can't win against that: too short and the big gaps still jump, too
+  // long and it self-interrupts during the tight bursts. Decoupling render timing
+  // from arrival timing instead - track a target per bar, ease toward it every real
+  // animation frame - is smooth regardless of how the data actually arrives.
   function renderVuBars(levels) {
     if (!levels) return;
-    levels.forEach((level, i) => {
-      const bar = rpBarEls[i];
-      if (bar) bar.style.height = `${Math.max(0, Math.min(100, (level / 63) * 100))}%`;
+    const n = rpBarFillEls.length;
+    const lastBand = levels.length - 1;
+    for (let i = 0; i < n; i++) {
+      // Linear interpolation between the two real bands straddling this bar's
+      // position, not nearest-neighbor - copying one real value across a whole
+      // run of bars is exactly what made groups of them move as one identical
+      // block once there were many more bars than real data points (16).
+      const pos = (i * lastBand) / (n - 1); // bar 0 -> band 0, bar n-1 -> last band
+      const lo = Math.floor(pos), hi = Math.min(lastBand, lo + 1), frac = pos - lo;
+      const src = levels[lo] * (1 - frac) + levels[hi] * frac;
+      rpBarTargets[i] = Math.max(0, Math.min(100, (src / 63) * 100));
+    }
+    if (rpBarRafId === null) rpBarRafId = requestAnimationFrame(tickVuBars);
+  }
+
+  function tickVuBars() {
+    let stillMoving = false;
+    rpBarFillEls.forEach((fill, i) => {
+      const diff = rpBarTargets[i] - rpBarShown[i];
+      if (Math.abs(diff) > 0.5) { rpBarShown[i] += diff * 0.35; stillMoving = true; }
+      else { rpBarShown[i] = rpBarTargets[i]; }
+      fill.style.height = `${rpBarShown[i]}%`;
+
+      if (rpBarTargets[i] >= rpPeakShown[i]) { rpPeakShown[i] = rpBarTargets[i]; }
+      else { rpPeakShown[i] = Math.max(0, rpPeakShown[i] - PEAK_FALL_PER_FRAME); }
+      rpBarPeakEls[i].style.bottom = `${rpPeakShown[i]}%`;
+      rpBarPeakEls[i].style.opacity = rpPeakShown[i] > 1 ? "1" : "0";
+      if (rpPeakShown[i] > 0) stillMoving = true;
     });
+    rpBarRafId = stillMoving ? requestAnimationFrame(tickVuBars) : null;
   }
 
   function resetVuBars() {
-    rpBarEls.forEach((bar) => { bar.style.height = "0%"; });
+    rpBarTargets.fill(0);
+    rpBarShown.fill(0);
+    rpPeakShown.fill(0);
+    rpBarFillEls.forEach((fill) => { fill.style.height = "0%"; });
+    rpBarPeakEls.forEach((peak) => { peak.style.bottom = "0%"; peak.style.opacity = "0"; });
+    if (rpBarRafId !== null) { cancelAnimationFrame(rpBarRafId); rpBarRafId = null; }
   }
 
   let rpLastPlaying = false;
@@ -186,6 +264,18 @@
       if (progress.playing) { ppBtn.dataset.cmd = "PLAY_BUTTON"; ppBtn.disabled = hardware; }
       else if (canPlay) { ppBtn.dataset.cmd = "SELECT:PLAY"; ppBtn.disabled = hardware; }
       else { ppBtn.disabled = true; }
+    }
+
+    // Track skip only makes sense mid-song, for an audio CD specifically (not a
+    // DVD-Video/etc. play) - /progress doesn't carry disc kind, so fall back to
+    // the cached /disc-info, which keeps reporting it while the drive is held
+    // busy for the whole play session (see _serve_disc_info's _operation_active
+    // branch).
+    const trackRow = $("rp-trackrow");
+    if (trackRow) {
+      const isAudioCd = !!(rpDiscInfo && rpDiscInfo.kind === "audio_cd");
+      trackRow.hidden = !(progress.playing && isAudioCd);
+      trackRow.querySelectorAll(".rp-btn").forEach((b) => { b.disabled = hardware; });
     }
   }
 

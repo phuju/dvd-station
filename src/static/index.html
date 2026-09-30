@@ -59,6 +59,10 @@
           </div>
           <div id="remote-playback" class="remote-playback">
             <div class="rp-main">
+              <div id="rp-trackrow" class="rp-trackrow" hidden>
+                <button class="rp-btn rp-trackbtn" type="button" data-role="prev" data-cmd="REW:BIG" aria-label="Previous track"><span class="rp-glyph">&#x23EE;</span></button>
+                <button class="rp-btn rp-trackbtn" type="button" data-role="next" data-cmd="FF:BIG" aria-label="Next track"><span class="rp-glyph">&#x23ED;</span></button>
+              </div>
               <div class="rp-screen">
                 <div id="rp-status" class="rp-status">READY</div>
                 <div id="rp-bars" class="rp-bars"></div>
@@ -146,7 +150,7 @@
     </footer>
   </div>
   <div id="install-slot"></div>
-  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=36").catch(() => {});</script>
-  <script src="/static/app.js?v=36" defer></script>
+  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=46").catch(() => {});</script>
+  <script src="/static/app.js?v=46" defer></script>
 </body>
 </html>

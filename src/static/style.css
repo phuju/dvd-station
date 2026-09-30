@@ -340,13 +340,31 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
 }
 .rp-bars {
   display: flex;
-  align-items: flex-end;
-  gap: 2px;
+  align-items: stretch; /* each .rp-bar-col gets the full height as a stable box for its two absolutely-positioned children */
+  justify-content: space-between; /* bars stay a fixed width but spread across the full screen width */
+  gap: 1px;
   flex: 1; /* fill the screen down to its bottom edge, not just a fixed strip under the text */
   border-top: 1px solid #262626;
   padding-top: 4px;
 }
-.rp-bars span { flex: 1; background: var(--accent); height: 0; min-height: 1px; transition: height 0.08s linear; }
+.rp-bar-col { position: relative; flex: 0 0 2px; width: 2px; }
+.rp-bar-fill {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 0;
+  min-height: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
+.rp-bar-peak {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 5px var(--accent);
+  opacity: 0;
+  transition: opacity 0.15s linear;
+}
 /* Idle-with-disc: the OLED's own HOME screen shows the modes this disc offers below
    its name/status line - this is that list, filling the same slot bars use while
    playing (see applyPlaybackPanel in app.js). */
@@ -387,6 +405,9 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
 .rp-btn:disabled { cursor: not-allowed; opacity: 0.4; }
 .rp-glyph { font-size: 22px; color: var(--ink); }
 .rp-dot { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--ink); }
+.rp-trackrow { display: flex; gap: 8px; }
+.rp-trackrow[hidden] { display: none; }
+.rp-trackbtn { flex: 1; width: auto; height: 32px; }
 
 .footer-stamp {
   display: flex;

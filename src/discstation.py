@@ -58,7 +58,7 @@ _web_status = "READY"
 _web_progress = -1
 _web_progress_active = False
 _web_playing = False  # a play_flow is currently active (transport controls apply)
-_web_op_verb = "BURNING"  # progress-bar verb for the current PROGRESS: stream
+_web_phase = "READY"  # most recent STATUS: text, prefixed onto the next PROGRESS: value
 _operation_active = False  # a burn/rip/play flow is holding the drive
 _last_disc_info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
 _active_ser = None
@@ -460,6 +460,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         url = params.get('url', [''])[0].strip()
         if url:
             _burn_url_queue.put(url)
+            self._chain_start_if_waiting()
             self._respond(200, 'URL received. Starting burn...')
         else:
             self._respond(400, 'Missing URL')
@@ -505,6 +506,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         # the queue forever, waiting to wrongly satisfy a later, unrelated
         # burn attempt.)
         _burn_url_queue.put(str(upload_dir))
+        self._chain_start_if_waiting()
         size_str = f"{total / 1e6:.1f}MB" if total > 1e6 else f"{total / 1e3:.0f}KB"
         _set_web_progress("UPLOAD READY", 100)
         # Used to hardcode "Select BURN DATA on remote" - wrong mode name for
@@ -530,17 +532,31 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             return
         if _active_ser is not None and _active_ser.hw is None:
             _active_ser.virtual.push_line(cmd)
-            # One-click burn: chain START right behind SELECT:BURN* in the SAME
-            # request, atomically - station_loop's SELECT handler clears any
-            # stale buffered input the instant it reads the SELECT line, and a
-            # START sent as a second, separate HTTP call can land in that exact
-            # gap and get wiped (intermittent, timing-dependent "burn never
-            # starts" bug). Queuing both lines from one call removes the gap.
-            if cmd.upper().startswith("SELECT:BURN"):
+            # One-click burn, half of it: if a source (upload/URL) was already
+            # queued *before* this mode was selected, chain START right behind
+            # it now - the other half is _chain_start_if_waiting(), fired when
+            # the source arrives *after* mode selection instead (the web UI's
+            # actual normal order for a video burn: pick BURN, then paste a
+            # URL). Chaining START unconditionally behind every SELECT:BURN*
+            # used to lose it whenever the source wasn't ready yet: it sent
+            # START straight into wait_for_web_url()'s own CANCEL/HOME-polling
+            # loop, which reads and silently discards whatever isn't CANCEL/HOME
+            # while it waits - the exact "burn never starts" bug, just for the
+            # opposite ordering than the one already fixed once before.
+            if cmd.upper().startswith("SELECT:BURN") and not _burn_url_queue.empty():
                 _active_ser.virtual.push_line("START")
             self._respond(200, 'OK')
         else:
             self._respond(409, 'A hardware remote is attached')
+
+    def _chain_start_if_waiting(self):
+        """The other half of one-click burn (see _handle_remote_button): a
+        source arriving while a mode is already selected and waiting for one
+        (_operation_active) means this is the signal to actually start -
+        pushed here, at the moment the source becomes real, instead of
+        earlier at mode-select time when it might not exist yet."""
+        if _operation_active and _active_ser is not None and _active_ser.hw is None:
+            _active_ser.virtual.push_line("START")
 
     def _serve_firmware(self):
         image, _ = _firmware_image()
@@ -657,7 +673,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('discstation-v36').then(c => c.addAll(['/','/static/style.css?v=36','/static/app.js?v=36']));
+  caches.open('discstation-v46').then(c => c.addAll(['/','/static/style.css?v=46','/static/app.js?v=46']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
@@ -666,7 +682,7 @@ self.addEventListener('fetch', e => {
   if (path === '/' || path.startsWith('/static/')) {
     e.respondWith(fetch(e.request).then(r => {
       const copy = r.clone();
-      caches.open('discstation-v36').then(c => c.put(e.request, copy));
+      caches.open('discstation-v46').then(c => c.put(e.request, copy));
       return r;
     }).catch(() => caches.match(e.request)));
   } else {
@@ -1081,7 +1097,7 @@ def _set_web_progress(phase, percent=-1):
 
 
 def _record_web_status(msg):
-    global _web_status, _web_progress, _web_progress_active, _web_playing
+    global _web_status, _web_progress, _web_progress_active, _web_playing, _web_phase
     _remember(msg)
     if msg.startswith("DISC:"):
         _sse_publish({"type": "disc-changed"})
@@ -1092,12 +1108,20 @@ def _record_web_status(msg):
         _web_progress_active = True
     elif msg.startswith("PLAY_STATUS:") or msg.startswith("PLAY:"):
         _web_status = msg.split(":", 1)[1].strip() or "PLAYING"
+    elif msg.startswith("WAITING:"):
+        # The OLED's pre-burn confirm screen ("does this fit? confirm to
+        # go") - was silently dropped before (not in this elif chain at
+        # all), which is exactly why a burn stuck here looked frozen on
+        # the web instead of showing what it's actually waiting on.
+        _web_status = "Waiting to confirm: " + (msg[8:].strip() or "...")
+        _web_progress_active = True
     elif msg.startswith("STATUS:"):
         _web_status = msg[7:].strip() or "READY"
+        _web_phase = _web_status.rstrip(".")
         _web_progress_active = True
     elif msg.startswith("PROGRESS:"):
         value = msg[9:].strip()
-        _web_status = f"{_web_op_verb} {value}"
+        _web_status = f"{_web_phase} {value}"
         match = re.search(r"(\d+(?:\.\d+)?)", value)
         if match:
             _web_progress = min(100, max(0, int(float(match.group(1)))))
@@ -1107,14 +1131,17 @@ def _record_web_status(msg):
         _web_progress = 100
         _web_progress_active = False
         _web_playing = False
+        _web_phase = "READY"
     elif msg.startswith("ERROR:"):
         _web_status = msg[6:].strip() or "ERROR"
         _web_progress_active = False
         _web_playing = False
+        _web_phase = "READY"
     elif msg.startswith("CANCELLED:"):
         _web_status = msg[10:].strip() or "CANCELLED"
         _web_progress_active = False
         _web_playing = False
+        _web_phase = "READY"
     elif msg.startswith(("STANDBY:", "HOME:")):
         # idle again (tray open, insert disc, back to the menu) — clear any
         # lingering "Ejecting..." / progress state on the web UI.
@@ -1123,6 +1150,7 @@ def _record_web_status(msg):
         _web_progress = -1
         _web_progress_active = False
         _web_playing = False
+        _web_phase = "READY"
     else:
         return
     _sse_publish(_status_snapshot())
@@ -1508,14 +1536,17 @@ def _wait_for_start(ser, starting=None, mode=None):
 
 def run_probe(cmd, timeout=8, name=None):
     try:
-        return subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        return _run_hard_timeout(
+            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=timeout),
+            timeout=timeout + 5,
         )
     except subprocess.TimeoutExpired as e:
         return subprocess.CompletedProcess(cmd, 124, ensure_text(e.stdout), ensure_text(e.stderr))
+    except RuntimeError:
+        # _run_hard_timeout gave up on a child stuck in D-state (uninterruptible
+        # kernel I/O sleep) rather than a clean subprocess-level timeout - same
+        # "this probe didn't answer" outcome from every caller's point of view.
+        return subprocess.CompletedProcess(cmd, 124, "", "")
     except (FileNotFoundError, OSError) as e:
         return subprocess.CompletedProcess(cmd, 127, "", str(e))
 
@@ -1602,6 +1633,9 @@ def udev_cdrom_properties(device, refresh=False):
                 properties[key] = value
     properties.update(overlay)  # a fresh cdrom_id read wins over the cached udev db
     return properties
+
+
+discstation_burn.udev_cdrom_properties = udev_cdrom_properties
 
 
 _tray_open = False
@@ -2202,6 +2236,32 @@ def menu_items_for_disc(device):
     return items
 
 
+def _run_hard_timeout(fn, timeout):
+    """Run fn() on a throwaway daemon thread and bound the wait on the THREAD,
+    not on whatever fn() calls internally. subprocess.run(timeout=N) can't
+    rescue a caller from a child stuck in D-state (uninterruptible kernel I/O
+    sleep - e.g. a drive that can't read a bad/dirty disc): SIGKILL doesn't
+    interrupt D-state, so the library's own kill-then-reap after its own
+    timeout hangs right along with it. This is the only way to guarantee the
+    caller gets control back - the thread (and whatever it's still stuck in)
+    is abandoned/leaked, but nothing ever waits on it again, so any lock the
+    caller holds gets released either way."""
+    result = {}
+    def _target():
+        try:
+            result["value"] = fn()
+        except Exception as e:
+            result["error"] = e
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise RuntimeError("drive not responding (timed out)")
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
+
+
 class mounted_disc:
     def __init__(self, device):
         self.device = device
@@ -2232,7 +2292,14 @@ class mounted_disc:
         else:
             self.tmp.cleanup()
             raise RuntimeError("Disc mounting backend is not configured for this operating system")
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        try:
+            result = _run_hard_timeout(
+                lambda: subprocess.run(command, capture_output=True, text=True, timeout=30),
+                timeout=35,
+            )
+        except Exception:
+            self.tmp.cleanup()
+            raise
         if result.returncode != 0:
             self.tmp.cleanup()
             raise RuntimeError((result.stderr or result.stdout or "Could not mount disc").strip())
@@ -2984,7 +3051,7 @@ def burn_flow(ser):
         )
 
         if plan["burn"]:
-            discstation_burn.wait_for_burn_confirm(ser, dvd_dir, disc_bytes)
+            discstation_burn.wait_for_burn_confirm(ser, dvd_dir, disc_bytes, auto_confirm=ser.hw is None)
             discstation_burn.burn(ser, dvd_dir, disc_label, burn_speed, dl_info["is_dual_layer"])
             safe_send(ser, "DONE:Disc complete!")
             print("Burn complete.")
@@ -4283,7 +4350,7 @@ def rip_audio_cd(ser, device):
 
 
 def station_loop(ser):
-    global _last_burn_result, _last_burn_result_time, _tray_open, _tray_open_since, _operation_active, _web_op_verb
+    global _last_burn_result, _last_burn_result_time, _tray_open, _tray_open_since, _operation_active
     discstation_burn.cleanup_old_jobs()
     try:
         device = discstation_burn.disc_device()
@@ -4504,7 +4571,6 @@ def station_loop(ser):
 
         mode = line.split(":", 1)[1].strip().upper()
         print(f"Selected: {mode}")
-        _web_op_verb = "RIPPING" if mode == "RIP" else "BURNING"
         # The web remote's mode buttons queue START right behind SELECT: for a
         # one-click burn (see app.js) - if an earlier selection was abandoned
         # before its own START got consumed (e.g. never uploaded/confirmed a
