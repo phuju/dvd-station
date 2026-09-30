@@ -138,7 +138,9 @@
   let rpLastPlaying = false;
   function applyPlaybackPanel(progress, hardware, trayOpen) {
     rpLastPlaying = !!progress.playing;
-    $("rp-status").textContent = (progress.status || "READY").toUpperCase().slice(0, 24);
+    // CSS handles the visual cutoff (ellipsis) - no hard slice here so it
+    // never chops a word off abruptly mid-string.
+    $("rp-status").textContent = (progress.status || "READY").toUpperCase();
 
     const ejectBtn = $("remote-controls").querySelector('[data-role="eject"]');
     if (ejectBtn) { ejectBtn.dataset.cmd = trayOpen ? "CONFIRM" : "EJECT"; ejectBtn.disabled = hardware; }

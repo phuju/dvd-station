@@ -319,16 +319,33 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
 .rp-screen {
   background: #0a0a0a;
   border: 1px solid var(--ink);
-  padding: 10px 12px;
-  min-height: 54px;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 3px #1a1a1a, inset 0 2px 6px rgba(0, 0, 0, 0.6);
+  padding: 10px 12px 8px;
+  min-height: 60px;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  gap: 6px;
+  gap: 8px;
 }
-.rp-status { color: #f2f2f2; font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; }
-.rp-bars { display: flex; align-items: flex-end; gap: 2px; height: 26px; }
-.rp-bars span { flex: 1; background: var(--accent); height: 0; transition: height 0.08s linear; }
+.rp-status {
+  color: #f2f2f2;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rp-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 26px;
+  border-top: 1px solid #262626;
+  padding-top: 4px;
+}
+.rp-bars span { flex: 1; background: var(--accent); height: 0; min-height: 1px; transition: height 0.08s linear; }
 .rp-main input[type="range"] { width: 100%; accent-color: var(--accent); }
 .rp-buttons { display: flex; flex-direction: column; gap: 8px; }
 .rp-btn {
