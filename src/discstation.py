@@ -653,7 +653,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('discstation-v20').then(c => c.addAll(['/','/static/style.css?v=20','/static/app.js?v=20']));
+  caches.open('discstation-v22').then(c => c.addAll(['/','/static/style.css?v=22','/static/app.js?v=22']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
@@ -662,7 +662,7 @@ self.addEventListener('fetch', e => {
   if (path === '/' || path.startsWith('/static/')) {
     e.respondWith(fetch(e.request).then(r => {
       const copy = r.clone();
-      caches.open('discstation-v20').then(c => c.put(e.request, copy));
+      caches.open('discstation-v22').then(c => c.put(e.request, copy));
       return r;
     }).catch(() => caches.match(e.request)));
   } else {
@@ -3249,8 +3249,8 @@ def _vu_loop(ser, stop_event, pause_event):
                 if proc.poll() is not None:
                     break
                 continue
-            if pause_event.is_set() or ser.hw is None:   # nobody to draw bars for
-                continue
+            if pause_event.is_set() or (ser.hw is None and not _sse_subs):
+                continue   # nobody to draw bars for - no OLED, no browser watching either
             samples = _np.frombuffer(raw, dtype=_np.int16).astype(_np.float32) / 32768.0
             spectrum = _np.abs(_np.fft.rfft(samples * window))
             mags = []
@@ -3275,6 +3275,8 @@ def _vu_loop(ser, stop_event, pause_event):
                 shown[i] = target if target > shown[i] else max(0.0, shown[i] - VU_PEAK_DECAY)
                 levels.append(int(shown[i]))
             send(ser, "VU:" + ",".join(str(v) for v in levels))
+            if _sse_subs:   # skip the JSON encode when nobody's listening
+                _sse_publish({"type": "vu", "levels": levels})
     finally:
         discstation_burn.stop_process(proc)
 

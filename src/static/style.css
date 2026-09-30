@@ -307,6 +307,48 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
 .remote-transport { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--soft-line); }
 .remote-transport input[type="range"] { width: 100%; margin-top: 4px; accent-color: var(--accent); }
 
+.link-button {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  margin: 6px 0 0;
+  padding: 0 8px;
+  border: 1px solid var(--soft-line);
+  background: none;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+.link-button:hover { color: var(--ink); border-color: var(--ink); }
+
+/* Schematic-style remote: an SVG board rendered from remote-blueprint.json
+   (see loadBlueprint() in app.js) - same shape data the mobile app draws via
+   react-native-svg, so the two stay visually identical. Themed purely with
+   the page's existing custom properties, same as everything else here. */
+.remote-blueprint { margin-top: 16px; }
+.remote-blueprint svg { width: 100%; height: auto; display: block; }
+.bp-board { fill: none; stroke: var(--soft-line); stroke-width: 1.5; }
+.bp-header-text { font-family: var(--mono); font-weight: 700; letter-spacing: 0.12em; fill: var(--ink); }
+.bp-rule { stroke: var(--soft-line); stroke-width: 1; }
+.bp-btn { fill: var(--surface); stroke: var(--ink); stroke-width: 1.5; cursor: pointer; transition: fill 0.15s ease; }
+.bp-btn:hover { fill: var(--paper-deep); }
+.bp-btn:active { fill: var(--accent); }
+.bp-btn-glyph { fill: var(--ink); font-size: 26px; text-anchor: middle; pointer-events: none; }
+.bp-btn-label { fill: var(--muted); font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: 0.06em; text-anchor: middle; pointer-events: none; }
+.bp-knob-ring { fill: var(--surface); stroke: var(--ink); stroke-width: 1.5; }
+.bp-knob { fill: var(--paper-deep); stroke: var(--ink); stroke-width: 1.5; cursor: grab; touch-action: none; }
+.bp-knob:active { cursor: grabbing; }
+.bp-knob-mark { stroke: var(--accent); stroke-width: 3; stroke-linecap: round; }
+.bp-knob-label { fill: var(--muted); font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: 0.06em; text-anchor: middle; }
+.bp-oled { fill: var(--ink); stroke: var(--ink); stroke-width: 1.5; opacity: 0.9; }
+.bp-oled-label { fill: var(--muted); font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: 0.06em; text-anchor: middle; }
+.bp-oled-status { fill: var(--paper); font-family: var(--mono); font-size: 9px; text-anchor: middle; }
+.bp-vu-bar { fill: var(--accent); }
+
 .footer-stamp {
   display: flex;
   justify-content: space-between;

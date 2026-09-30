@@ -111,6 +111,172 @@
     const open = !!progress.tray_open;
     ejectBtn.textContent = open ? "CLOSE TRAY" : "EJECT";
     ejectBtn.dataset.cmd = open ? "CONFIRM" : "EJECT";
+    applyBlueprintState(progress, hardware, open);
+  }
+
+  // ---- Schematic remote (SVG blueprint, drawn from remote-blueprint.json) ---
+  // Same shape data the mobile app renders via react-native-svg, so the two
+  // stay visually identical - see the plan's "shared layout" note. Additive:
+  // the plain button grid above still works, this is just another skin on
+  // top of the exact same /remote/button protocol.
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const blueprintViewKey = "discstation-remote-view";
+  let bpOledStatusEl = null;
+  let bpVuBarEls = [];
+  let bpEjectRect = null;
+
+  function svgEl(tag, attrs) {
+    const el = document.createElementNS(SVG_NS, tag);
+    for (const key in attrs) el.setAttribute(key, attrs[key]);
+    return el;
+  }
+
+  function setSchematicView(schematic, persist = false) {
+    $("remote-blueprint").hidden = !schematic;
+    $("remote-controls").hidden = schematic;
+    $("remote-view-toggle").textContent = schematic ? "BUTTON VIEW" : "SCHEMATIC VIEW";
+    if (persist) localStorage.setItem(blueprintViewKey, schematic ? "1" : "0");
+  }
+
+  async function loadBlueprint() {
+    let data;
+    try {
+      data = await fetch("/static/remote-blueprint.json").then((r) => r.json());
+    } catch (_) {
+      return; // no schematic data - the plain button grid still works fine
+    }
+    renderBlueprint(data);
+    $("remote-view-toggle").hidden = false;
+    $("remote-view-toggle").addEventListener("click", () => {
+      setSchematicView($("remote-blueprint").hidden, true);
+    });
+    setSchematicView(localStorage.getItem(blueprintViewKey) === "1");
+  }
+
+  function renderBlueprint(data) {
+    const { board, header, buttons, knob, oled } = data;
+    const svg = svgEl("svg", { viewBox: data.viewBox });
+
+    svg.appendChild(svgEl("rect", { class: "bp-board", x: board.x, y: board.y, width: board.w, height: board.h, rx: board.rx }));
+
+    const headerText = svgEl("text", { class: "bp-header-text", x: header.x, y: header.y, "text-anchor": "middle", "font-size": 20 });
+    headerText.textContent = header.text;
+    svg.appendChild(headerText);
+    svg.appendChild(svgEl("line", { class: "bp-rule", x1: board.x + 16, y1: header.ruleY, x2: board.x + board.w - 16, y2: header.ruleY }));
+
+    buttons.forEach((b) => {
+      const rect = svgEl("rect", { class: "bp-btn", x: b.x, y: b.y, width: b.w, height: b.h, rx: b.rx, "data-cmd": b.cmd });
+      const glyph = svgEl("text", { class: "bp-btn-glyph", x: b.x + b.w / 2, y: b.y + b.h / 2 + 9, "text-anchor": "middle" });
+      glyph.textContent = b.glyph;
+      const label = svgEl("text", { class: "bp-btn-label", x: b.x + b.w / 2, y: b.y + b.h + 14, "text-anchor": "middle" });
+      label.textContent = b.label;
+      svg.appendChild(rect);
+      svg.appendChild(glyph);
+      svg.appendChild(label);
+      if (b.id === "eject") bpEjectRect = rect;
+    });
+
+    // Volume knob: a static ring, a draggable disc, and an indicator mark -
+    // pointer-down + drag mapped to an angle, throttled the same way the old
+    // linear slider debounced POT: (see wireKnob below).
+    svg.appendChild(svgEl("circle", { class: "bp-knob-ring", cx: knob.cx, cy: knob.cy, r: knob.r + 6 }));
+    const knobCircle = svgEl("circle", { class: "bp-knob", cx: knob.cx, cy: knob.cy, r: knob.r });
+    svg.appendChild(knobCircle);
+    const knobMark = svgEl("line", { class: "bp-knob-mark" });
+    svg.appendChild(knobMark);
+    const knobLabel = svgEl("text", { class: "bp-knob-label", x: knob.cx, y: knob.cy + knob.r + 20 });
+    knobLabel.textContent = knob.label;
+    svg.appendChild(knobLabel);
+
+    svg.appendChild(svgEl("rect", { class: "bp-oled", x: oled.x, y: oled.y, width: oled.w, height: oled.h, rx: oled.rx }));
+    const oledLabel = svgEl("text", { class: "bp-oled-label", x: oled.x + oled.w / 2, y: oled.y - 6 });
+    oledLabel.textContent = oled.label;
+    svg.appendChild(oledLabel);
+    bpOledStatusEl = svgEl("text", { class: "bp-oled-status", x: oled.x + oled.w / 2, y: oled.y + 20 });
+    svg.appendChild(bpOledStatusEl);
+
+    // 16 VU bars, matching the OLED's own VU_BARS - empty until the first
+    // "vu" SSE frame (see renderVuBars), same numbers the physical OLED shows.
+    const barCount = 16, barGap = 3;
+    const barW = (oled.w - 16 - barGap * (barCount - 1)) / barCount;
+    bpVuBarEls = [];
+    for (let i = 0; i < barCount; i++) {
+      const baseY = oled.y + oled.h - 8; // bars grow upward from here
+      const bar = svgEl("rect", { class: "bp-vu-bar", x: oled.x + 8 + i * (barW + barGap), y: baseY, width: barW, height: 0 });
+      bar.dataset.baseY = baseY;
+      svg.appendChild(bar);
+      bpVuBarEls.push(bar);
+    }
+
+    svg.addEventListener("click", (event) => {
+      const target = event.target.closest("[data-cmd]");
+      if (target && !target.classList.contains("disabled")) sendRemoteCmd(target.dataset.cmd);
+    });
+    wireKnob(knobCircle, knobMark, knob);
+
+    const container = $("remote-blueprint");
+    container.innerHTML = "";
+    container.appendChild(svg);
+  }
+
+  function wireKnob(knobCircle, knobMark, knob) {
+    let dragging = false;
+    let volumeTimer;
+    function angleFor(clientX, clientY) {
+      const svg = knobCircle.ownerSVGElement;
+      const rect = svg.getBoundingClientRect();
+      // Uniform scale: the page CSS keeps width:100%/height:auto, so the
+      // rendered box always matches the viewBox's own aspect ratio.
+      const scale = rect.width / svg.viewBox.baseVal.width;
+      const cx = rect.left + knob.cx * scale;
+      const cy = rect.top + knob.cy * scale;
+      return Math.atan2(clientY - cy, clientX - cx);
+    }
+    function setFromAngle(angle) {
+      // Map the knob's usable arc (-225deg..+45deg, a 270deg sweep starting
+      // bottom-left) to 0-100, same range a physical pot covers.
+      let deg = (angle * 180) / Math.PI;
+      deg = ((deg - 135 + 360) % 360); // 0 at the sweep's start
+      const pct = Math.max(0, Math.min(100, Math.round((deg / 270) * 100)));
+      const markAngle = ((135 + (pct / 100) * 270) * Math.PI) / 180;
+      knobMark.setAttribute("x1", knob.cx + Math.cos(markAngle) * (knob.r * 0.3));
+      knobMark.setAttribute("y1", knob.cy + Math.sin(markAngle) * (knob.r * 0.3));
+      knobMark.setAttribute("x2", knob.cx + Math.cos(markAngle) * (knob.r * 0.85));
+      knobMark.setAttribute("y2", knob.cy + Math.sin(markAngle) * (knob.r * 0.85));
+      clearTimeout(volumeTimer);
+      volumeTimer = setTimeout(() => sendRemoteCmd(`POT:${pct}`), 150);
+    }
+    setFromAngle((135 * Math.PI) / 180); // draw the mark at rest before any input
+    knobCircle.addEventListener("pointerdown", (event) => {
+      dragging = true;
+      knobCircle.setPointerCapture(event.pointerId);
+      setFromAngle(angleFor(event.clientX, event.clientY));
+    });
+    knobCircle.addEventListener("pointermove", (event) => {
+      if (dragging) setFromAngle(angleFor(event.clientX, event.clientY));
+    });
+    knobCircle.addEventListener("pointerup", () => { dragging = false; });
+    knobCircle.addEventListener("pointercancel", () => { dragging = false; });
+  }
+
+  function applyBlueprintState(progress, hardware, trayOpen) {
+    $("remote-blueprint").querySelectorAll(".bp-btn").forEach((el) => {
+      el.classList.toggle("disabled", hardware);
+    });
+    if (bpEjectRect) bpEjectRect.dataset.cmd = trayOpen ? "CONFIRM" : "EJECT";
+    if (bpOledStatusEl) bpOledStatusEl.textContent = (progress.status || "READY").toUpperCase().slice(0, 20);
+  }
+
+  function renderVuBars(levels) {
+    if (!bpVuBarEls.length || !levels) return;
+    const maxH = 56; // matches oled.h - top/bottom margin in remote-blueprint.json
+    levels.forEach((level, i) => {
+      const bar = bpVuBarEls[i];
+      if (!bar) return;
+      const h = Math.max(0, Math.min(maxH, (level / 63) * maxH));
+      bar.setAttribute("height", h);
+      bar.setAttribute("y", Number(bar.dataset.baseY) - h);
+    });
   }
 
   // Firmware row: outside the remote panel on purpose - a hardware remote hides
@@ -139,7 +305,16 @@
     } catch (_) { /* SSE/poll shows the real state */ }
   });
 
+  let lastCmdKey = "", lastCmdAt = 0;
   async function sendRemoteCmd(cmd) {
+    // Guard against a duplicate dispatch of the identical command landing
+    // within the same instant (e.g. a click/pointer pair both bubbling to
+    // the same handler) - a real user's next distinct press is unaffected,
+    // this only catches an exact repeat inside a tiny window.
+    const now = Date.now();
+    if (cmd === lastCmdKey && now - lastCmdAt < 250) return;
+    lastCmdKey = cmd;
+    lastCmdAt = now;
     try {
       await fetch("/remote/button", {
         method: "POST",
@@ -383,6 +558,7 @@
   loadDiscInfo();
   pollStatus();
   startEventStream();
+  loadBlueprint();
 
   function startEventStream() {
     if (typeof EventSource === "undefined") { setInterval(pollStatus, 2000); return; }
@@ -393,6 +569,7 @@
       let d;
       try { d = JSON.parse(ev.data); } catch (_) { return; }
       if (d.type === "disc-changed") { loadDiscInfo(); return; }
+      if (d.type === "vu") { renderVuBars(d.levels); return; }
       setConnection(true);
       setLiveStatus(d.status);
       setProgress(d.status, Number(d.progress), d.active);

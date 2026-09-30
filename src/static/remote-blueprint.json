@@ -1,0 +1,13 @@
+{
+  "viewBox": "0 0 360 460",
+  "board": {"x": 8, "y": 8, "w": 344, "h": 444, "rx": 12},
+  "header": {"text": "ESP32", "x": 180, "y": 44, "ruleY": 60},
+  "buttons": [
+    {"id": "prev", "cmd": "REW:BIG", "x": 20, "y": 96, "w": 64, "h": 64, "rx": 8, "glyph": "⏮", "label": "PREV"},
+    {"id": "playpause", "cmd": "PLAY_BUTTON", "x": 102, "y": 96, "w": 64, "h": 64, "rx": 8, "glyph": "⏯", "label": "PLAY/PAUSE"},
+    {"id": "next", "cmd": "FF:BIG", "x": 184, "y": 96, "w": 64, "h": 64, "rx": 8, "glyph": "⏭", "label": "NEXT"},
+    {"id": "eject", "cmd": "EJECT", "x": 278, "y": 82, "w": 56, "h": 56, "rx": 8, "glyph": "⏏", "label": "EJECT / STOP", "separate": true}
+  ],
+  "knob": {"cx": 92, "cy": 336, "r": 52, "label": "VOLUME"},
+  "oled": {"x": 168, "y": 280, "w": 168, "h": 108, "rx": 4, "label": "OLED"}
+}

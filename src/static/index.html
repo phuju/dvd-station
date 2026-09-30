@@ -50,6 +50,8 @@
         </div>
         <p id="remote-note" class="field-note"></p>
         <div id="remote-disc-status" class="remote-disc-status">DISC: CHECKING</div>
+        <button id="remote-view-toggle" class="link-button" type="button" hidden>SCHEMATIC VIEW</button>
+        <div id="remote-blueprint" class="remote-blueprint" hidden></div>
         <div id="remote-controls">
           <div class="remote-grid">
             <button class="outline-button" type="button" data-cmd="SELECT:BURN">BURN</button>
@@ -144,7 +146,7 @@
     </footer>
   </div>
   <div id="install-slot"></div>
-  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=20").catch(() => {});</script>
-  <script src="/static/app.js?v=20" defer></script>
+  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=22").catch(() => {});</script>
+  <script src="/static/app.js?v=22" defer></script>
 </body>
 </html>
