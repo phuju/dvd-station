@@ -304,75 +304,49 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
 }
 .remote-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 16px; }
 #remote-controls button:disabled, #remote-controls input:disabled { cursor: not-allowed; opacity: 0.4; }
-.remote-transport { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--soft-line); }
-.remote-transport input[type="range"] { width: 100%; margin-top: 4px; accent-color: var(--accent); }
-
-.link-button {
-  display: inline-flex;
-  align-items: center;
-  height: 20px;
-  margin: 6px 0 0;
-  padding: 0 8px;
-  border: 1px solid var(--soft-line);
-  background: none;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  cursor: pointer;
-  transition: color 0.2s ease, border-color 0.2s ease;
-}
-.link-button:hover { color: var(--ink); border-color: var(--ink); }
-
-/* Schematic-style remote: an SVG board rendered from remote-blueprint.json
-   (see loadBlueprint() in app.js) - same shape data the mobile app draws via
-   react-native-svg, so the two stay visually identical. Themed purely with
-   the page's existing custom properties, same as everything else here. */
-/* Fixed "engineering datasheet" look - deliberately NOT themed off --ink/--paper/
-   [data-theme]: this is meant to read as a real schematic sheet (navy grid, orange
-   accent, off-white line art), the same in light or dark site mode, matching the
-   reference hardware sheets it's drawn from. */
-.remote-blueprint {
-  --bp-bg: #0a1830;
-  --bp-grid: rgba(255, 255, 255, 0.06);
-  --bp-line: #e8ecf2;
-  --bp-muted: #7f93b3;
-  --bp-accent: #ff6a3d;
-  --bp-screen: #040b18;
-  margin-top: 16px;
+/* Playback control panel: a screen + volume slider beside a column of 3 icon
+   buttons (EJECT / HOME / PLAY-PAUSE) - plain HTML/CSS, themed with the page's
+   own custom properties like everything else here. Always visible (same as
+   CANCEL/EJECT above it), not gated behind a view toggle. */
+.remote-playback {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--soft-line);
   display: flex;
-  justify-content: center;
-  padding: 14px;
-  background-color: var(--bp-bg);
-  background-image:
-    linear-gradient(to right, var(--bp-grid) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--bp-grid) 1px, transparent 1px);
-  background-size: 18px 18px;
+  gap: 12px;
 }
-.remote-blueprint svg { width: 100%; max-width: 360px; height: auto; display: block; }
-.bp-board { fill: none; stroke: var(--bp-line); stroke-width: 1.2; }
-.bp-header-text { font-family: var(--mono); font-weight: 700; letter-spacing: 0.1em; fill: var(--bp-line); }
-.bp-rule { stroke: var(--bp-muted); stroke-width: 1; }
-.bp-pin { fill: var(--bp-bg); stroke: var(--bp-accent); stroke-width: 1.2; }
-.bp-pin-label { fill: var(--bp-muted); font-family: var(--mono); font-size: 7px; font-weight: 700; letter-spacing: 0.02em; text-anchor: middle; }
-.bp-btn { fill: #101f3d; stroke: var(--bp-line); stroke-width: 1.5; cursor: pointer; transition: fill 0.15s ease; }
-.bp-btn:hover { fill: #17284a; }
-.bp-btn:active { fill: var(--bp-accent); }
-.bp-btn.disabled { cursor: not-allowed; opacity: 0.35; }
-.bp-btn-glyph { fill: var(--bp-line); font-size: 30px; text-anchor: middle; pointer-events: none; }
-.bp-btn-label { fill: var(--bp-muted); font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-anchor: middle; pointer-events: none; }
-.bp-knob-ring { fill: #101f3d; stroke: var(--bp-line); stroke-width: 1.5; }
-.bp-knob { fill: #3a5478; stroke: var(--bp-line); stroke-width: 1.5; cursor: grab; touch-action: none; }
-.bp-knob:active { cursor: grabbing; }
-.bp-knob-mark { stroke: var(--bp-accent); stroke-width: 3.5; stroke-linecap: round; }
-.bp-knob-label { fill: var(--bp-muted); font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-anchor: middle; }
-.bp-oled { fill: var(--bp-screen); stroke: var(--bp-line); stroke-width: 1.5; }
-.bp-oled-status { fill: var(--bp-line); font-family: var(--mono); font-size: 10px; text-anchor: middle; }
-.bp-vu-bar { fill: var(--bp-accent); }
-.bp-badge-circle { fill: var(--bp-accent); stroke: var(--bp-bg); stroke-width: 2; }
-.bp-badge-num { fill: var(--bp-bg); font-family: var(--mono); font-size: 13px; font-weight: 700; text-anchor: middle; }
-.bp-footer { fill: var(--bp-muted); font-family: var(--mono); font-size: 8px; letter-spacing: 0.1em; text-anchor: middle; }
+.rp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.rp-screen {
+  background: #0a0a0a;
+  border: 1px solid var(--ink);
+  padding: 10px 12px;
+  min-height: 54px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+}
+.rp-status { color: #f2f2f2; font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; }
+.rp-bars { display: flex; align-items: flex-end; gap: 2px; height: 26px; }
+.rp-bars span { flex: 1; background: var(--accent); height: 0; transition: height 0.08s linear; }
+.rp-main input[type="range"] { width: 100%; accent-color: var(--accent); }
+.rp-buttons { display: flex; flex-direction: column; gap: 8px; }
+.rp-btn {
+  width: 52px;
+  height: 52px;
+  border: 1px solid var(--ink);
+  background: var(--surface);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease;
+}
+.rp-btn:hover { background: var(--paper-deep); }
+.rp-btn:active { background: var(--accent); }
+.rp-btn:disabled { cursor: not-allowed; opacity: 0.4; }
+.rp-glyph { font-size: 22px; color: var(--ink); }
+.rp-dot { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--ink); }
 
 .footer-stamp {
   display: flex;
