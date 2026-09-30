@@ -1,13 +1,35 @@
 {
-  "viewBox": "0 0 360 460",
-  "board": {"x": 8, "y": 8, "w": 344, "h": 444, "rx": 12},
-  "header": {"text": "ESP32", "x": 180, "y": 44, "ruleY": 60},
+  "viewBox": "0 0 220 260",
+  "oled": {
+    "board": {"x": 6, "y": 6, "w": 100, "h": 78, "rx": 3},
+    "headerY": 16,
+    "pins": [
+      {"x": 16, "label": "GND"},
+      {"x": 38, "label": "VDD"},
+      {"x": 60, "label": "SCK"},
+      {"x": 82, "label": "SDA"}
+    ],
+    "screen": {"x": 10, "y": 20, "w": 92, "h": 60, "rx": 1}
+  },
+  "encoder": {
+    "board": {"x": 114, "y": 6, "w": 54, "h": 78, "rx": 3},
+    "headerY": 16,
+    "pins": [
+      {"x": 124, "label": "CLK"},
+      {"x": 141, "label": "DT"},
+      {"x": 158, "label": "SW"}
+    ],
+    "knob": {"cx": 141, "cy": 52, "r": 20}
+  },
   "buttons": [
-    {"id": "prev", "cmd": "REW:BIG", "x": 20, "y": 96, "w": 64, "h": 64, "rx": 8, "glyph": "⏮", "label": "PREV"},
-    {"id": "playpause", "cmd": "PLAY_BUTTON", "x": 102, "y": 96, "w": 64, "h": 64, "rx": 8, "glyph": "⏯", "label": "PLAY/PAUSE"},
-    {"id": "next", "cmd": "FF:BIG", "x": 184, "y": 96, "w": 64, "h": 64, "rx": 8, "glyph": "⏭", "label": "NEXT"},
-    {"id": "eject", "cmd": "EJECT", "x": 278, "y": 82, "w": 56, "h": 56, "rx": 8, "glyph": "⏏", "label": "EJECT / STOP", "separate": true}
+    {"id": "eject", "x": 12, "y": 96, "w": 46, "h": 46, "rx": 5, "glyph": "⏏", "label": "EJECT"},
+    {"id": "home", "x": 87, "y": 96, "w": 46, "h": 46, "rx": 5, "glyph": "⌂", "label": "HOME"},
+    {"id": "playpause", "x": 162, "y": 96, "w": 46, "h": 46, "rx": 5, "glyph": "⏯", "label": "PLAY"}
   ],
-  "knob": {"cx": 92, "cy": 336, "r": 52, "label": "VOLUME"},
-  "oled": {"x": 168, "y": 280, "w": 168, "h": 108, "rx": 4, "label": "OLED"}
+  "devkit": {
+    "board": {"x": 6, "y": 168, "w": 208, "h": 86, "rx": 6},
+    "usbNotch": {"x": 96, "y": 250, "w": 22, "h": 8},
+    "pinRows": {"leftX": 10, "rightX": 214, "topY": 176, "bottomY": 246, "count": 13},
+    "chipLabel": "ESP-32"
+  }
 }

@@ -116,14 +116,22 @@
 
   // ---- Schematic remote (SVG blueprint, drawn from remote-blueprint.json) ---
   // Same shape data the mobile app renders via react-native-svg, so the two
-  // stay visually identical - see the plan's "shared layout" note. Additive:
-  // the plain button grid above still works, this is just another skin on
-  // top of the exact same /remote/button protocol.
+  // stay visually identical. Additive: the plain button grid above still
+  // works, this is just another skin on top of the same /remote/button
+  // protocol - and its 3 buttons + knob mirror the REAL board's own control
+  // semantics 1:1 (read from arduino/DiscStation/DiscStation.ino's
+  // handleEjectButton/handleHomeButton/handlePlayPauseButton/handleEncoderCW/
+  // handleSelectPress), not an invented "transport row": there is no
+  // dedicated prev/next button on the real hardware either - track skip is
+  // the encoder's rotation in seek-mode, volume is its rotation otherwise,
+  // and idle navigation is also the encoder, matching here.
   const SVG_NS = "http://www.w3.org/2000/svg";
   const blueprintViewKey = "discstation-remote-view";
   let bpOledStatusEl = null;
   let bpVuBarEls = [];
-  let bpEjectRect = null;
+  let bpMenuItems = null;     // latest disc.menu_items, for the knob's idle navigation
+  let bpMenuIndex = 0;
+  let bpSeekMode = false;     // knob click toggles this while playing, like the real encoder's SW
 
   function svgEl(tag, attrs) {
     const el = document.createElementNS(SVG_NS, tag);
@@ -146,6 +154,9 @@
       return; // no schematic data - the plain button grid still works fine
     }
     renderBlueprint(data);
+    // The very first /progress tick can land before this fetch resolves -
+    // catch up immediately instead of waiting for the next unrelated tick.
+    if (bpLastArgs) applyBlueprintState(bpLastArgs.progress, bpLastArgs.hardware, bpLastArgs.trayOpen);
     $("remote-view-toggle").hidden = false;
     $("remote-view-toggle").addEventListener("click", () => {
       setSchematicView($("remote-blueprint").hidden, true);
@@ -153,63 +164,84 @@
     setSchematicView(localStorage.getItem(blueprintViewKey) === "1");
   }
 
+  // A small breakout-board outline: a body rect plus a strip of labeled pins
+  // along its top edge - shared by the OLED and encoder modules so both read
+  // as "a real header-pin breakout", not a bare box.
+  function drawPinHeaderBoard(svg, board, headerY, pins) {
+    svg.appendChild(svgEl("rect", { class: "bp-board", x: board.x, y: board.y, width: board.w, height: board.h, rx: board.rx }));
+    svg.appendChild(svgEl("line", { class: "bp-rule", x1: board.x + 4, y1: headerY, x2: board.x + board.w - 4, y2: headerY }));
+    pins.forEach((p) => {
+      svg.appendChild(svgEl("circle", { class: "bp-pin", cx: p.x, cy: board.y + 5, r: 2 }));
+      const label = svgEl("text", { class: "bp-pin-label", x: p.x, y: headerY - 3, "text-anchor": "middle" });
+      label.textContent = p.label;
+      svg.appendChild(label);
+    });
+  }
+
   function renderBlueprint(data) {
-    const { board, header, buttons, knob, oled } = data;
+    const { oled, encoder, buttons, devkit } = data;
     const svg = svgEl("svg", { viewBox: data.viewBox });
 
-    svg.appendChild(svgEl("rect", { class: "bp-board", x: board.x, y: board.y, width: board.w, height: board.h, rx: board.rx }));
-
-    const headerText = svgEl("text", { class: "bp-header-text", x: header.x, y: header.y, "text-anchor": "middle", "font-size": 20 });
-    headerText.textContent = header.text;
-    svg.appendChild(headerText);
-    svg.appendChild(svgEl("line", { class: "bp-rule", x1: board.x + 16, y1: header.ruleY, x2: board.x + board.w - 16, y2: header.ruleY }));
-
-    buttons.forEach((b) => {
-      const rect = svgEl("rect", { class: "bp-btn", x: b.x, y: b.y, width: b.w, height: b.h, rx: b.rx, "data-cmd": b.cmd });
-      const glyph = svgEl("text", { class: "bp-btn-glyph", x: b.x + b.w / 2, y: b.y + b.h / 2 + 9, "text-anchor": "middle" });
-      glyph.textContent = b.glyph;
-      const label = svgEl("text", { class: "bp-btn-label", x: b.x + b.w / 2, y: b.y + b.h + 14, "text-anchor": "middle" });
-      label.textContent = b.label;
-      svg.appendChild(rect);
-      svg.appendChild(glyph);
-      svg.appendChild(label);
-      if (b.id === "eject") bpEjectRect = rect;
-    });
-
-    // Volume knob: a static ring, a draggable disc, and an indicator mark -
-    // pointer-down + drag mapped to an angle, throttled the same way the old
-    // linear slider debounced POT: (see wireKnob below).
-    svg.appendChild(svgEl("circle", { class: "bp-knob-ring", cx: knob.cx, cy: knob.cy, r: knob.r + 6 }));
-    const knobCircle = svgEl("circle", { class: "bp-knob", cx: knob.cx, cy: knob.cy, r: knob.r });
-    svg.appendChild(knobCircle);
-    const knobMark = svgEl("line", { class: "bp-knob-mark" });
-    svg.appendChild(knobMark);
-    const knobLabel = svgEl("text", { class: "bp-knob-label", x: knob.cx, y: knob.cy + knob.r + 20 });
-    knobLabel.textContent = knob.label;
-    svg.appendChild(knobLabel);
-
-    svg.appendChild(svgEl("rect", { class: "bp-oled", x: oled.x, y: oled.y, width: oled.w, height: oled.h, rx: oled.rx }));
-    const oledLabel = svgEl("text", { class: "bp-oled-label", x: oled.x + oled.w / 2, y: oled.y - 6 });
-    oledLabel.textContent = oled.label;
-    svg.appendChild(oledLabel);
-    bpOledStatusEl = svgEl("text", { class: "bp-oled-status", x: oled.x + oled.w / 2, y: oled.y + 20 });
+    // --- OLED breakout ---
+    drawPinHeaderBoard(svg, oled.board, oled.headerY, oled.pins);
+    svg.appendChild(svgEl("rect", { class: "bp-oled", x: oled.screen.x, y: oled.screen.y, width: oled.screen.w, height: oled.screen.h, rx: oled.screen.rx }));
+    bpOledStatusEl = svgEl("text", { class: "bp-oled-status", x: oled.screen.x + oled.screen.w / 2, y: oled.screen.y + 14 });
     svg.appendChild(bpOledStatusEl);
-
-    // 16 VU bars, matching the OLED's own VU_BARS - empty until the first
-    // "vu" SSE frame (see renderVuBars), same numbers the physical OLED shows.
-    const barCount = 16, barGap = 3;
-    const barW = (oled.w - 16 - barGap * (barCount - 1)) / barCount;
+    const barCount = 16, barGap = 2;
+    const barW = (oled.screen.w - 8 - barGap * (barCount - 1)) / barCount;
     bpVuBarEls = [];
     for (let i = 0; i < barCount; i++) {
-      const baseY = oled.y + oled.h - 8; // bars grow upward from here
-      const bar = svgEl("rect", { class: "bp-vu-bar", x: oled.x + 8 + i * (barW + barGap), y: baseY, width: barW, height: 0 });
+      const baseY = oled.screen.y + oled.screen.h - 4;
+      const bar = svgEl("rect", { class: "bp-vu-bar", x: oled.screen.x + 4 + i * (barW + barGap), y: baseY, width: barW, height: 0 });
       bar.dataset.baseY = baseY;
       svg.appendChild(bar);
       bpVuBarEls.push(bar);
     }
 
+    // --- Encoder breakout: pin header + knob ---
+    drawPinHeaderBoard(svg, encoder.board, encoder.headerY, encoder.pins);
+    const knob = encoder.knob;
+    svg.appendChild(svgEl("circle", { class: "bp-knob-ring", cx: knob.cx, cy: knob.cy, r: knob.r + 4 }));
+    const knobCircle = svgEl("circle", { class: "bp-knob", cx: knob.cx, cy: knob.cy, r: knob.r });
+    svg.appendChild(knobCircle);
+    const knobMark = svgEl("line", { class: "bp-knob-mark",
+      x1: knob.cx, y1: knob.cy - knob.r * 0.25, x2: knob.cx, y2: knob.cy - knob.r * 0.75 });
+    svg.appendChild(knobMark);
+    const knobModeLabel = svgEl("text", { class: "bp-knob-label", x: knob.cx, y: knob.cy + knob.r + 14 });
+    svg.appendChild(knobModeLabel);
+
+    // --- 3 real buttons: EJECT / HOME / PLAY-PAUSE ---
+    const bpBtnRects = {};
+    buttons.forEach((b) => {
+      const rect = svgEl("rect", { class: "bp-btn", x: b.x, y: b.y, width: b.w, height: b.h, rx: b.rx, "data-role": b.id });
+      const glyph = svgEl("text", { class: "bp-btn-glyph", x: b.x + b.w / 2, y: b.y + b.h / 2 + 7, "text-anchor": "middle" });
+      glyph.textContent = b.glyph;
+      const label = svgEl("text", { class: "bp-btn-label", x: b.x + b.w / 2, y: b.y + b.h + 12, "text-anchor": "middle" });
+      label.textContent = b.label;
+      svg.appendChild(rect);
+      svg.appendChild(glyph);
+      svg.appendChild(label);
+      bpBtnRects[b.id] = rect;
+    });
+
+    // --- ESP32 DevKit board: outline + decorative pin ticks + USB notch ---
+    const dk = devkit.board;
+    svg.appendChild(svgEl("rect", { class: "bp-board", x: dk.x, y: dk.y, width: dk.w, height: dk.h, rx: dk.rx }));
+    const notch = devkit.usbNotch;
+    svg.appendChild(svgEl("rect", { class: "bp-board", x: notch.x, y: notch.y, width: notch.w, height: notch.h }));
+    const rows = devkit.pinRows;
+    const step = (rows.bottomY - rows.topY) / (rows.count - 1);
+    for (let i = 0; i < rows.count; i++) {
+      const y = rows.topY + i * step;
+      svg.appendChild(svgEl("line", { class: "bp-rule", x1: rows.leftX, y1: y, x2: rows.leftX + 6, y2: y }));
+      svg.appendChild(svgEl("line", { class: "bp-rule", x1: rows.rightX - 6, y1: y, x2: rows.rightX, y2: y }));
+    }
+    const chipLabel = svgEl("text", { class: "bp-header-text", x: dk.x + dk.w / 2, y: dk.y + dk.h / 2 + 6, "text-anchor": "middle", "font-size": 16 });
+    chipLabel.textContent = devkit.chipLabel;
+    svg.appendChild(chipLabel);
+
     svg.addEventListener("click", (event) => {
-      const target = event.target.closest("[data-cmd]");
+      const target = event.target.closest("[data-role]");
       if (target && !target.classList.contains("disabled")) sendRemoteCmd(target.dataset.cmd);
     });
     wireKnob(knobCircle, knobMark, knob);
@@ -217,59 +249,144 @@
     const container = $("remote-blueprint");
     container.innerHTML = "";
     container.appendChild(svg);
+    bpBtnEls = bpBtnRects;
+    bpKnobModeLabelEl = knobModeLabel;
   }
 
+  let bpBtnEls = {};
+  let bpKnobModeLabelEl = null;
+
+  // A REAL rotary encoder only ever reports relative ticks, never an absolute
+  // position - so this never reads "where is the pointer", only "how far did
+  // it just move", turned into ticks. A hand slipping anywhere on the knob
+  // can only nudge the value by a tick or two, never jump to an extreme
+  // (the bug in the first version's angle-to-absolute-value mapping).
   function wireKnob(knobCircle, knobMark, knob) {
     let dragging = false;
-    let volumeTimer;
-    function angleFor(clientX, clientY) {
+    let lastAngle = 0;
+    let carry = 0;              // fractional ticks accumulated between frames
+    const degPerTick = 15;      // one detent
+    let markDeg = 0;
+
+    function angleAt(clientX, clientY) {
       const svg = knobCircle.ownerSVGElement;
       const rect = svg.getBoundingClientRect();
-      // Uniform scale: the page CSS keeps width:100%/height:auto, so the
-      // rendered box always matches the viewBox's own aspect ratio.
-      const scale = rect.width / svg.viewBox.baseVal.width;
+      const scale = rect.width / svg.viewBox.baseVal.width; // width:100%/height:auto keeps aspect ratio
       const cx = rect.left + knob.cx * scale;
       const cy = rect.top + knob.cy * scale;
-      return Math.atan2(clientY - cy, clientX - cx);
+      return Math.atan2(clientY - cy, clientX - cx) * (180 / Math.PI);
     }
-    function setFromAngle(angle) {
-      // Map the knob's usable arc (-225deg..+45deg, a 270deg sweep starting
-      // bottom-left) to 0-100, same range a physical pot covers.
-      let deg = (angle * 180) / Math.PI;
-      deg = ((deg - 135 + 360) % 360); // 0 at the sweep's start
-      const pct = Math.max(0, Math.min(100, Math.round((deg / 270) * 100)));
-      const markAngle = ((135 + (pct / 100) * 270) * Math.PI) / 180;
-      knobMark.setAttribute("x1", knob.cx + Math.cos(markAngle) * (knob.r * 0.3));
-      knobMark.setAttribute("y1", knob.cy + Math.sin(markAngle) * (knob.r * 0.3));
-      knobMark.setAttribute("x2", knob.cx + Math.cos(markAngle) * (knob.r * 0.85));
-      knobMark.setAttribute("y2", knob.cy + Math.sin(markAngle) * (knob.r * 0.85));
-      clearTimeout(volumeTimer);
-      volumeTimer = setTimeout(() => sendRemoteCmd(`POT:${pct}`), 150);
+    function setMark(deg) {
+      markDeg = deg;
+      const rad = (deg * Math.PI) / 180;
+      knobMark.setAttribute("x1", knob.cx + Math.sin(rad) * (knob.r * 0.25));
+      knobMark.setAttribute("y1", knob.cy - Math.cos(rad) * (knob.r * 0.25));
+      knobMark.setAttribute("x2", knob.cx + Math.sin(rad) * (knob.r * 0.85));
+      knobMark.setAttribute("y2", knob.cy - Math.cos(rad) * (knob.r * 0.85));
     }
-    setFromAngle((135 * Math.PI) / 180); // draw the mark at rest before any input
+    function onTick(dir) {
+      // Playing: default = volume, seek-mode toggled = track skip - exactly
+      // handleEncoderCW/CCW's UI_PLAY branch. Idle: step through the disc's
+      // own offered modes - handleEncoderCW/CCW's UI_HOME branch.
+      if (bpLastPlaying) {
+        if (bpSeekMode) sendRemoteCmd(dir > 0 ? "FF:BIG" : "REW:BIG", { allowRepeat: true });
+        else sendRemoteCmd(`POT:${Math.max(0, Math.min(100, (bpLastVolume += dir * 5)))}`, { allowRepeat: true });
+      } else if (bpMenuItems && bpMenuItems.length) {
+        bpMenuIndex = (bpMenuIndex + dir + bpMenuItems.length) % bpMenuItems.length;
+        highlightMenuIndex();
+      }
+    }
     knobCircle.addEventListener("pointerdown", (event) => {
       dragging = true;
+      carry = 0;
       knobCircle.setPointerCapture(event.pointerId);
-      setFromAngle(angleFor(event.clientX, event.clientY));
+      lastAngle = angleAt(event.clientX, event.clientY);
     });
     knobCircle.addEventListener("pointermove", (event) => {
-      if (dragging) setFromAngle(angleFor(event.clientX, event.clientY));
+      if (!dragging) return;
+      const angle = angleAt(event.clientX, event.clientY);
+      let delta = angle - lastAngle;
+      if (delta > 180) delta -= 360;      // wrap crossing +-180
+      if (delta < -180) delta += 360;
+      lastAngle = angle;
+      carry += delta;
+      setMark(markDeg + delta);
+      while (carry >= degPerTick) { onTick(1); carry -= degPerTick; }
+      while (carry <= -degPerTick) { onTick(-1); carry += degPerTick; }
     });
-    knobCircle.addEventListener("pointerup", () => { dragging = false; });
-    knobCircle.addEventListener("pointercancel", () => { dragging = false; });
+    function endDrag() { dragging = false; }
+    knobCircle.addEventListener("pointerup", endDrag);
+    knobCircle.addEventListener("pointercancel", endDrag);
+    knobCircle.addEventListener("click", (event) => {
+      event.stopPropagation(); // don't let the svg-level [data-role] handler also see this
+      if (bpLastPlaying) {
+        bpSeekMode = !bpSeekMode;
+        updateKnobModeLabel();
+      } else if (bpMenuItems && bpMenuItems.length) {
+        sendRemoteCmd(`SELECT:${bpMenuItems[bpMenuIndex]}`);
+      }
+    });
+    setMark(0);
   }
 
+  function highlightMenuIndex() {
+    if (bpKnobModeLabelEl && bpMenuItems) bpKnobModeLabelEl.textContent = bpMenuItems[bpMenuIndex] || "";
+  }
+
+  function updateKnobModeLabel() {
+    if (!bpKnobModeLabelEl) return;
+    bpKnobModeLabelEl.textContent = bpLastPlaying ? (bpSeekMode ? "SEEK" : "VOLUME") : (bpMenuItems && bpMenuItems[bpMenuIndex]) || "";
+  }
+
+  let bpLastPlaying = false;
+  let bpLastVolume = 70;
+
+  let bpLastArgs = null; // {progress, hardware, trayOpen} - so a menu-items update (a separate
+                          // async fetch from /progress's own SSE/poll tick) can re-derive button
+                          // state right away, instead of waiting for the next unrelated tick.
+
   function applyBlueprintState(progress, hardware, trayOpen) {
-    $("remote-blueprint").querySelectorAll(".bp-btn").forEach((el) => {
-      el.classList.toggle("disabled", hardware);
-    });
-    if (bpEjectRect) bpEjectRect.dataset.cmd = trayOpen ? "CONFIRM" : "EJECT";
-    if (bpOledStatusEl) bpOledStatusEl.textContent = (progress.status || "READY").toUpperCase().slice(0, 20);
+    bpLastArgs = { progress, hardware, trayOpen };
+    Object.values(bpBtnEls).forEach((el) => el.classList.toggle("disabled", hardware));
+    bpLastPlaying = !!progress.playing;
+
+    const ejectBtn = bpBtnEls.eject;
+    if (ejectBtn) ejectBtn.dataset.cmd = trayOpen ? "CONFIRM" : "EJECT";
+
+    // HOME/BACK: PLAY_STOP while playing, CANCEL otherwise - matches
+    // handleHomeButton's own uiState == UI_PLAY ? "PLAY_STOP" : "CANCEL".
+    const homeBtn = bpBtnEls.home;
+    if (homeBtn) homeBtn.dataset.cmd = progress.playing ? "PLAY_STOP" : "CANCEL";
+
+    // PLAY/PAUSE: toggle pause while playing; jump into PLAY from idle only
+    // when the disc actually offers it - matches handlePlayPauseButton
+    // exactly, including "does nothing" when neither applies (RIP/burn
+    // running, or PLAY not offered) - shown disabled rather than silently inert.
+    const ppBtn = bpBtnEls.playpause;
+    if (ppBtn) {
+      const canPlay = bpMenuItems && bpMenuItems.includes("PLAY");
+      if (progress.playing) { ppBtn.dataset.cmd = "PLAY_BUTTON"; ppBtn.classList.remove("disabled"); }
+      else if (canPlay && !hardware) { ppBtn.dataset.cmd = "SELECT:PLAY"; }
+      else { ppBtn.classList.add("disabled"); }
+    }
+
+    if (bpOledStatusEl) bpOledStatusEl.textContent = (progress.status || "READY").toUpperCase().slice(0, 18);
+    updateKnobModeLabel();
+  }
+
+  // Called from loadDiscInfo() - the knob's idle navigation needs to know
+  // what modes this disc actually offers (same server-computed list the
+  // plain button grid's applyMenuItems already filters by).
+  function setBlueprintMenuItems(items) {
+    bpMenuItems = items && items.length ? items : null;
+    bpMenuIndex = 0;
+    if (bpLastArgs) applyBlueprintState(bpLastArgs.progress, bpLastArgs.hardware, bpLastArgs.trayOpen);
+    else updateKnobModeLabel();
   }
 
   function renderVuBars(levels) {
     if (!bpVuBarEls.length || !levels) return;
-    const maxH = 56; // matches oled.h - top/bottom margin in remote-blueprint.json
+    const maxH = 40; // matches the OLED screen rect's height minus margin
     levels.forEach((level, i) => {
       const bar = bpVuBarEls[i];
       if (!bar) return;
@@ -306,13 +423,16 @@
   });
 
   let lastCmdKey = "", lastCmdAt = 0;
-  async function sendRemoteCmd(cmd) {
+  async function sendRemoteCmd(cmd, { allowRepeat = false } = {}) {
     // Guard against a duplicate dispatch of the identical command landing
     // within the same instant (e.g. a click/pointer pair both bubbling to
     // the same handler) - a real user's next distinct press is unaffected,
-    // this only catches an exact repeat inside a tiny window.
+    // this only catches an exact repeat inside a tiny window. The knob's
+    // encoder ticks pass allowRepeat: true - a fast spin legitimately fires
+    // the same command (e.g. REW:BIG) several times in a row on purpose,
+    // unlike a duplicated button click.
     const now = Date.now();
-    if (cmd === lastCmdKey && now - lastCmdAt < 250) return;
+    if (!allowRepeat && cmd === lastCmdKey && now - lastCmdAt < 250) return;
     lastCmdKey = cmd;
     lastCmdAt = now;
     try {
@@ -366,6 +486,7 @@
       const info = await response.json();
       renderDiscStatus(info);
       applyMenuItems(info.menu_items);
+      setBlueprintMenuItems(info.menu_items);
       if (info.busy) return;               // burn/rip in progress — keep current
       state.discBytes = Number(info.capacity_bytes || 0);
       state.discType = info.type || "none";
