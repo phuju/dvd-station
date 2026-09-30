@@ -106,10 +106,7 @@
       ? "A physical remote is attached — on-screen controls are disabled."
       : "No physical remote detected — control DiscStation from here.";
     $("remote-controls").querySelectorAll("button, input").forEach((el) => { el.disabled = hardware; });
-    const ejectBtn = $("remote-eject-btn");
     const open = !!progress.tray_open;
-    ejectBtn.textContent = open ? "CLOSE TRAY" : "EJECT";
-    ejectBtn.dataset.cmd = open ? "CONFIRM" : "EJECT";
     rpLastArgs = { progress, hardware, trayOpen: open };
     applyPlaybackPanel(progress, hardware, open);
   }

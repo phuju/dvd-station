@@ -57,8 +57,6 @@
             <button class="outline-button" type="button" data-cmd="SELECT:BURN AUDIO">BURN AUDIO</button>
             <button class="outline-button" type="button" data-cmd="SELECT:RIP">RIP</button>
             <button class="outline-button" type="button" data-cmd="SELECT:PLAY">PLAY</button>
-            <button class="outline-button" type="button" data-cmd="CANCEL">CANCEL / HOME</button>
-            <button class="outline-button" type="button" id="remote-eject-btn" data-cmd="EJECT">EJECT</button>
           </div>
           <div id="remote-playback" class="remote-playback">
             <div class="rp-main">
@@ -71,7 +69,7 @@
             <div class="rp-buttons">
               <button class="rp-btn" type="button" data-role="eject" aria-label="Eject"><span class="rp-glyph">&#x23CF;</span></button>
               <button class="rp-btn" type="button" data-role="home" aria-label="Home / Back"><span class="rp-dot"></span></button>
-              <button class="rp-btn" type="button" data-role="playpause" aria-label="Play / Pause"><span class="rp-dot"></span></button>
+              <button class="rp-btn" type="button" data-role="playpause" aria-label="Play / Pause"><span class="rp-glyph">&#x23EF;</span></button>
             </div>
           </div>
         </div>
@@ -148,7 +146,7 @@
     </footer>
   </div>
   <div id="install-slot"></div>
-  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=31").catch(() => {});</script>
-  <script src="/static/app.js?v=31" defer></script>
+  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=32").catch(() => {});</script>
+  <script src="/static/app.js?v=32" defer></script>
 </body>
 </html>
