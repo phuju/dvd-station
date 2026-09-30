@@ -329,27 +329,47 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
    (see loadBlueprint() in app.js) - same shape data the mobile app draws via
    react-native-svg, so the two stay visually identical. Themed purely with
    the page's existing custom properties, same as everything else here. */
-.remote-blueprint { margin-top: 16px; display: flex; justify-content: center; }
-.remote-blueprint svg { width: 100%; max-width: 240px; height: auto; display: block; }
-.bp-board { fill: none; stroke: var(--soft-line); stroke-width: 1.2; }
-.bp-header-text { font-family: var(--mono); font-weight: 700; letter-spacing: 0.1em; fill: var(--ink); }
-.bp-rule { stroke: var(--soft-line); stroke-width: 1; }
-.bp-pin { fill: var(--paper-deep); stroke: var(--ink); stroke-width: 1; }
-.bp-pin-label { fill: var(--muted); font-family: var(--mono); font-size: 4.5px; font-weight: 700; letter-spacing: 0.02em; text-anchor: middle; }
-.bp-btn { fill: var(--surface); stroke: var(--ink); stroke-width: 1.2; cursor: pointer; transition: fill 0.15s ease; }
-.bp-btn:hover { fill: var(--paper-deep); }
-.bp-btn:active { fill: var(--accent); }
+/* Fixed "engineering datasheet" look - deliberately NOT themed off --ink/--paper/
+   [data-theme]: this is meant to read as a real schematic sheet (navy grid, orange
+   accent, off-white line art), the same in light or dark site mode, matching the
+   reference hardware sheets it's drawn from. */
+.remote-blueprint {
+  --bp-bg: #0a1830;
+  --bp-grid: rgba(255, 255, 255, 0.06);
+  --bp-line: #e8ecf2;
+  --bp-muted: #7f93b3;
+  --bp-accent: #ff6a3d;
+  --bp-screen: #040b18;
+  margin-top: 16px;
+  display: flex;
+  justify-content: center;
+  padding: 14px;
+  background-color: var(--bp-bg);
+  background-image:
+    linear-gradient(to right, var(--bp-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--bp-grid) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+.remote-blueprint svg { width: 100%; max-width: 360px; height: auto; display: block; }
+.bp-board { fill: none; stroke: var(--bp-line); stroke-width: 1.2; }
+.bp-header-text { font-family: var(--mono); font-weight: 700; letter-spacing: 0.1em; fill: var(--bp-line); }
+.bp-rule { stroke: var(--bp-muted); stroke-width: 1; }
+.bp-pin { fill: var(--bp-bg); stroke: var(--bp-accent); stroke-width: 1.2; }
+.bp-pin-label { fill: var(--bp-muted); font-family: var(--mono); font-size: 7px; font-weight: 700; letter-spacing: 0.02em; text-anchor: middle; }
+.bp-btn { fill: #101f3d; stroke: var(--bp-line); stroke-width: 1.5; cursor: pointer; transition: fill 0.15s ease; }
+.bp-btn:hover { fill: #17284a; }
+.bp-btn:active { fill: var(--bp-accent); }
 .bp-btn.disabled { cursor: not-allowed; opacity: 0.35; }
-.bp-btn-glyph { fill: var(--ink); font-size: 18px; text-anchor: middle; pointer-events: none; }
-.bp-btn-label { fill: var(--muted); font-family: var(--mono); font-size: 6.5px; font-weight: 700; letter-spacing: 0.05em; text-anchor: middle; pointer-events: none; }
-.bp-knob-ring { fill: var(--surface); stroke: var(--ink); stroke-width: 1.2; }
-.bp-knob { fill: var(--paper-deep); stroke: var(--ink); stroke-width: 1.2; cursor: grab; touch-action: none; }
+.bp-btn-glyph { fill: var(--bp-line); font-size: 30px; text-anchor: middle; pointer-events: none; }
+.bp-btn-label { fill: var(--bp-muted); font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-anchor: middle; pointer-events: none; }
+.bp-knob-ring { fill: #101f3d; stroke: var(--bp-line); stroke-width: 1.5; }
+.bp-knob { fill: #3a5478; stroke: var(--bp-line); stroke-width: 1.5; cursor: grab; touch-action: none; }
 .bp-knob:active { cursor: grabbing; }
-.bp-knob-mark { stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round; }
-.bp-knob-label { fill: var(--muted); font-family: var(--mono); font-size: 6.5px; font-weight: 700; letter-spacing: 0.05em; text-anchor: middle; }
-.bp-oled { fill: var(--ink); stroke: var(--ink); stroke-width: 1.2; opacity: 0.9; }
-.bp-oled-status { fill: var(--paper); font-family: var(--mono); font-size: 6.5px; text-anchor: middle; }
-.bp-vu-bar { fill: var(--accent); }
+.bp-knob-mark { stroke: var(--bp-accent); stroke-width: 3.5; stroke-linecap: round; }
+.bp-knob-label { fill: var(--bp-muted); font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-anchor: middle; }
+.bp-oled { fill: var(--bp-screen); stroke: var(--bp-line); stroke-width: 1.5; }
+.bp-oled-status { fill: var(--bp-line); font-family: var(--mono); font-size: 10px; text-anchor: middle; }
+.bp-vu-bar { fill: var(--bp-accent); }
 
 .footer-stamp {
   display: flex;

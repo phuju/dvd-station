@@ -106,7 +106,7 @@
       ? "A physical remote is attached — on-screen controls are disabled."
       : "No physical remote detected — control DiscStation from here.";
     $("remote-controls").querySelectorAll("button, input").forEach((el) => { el.disabled = hardware; });
-    $("remote-transport").hidden = !progress.playing;
+    $("remote-transport").hidden = schematicActive || !progress.playing;
     const ejectBtn = $("remote-eject-btn");
     const open = !!progress.tray_open;
     ejectBtn.textContent = open ? "CLOSE TRAY" : "EJECT";
@@ -123,14 +123,15 @@
   // handleEjectButton/handleHomeButton/handlePlayPauseButton/handleEncoderCW/
   // handleSelectPress), not an invented "transport row": there is no
   // dedicated prev/next button on the real hardware either - track skip is
-  // the encoder's rotation in seek-mode, volume is its rotation otherwise,
-  // and idle navigation is also the encoder, matching here.
+  // the encoder's rotation in seek-mode, volume is its rotation otherwise. Idle mode
+  // selection (BURN/RIP/PLAY/etc.) stays on the plain .remote-grid buttons - cycling a
+  // short list on small rotations proved twitchy/hard to control, and those buttons
+  // already do the job.
   const SVG_NS = "http://www.w3.org/2000/svg";
   const blueprintViewKey = "discstation-remote-view";
   let bpOledStatusEl = null;
   let bpVuBarEls = [];
-  let bpMenuItems = null;     // latest disc.menu_items, for the knob's idle navigation
-  let bpMenuIndex = 0;
+  let bpMenuItems = null;     // latest disc.menu_items - only used for the PLAY/PAUSE button's own enabled check
   let bpSeekMode = false;     // knob click toggles this while playing, like the real encoder's SW
 
   function svgEl(tag, attrs) {
@@ -139,11 +140,17 @@
     return el;
   }
 
+  // Additive, not a full swap: mode-select + CANCEL/EJECT (.remote-grid, the direct
+  // child of #remote-controls) stay visible either way - picking BURN/RIP/PLAY has
+  // nothing to do with which playback-control skin is showing. Only the old plain
+  // transport row (#remote-transport) is what the blueprint actually replaces.
+  let schematicActive = false;
   function setSchematicView(schematic, persist = false) {
+    schematicActive = schematic;
     $("remote-blueprint").hidden = !schematic;
-    $("remote-controls").hidden = schematic;
     $("remote-view-toggle").textContent = schematic ? "BUTTON VIEW" : "SCHEMATIC VIEW";
     if (persist) localStorage.setItem(blueprintViewKey, schematic ? "1" : "0");
+    if (bpLastArgs) applyRemoteState(bpLastArgs.progress); // re-derive #remote-transport's visibility right away
   }
 
   async function loadBlueprint() {
@@ -236,7 +243,7 @@
       svg.appendChild(svgEl("line", { class: "bp-rule", x1: rows.leftX, y1: y, x2: rows.leftX + 6, y2: y }));
       svg.appendChild(svgEl("line", { class: "bp-rule", x1: rows.rightX - 6, y1: y, x2: rows.rightX, y2: y }));
     }
-    const chipLabel = svgEl("text", { class: "bp-header-text", x: dk.x + dk.w / 2, y: dk.y + dk.h / 2 + 6, "text-anchor": "middle", "font-size": 16 });
+    const chipLabel = svgEl("text", { class: "bp-header-text", x: dk.x + dk.w / 2, y: dk.y + dk.h / 2 + 8, "text-anchor": "middle", "font-size": 26 });
     chipLabel.textContent = devkit.chipLabel;
     svg.appendChild(chipLabel);
 
@@ -285,16 +292,12 @@
       knobMark.setAttribute("y2", knob.cy - Math.cos(rad) * (knob.r * 0.85));
     }
     function onTick(dir) {
-      // Playing: default = volume, seek-mode toggled = track skip - exactly
-      // handleEncoderCW/CCW's UI_PLAY branch. Idle: step through the disc's
-      // own offered modes - handleEncoderCW/CCW's UI_HOME branch.
-      if (bpLastPlaying) {
-        if (bpSeekMode) sendRemoteCmd(dir > 0 ? "FF:BIG" : "REW:BIG", { allowRepeat: true });
-        else sendRemoteCmd(`POT:${Math.max(0, Math.min(100, (bpLastVolume += dir * 5)))}`, { allowRepeat: true });
-      } else if (bpMenuItems && bpMenuItems.length) {
-        bpMenuIndex = (bpMenuIndex + dir + bpMenuItems.length) % bpMenuItems.length;
-        highlightMenuIndex();
-      }
+      // Default = volume, seek-mode toggled = track skip - exactly
+      // handleEncoderCW/CCW's UI_PLAY branch. Does nothing while idle - mode
+      // selection stays on the plain button grid, not this knob.
+      if (!bpLastPlaying) return;
+      if (bpSeekMode) sendRemoteCmd(dir > 0 ? "FF:BIG" : "REW:BIG", { allowRepeat: true });
+      else sendRemoteCmd(`POT:${Math.max(0, Math.min(100, (bpLastVolume += dir * 5)))}`, { allowRepeat: true });
     }
     knobCircle.addEventListener("pointerdown", (event) => {
       dragging = true;
@@ -319,23 +322,15 @@
     knobCircle.addEventListener("pointercancel", endDrag);
     knobCircle.addEventListener("click", (event) => {
       event.stopPropagation(); // don't let the svg-level [data-role] handler also see this
-      if (bpLastPlaying) {
-        bpSeekMode = !bpSeekMode;
-        updateKnobModeLabel();
-      } else if (bpMenuItems && bpMenuItems.length) {
-        sendRemoteCmd(`SELECT:${bpMenuItems[bpMenuIndex]}`);
-      }
+      if (!bpLastPlaying) return;
+      bpSeekMode = !bpSeekMode;
+      updateKnobModeLabel();
     });
     setMark(0);
   }
 
-  function highlightMenuIndex() {
-    if (bpKnobModeLabelEl && bpMenuItems) bpKnobModeLabelEl.textContent = bpMenuItems[bpMenuIndex] || "";
-  }
-
   function updateKnobModeLabel() {
-    if (!bpKnobModeLabelEl) return;
-    bpKnobModeLabelEl.textContent = bpLastPlaying ? (bpSeekMode ? "SEEK" : "VOLUME") : (bpMenuItems && bpMenuItems[bpMenuIndex]) || "";
+    if (bpKnobModeLabelEl) bpKnobModeLabelEl.textContent = bpLastPlaying ? (bpSeekMode ? "SEEK" : "VOLUME") : "";
   }
 
   let bpLastPlaying = false;
@@ -379,14 +374,14 @@
   // plain button grid's applyMenuItems already filters by).
   function setBlueprintMenuItems(items) {
     bpMenuItems = items && items.length ? items : null;
-    bpMenuIndex = 0;
+    // A late-arriving menu list changes the PLAY/PAUSE button's own enabled
+    // check (see applyBlueprintState) - re-derive it right away.
     if (bpLastArgs) applyBlueprintState(bpLastArgs.progress, bpLastArgs.hardware, bpLastArgs.trayOpen);
-    else updateKnobModeLabel();
   }
 
   function renderVuBars(levels) {
     if (!bpVuBarEls.length || !levels) return;
-    const maxH = 40; // matches the OLED screen rect's height minus margin
+    const maxH = 64; // matches the OLED screen rect's height minus margin
     levels.forEach((level, i) => {
       const bar = bpVuBarEls[i];
       if (!bar) return;

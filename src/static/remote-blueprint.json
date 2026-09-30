@@ -1,35 +1,36 @@
 {
-  "viewBox": "0 0 220 260",
+  "viewBox": "0 0 320 380",
   "oled": {
-    "board": {"x": 6, "y": 6, "w": 100, "h": 78, "rx": 3},
-    "headerY": 16,
+    "board": {"x": 10, "y": 10, "w": 130, "h": 130, "rx": 4},
+    "headerY": 26,
     "pins": [
-      {"x": 16, "label": "GND"},
-      {"x": 38, "label": "VDD"},
-      {"x": 60, "label": "SCK"},
-      {"x": 82, "label": "SDA"}
+      {"x": 34, "label": "GND"},
+      {"x": 64, "label": "VDD"},
+      {"x": 94, "label": "SCK"},
+      {"x": 124, "label": "SDA"}
     ],
-    "screen": {"x": 10, "y": 20, "w": 92, "h": 60, "rx": 1}
+    "screen": {"x": 22, "y": 34, "w": 106, "h": 90, "rx": 2}
   },
   "encoder": {
-    "board": {"x": 114, "y": 6, "w": 54, "h": 78, "rx": 3},
-    "headerY": 16,
+    "board": {"x": 150, "y": 10, "w": 160, "h": 130, "rx": 4},
+    "headerY": 26,
     "pins": [
-      {"x": 124, "label": "CLK"},
-      {"x": 141, "label": "DT"},
-      {"x": 158, "label": "SW"}
+      {"x": 170, "label": "CLK"},
+      {"x": 196, "label": "DT"},
+      {"x": 222, "label": "SW"},
+      {"x": 248, "label": "GND"}
     ],
-    "knob": {"cx": 141, "cy": 52, "r": 20}
+    "knob": {"cx": 230, "cy": 92, "r": 42}
   },
   "buttons": [
-    {"id": "eject", "x": 12, "y": 96, "w": 46, "h": 46, "rx": 5, "glyph": "⏏", "label": "EJECT"},
-    {"id": "home", "x": 87, "y": 96, "w": 46, "h": 46, "rx": 5, "glyph": "⌂", "label": "HOME"},
-    {"id": "playpause", "x": 162, "y": 96, "w": 46, "h": 46, "rx": 5, "glyph": "⏯", "label": "PLAY"}
+    {"id": "eject", "x": 30, "y": 150, "w": 76, "h": 76, "rx": 8, "glyph": "⏏", "label": "EJECT"},
+    {"id": "home", "x": 122, "y": 150, "w": 76, "h": 76, "rx": 8, "glyph": "⌂", "label": "HOME"},
+    {"id": "playpause", "x": 214, "y": 150, "w": 76, "h": 76, "rx": 8, "glyph": "⏯", "label": "PLAY"}
   ],
   "devkit": {
-    "board": {"x": 6, "y": 168, "w": 208, "h": 86, "rx": 6},
-    "usbNotch": {"x": 96, "y": 250, "w": 22, "h": 8},
-    "pinRows": {"leftX": 10, "rightX": 214, "topY": 176, "bottomY": 246, "count": 13},
+    "board": {"x": 10, "y": 244, "w": 300, "h": 126, "rx": 8},
+    "usbNotch": {"x": 145, "y": 370, "w": 30, "h": 10},
+    "pinRows": {"leftX": 10, "rightX": 310, "topY": 252, "bottomY": 362, "count": 15},
     "chipLabel": "ESP-32"
   }
 }
