@@ -370,6 +370,9 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
 .bp-oled { fill: var(--bp-screen); stroke: var(--bp-line); stroke-width: 1.5; }
 .bp-oled-status { fill: var(--bp-line); font-family: var(--mono); font-size: 10px; text-anchor: middle; }
 .bp-vu-bar { fill: var(--bp-accent); }
+.bp-badge-circle { fill: var(--bp-accent); stroke: var(--bp-bg); stroke-width: 2; }
+.bp-badge-num { fill: var(--bp-bg); font-family: var(--mono); font-size: 13px; font-weight: 700; text-anchor: middle; }
+.bp-footer { fill: var(--bp-muted); font-family: var(--mono); font-size: 8px; letter-spacing: 0.1em; text-anchor: middle; }
 
 .footer-stamp {
   display: flex;

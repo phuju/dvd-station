@@ -1,36 +1,43 @@
 {
-  "viewBox": "0 0 320 380",
-  "oled": {
-    "board": {"x": 10, "y": 10, "w": 130, "h": 130, "rx": 4},
-    "headerY": 26,
-    "pins": [
-      {"x": 34, "label": "GND"},
-      {"x": 64, "label": "VDD"},
-      {"x": 94, "label": "SCK"},
-      {"x": 124, "label": "SDA"}
-    ],
-    "screen": {"x": 22, "y": 34, "w": 106, "h": 90, "rx": 2}
-  },
-  "encoder": {
-    "board": {"x": 150, "y": 10, "w": 160, "h": 130, "rx": 4},
-    "headerY": 26,
-    "pins": [
-      {"x": 170, "label": "CLK"},
-      {"x": 196, "label": "DT"},
-      {"x": 222, "label": "SW"},
-      {"x": 248, "label": "GND"}
-    ],
-    "knob": {"cx": 230, "cy": 92, "r": 42}
+  "viewBox": "0 0 480 326",
+  "devkit": {
+    "num": 1,
+    "board": {"x": 10, "y": 10, "w": 130, "h": 280, "rx": 8},
+    "usbNotch": {"x": 55, "y": 280, "w": 40, "h": 10},
+    "pinRows": {"leftX": 10, "rightX": 140, "topY": 24, "bottomY": 266, "count": 15},
+    "chipLabel": "ESP-32",
+    "chipSubtitle": "WiFi + BT SoC",
+    "enBtn": {"x": 30, "y": 262, "w": 14, "h": 10, "label": "EN"},
+    "bootBtn": {"x": 106, "y": 262, "w": 14, "h": 10, "label": "BOOT"}
   },
   "buttons": [
-    {"id": "eject", "x": 30, "y": 150, "w": 76, "h": 76, "rx": 8, "glyph": "⏏", "label": "EJECT"},
-    {"id": "home", "x": 122, "y": 150, "w": 76, "h": 76, "rx": 8, "glyph": "⌂", "label": "HOME"},
-    {"id": "playpause", "x": 214, "y": 150, "w": 76, "h": 76, "rx": 8, "glyph": "⏯", "label": "PLAY"}
+    {"num": 2, "id": "eject", "x": 160, "y": 18, "w": 72, "h": 72, "rx": 8, "glyph": "⏏", "label": "EJECT"},
+    {"num": 2, "id": "home", "x": 160, "y": 114, "w": 72, "h": 72, "rx": 8, "glyph": "⌂", "label": "HOME"},
+    {"num": 2, "id": "playpause", "x": 160, "y": 210, "w": 72, "h": 72, "rx": 8, "glyph": "⏯", "label": "PLAY"}
   ],
-  "devkit": {
-    "board": {"x": 10, "y": 244, "w": 300, "h": 126, "rx": 8},
-    "usbNotch": {"x": 145, "y": 370, "w": 30, "h": 10},
-    "pinRows": {"leftX": 10, "rightX": 310, "topY": 252, "bottomY": 362, "count": 15},
-    "chipLabel": "ESP-32"
-  }
+  "oled": {
+    "num": 3,
+    "board": {"x": 252, "y": 10, "w": 218, "h": 128, "rx": 4},
+    "headerY": 26,
+    "pins": [
+      {"x": 282, "label": "GND"},
+      {"x": 328, "label": "VDD"},
+      {"x": 374, "label": "SCK"},
+      {"x": 420, "label": "SDA"}
+    ],
+    "screen": {"x": 266, "y": 34, "w": 190, "h": 88, "rx": 2}
+  },
+  "encoder": {
+    "num": 4,
+    "board": {"x": 252, "y": 152, "w": 218, "h": 138, "rx": 4},
+    "headerY": 168,
+    "pins": [
+      {"x": 292, "label": "CLK"},
+      {"x": 334, "label": "DT"},
+      {"x": 376, "label": "SW"},
+      {"x": 418, "label": "GND"}
+    ],
+    "knob": {"cx": 361, "cy": 238, "r": 46}
+  },
+  "footer": "PHYSICAL MEDIA, ENGINEERED."
 }

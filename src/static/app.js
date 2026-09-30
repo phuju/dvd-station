@@ -185,12 +185,22 @@
     });
   }
 
+  // Small numbered circle badge at a module's corner, matching the reference
+  // datasheets' own (1)(2)(3)(4) module callouts.
+  function drawBadge(svg, cx, cy, num) {
+    svg.appendChild(svgEl("circle", { class: "bp-badge-circle", cx, cy, r: 13 }));
+    const t = svgEl("text", { class: "bp-badge-num", x: cx, y: cy + 5, "text-anchor": "middle" });
+    t.textContent = num;
+    svg.appendChild(t);
+  }
+
   function renderBlueprint(data) {
     const { oled, encoder, buttons, devkit } = data;
     const svg = svgEl("svg", { viewBox: data.viewBox });
 
     // --- OLED breakout ---
     drawPinHeaderBoard(svg, oled.board, oled.headerY, oled.pins);
+    drawBadge(svg, oled.board.x, oled.board.y, oled.num);
     svg.appendChild(svgEl("rect", { class: "bp-oled", x: oled.screen.x, y: oled.screen.y, width: oled.screen.w, height: oled.screen.h, rx: oled.screen.rx }));
     bpOledStatusEl = svgEl("text", { class: "bp-oled-status", x: oled.screen.x + oled.screen.w / 2, y: oled.screen.y + 14 });
     svg.appendChild(bpOledStatusEl);
@@ -207,6 +217,7 @@
 
     // --- Encoder breakout: pin header + knob ---
     drawPinHeaderBoard(svg, encoder.board, encoder.headerY, encoder.pins);
+    drawBadge(svg, encoder.board.x, encoder.board.y, encoder.num);
     const knob = encoder.knob;
     svg.appendChild(svgEl("circle", { class: "bp-knob-ring", cx: knob.cx, cy: knob.cy, r: knob.r + 4 }));
     const knobCircle = svgEl("circle", { class: "bp-knob", cx: knob.cx, cy: knob.cy, r: knob.r });
@@ -218,6 +229,7 @@
     svg.appendChild(knobModeLabel);
 
     // --- 3 real buttons: EJECT / HOME / PLAY-PAUSE ---
+    if (buttons.length) drawBadge(svg, buttons[0].x, buttons[0].y, buttons[0].num);
     const bpBtnRects = {};
     buttons.forEach((b) => {
       const rect = svgEl("rect", { class: "bp-btn", x: b.x, y: b.y, width: b.w, height: b.h, rx: b.rx, "data-role": b.id });
@@ -234,6 +246,7 @@
     // --- ESP32 DevKit board: outline + decorative pin ticks + USB notch ---
     const dk = devkit.board;
     svg.appendChild(svgEl("rect", { class: "bp-board", x: dk.x, y: dk.y, width: dk.w, height: dk.h, rx: dk.rx }));
+    drawBadge(svg, dk.x, dk.y, devkit.num);
     const notch = devkit.usbNotch;
     svg.appendChild(svgEl("rect", { class: "bp-board", x: notch.x, y: notch.y, width: notch.w, height: notch.h }));
     const rows = devkit.pinRows;
@@ -243,9 +256,28 @@
       svg.appendChild(svgEl("line", { class: "bp-rule", x1: rows.leftX, y1: y, x2: rows.leftX + 6, y2: y }));
       svg.appendChild(svgEl("line", { class: "bp-rule", x1: rows.rightX - 6, y1: y, x2: rows.rightX, y2: y }));
     }
-    const chipLabel = svgEl("text", { class: "bp-header-text", x: dk.x + dk.w / 2, y: dk.y + dk.h / 2 + 8, "text-anchor": "middle", "font-size": 26 });
+    const chipCenterY = dk.y + dk.h / 2;
+    const chipLabel = svgEl("text", { class: "bp-header-text", x: dk.x + dk.w / 2, y: chipCenterY - 4, "text-anchor": "middle", "font-size": 22 });
     chipLabel.textContent = devkit.chipLabel;
     svg.appendChild(chipLabel);
+    const chipSubtitle = svgEl("text", { class: "bp-pin-label", x: dk.x + dk.w / 2, y: chipCenterY + 16, "text-anchor": "middle", "font-size": 9 });
+    chipSubtitle.textContent = devkit.chipSubtitle;
+    svg.appendChild(chipSubtitle);
+    // EN/BOOT: decorative only, near the bottom edge like the real board - not
+    // part of the remote's own control surface, so no data-role/click handling.
+    [devkit.enBtn, devkit.bootBtn].forEach((b) => {
+      svg.appendChild(svgEl("rect", { class: "bp-board", x: b.x, y: b.y, width: b.w, height: b.h, rx: 2 }));
+      const t = svgEl("text", { class: "bp-pin-label", x: b.x + b.w / 2, y: b.y + b.h + 10, "text-anchor": "middle" });
+      t.textContent = b.label;
+      svg.appendChild(t);
+    });
+
+    if (data.footer) {
+      const vb = data.viewBox.split(" ").map(Number);
+      const footer = svgEl("text", { class: "bp-footer", x: vb[2] / 2, y: vb[3] - 6, "text-anchor": "middle" });
+      footer.textContent = data.footer;
+      svg.appendChild(footer);
+    }
 
     svg.addEventListener("click", (event) => {
       const target = event.target.closest("[data-role]");
