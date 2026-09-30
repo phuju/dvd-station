@@ -132,16 +132,20 @@
     });
   }
 
+  function resetVuBars() {
+    rpBarEls.forEach((bar) => { bar.style.height = "0%"; });
+  }
+
   let rpLastPlaying = false;
   function applyPlaybackPanel(progress, hardware, trayOpen) {
+    const wasPlaying = rpLastPlaying;
     rpLastPlaying = !!progress.playing;
     const menuItems = (rpDiscInfo && rpDiscInfo.menu_items) || [];
 
     // Mirrors the OLED's own state machine (arduino/DiscStation/DiscStation.ino):
     // playing -> live track status + VU bars (drawPlay); idle with a disc in the
-    // drive -> the disc's name/status line + the modes it offers (drawHome) - the
-    // bars row becomes that mode list instead, since bars only mean anything while
-    // something is actually playing; otherwise just the plain status text.
+    // drive -> the disc's name/status line + the modes it offers (drawHome); no
+    // disc at all (e.g. just ejected) -> plain status text, neither bars nor menu.
     const idleWithDisc = !progress.playing && rpDiscInfo && rpDiscInfo.disc_present && !rpDiscInfo.busy;
     if (idleWithDisc) {
       $("rp-status").textContent = (rpDiscInfo.disc_title || discLineText(rpDiscInfo)).toUpperCase();
@@ -150,7 +154,11 @@
       // never chops a word off abruptly mid-string.
       $("rp-status").textContent = (progress.status || "READY").toUpperCase();
     }
-    $("rp-bars").hidden = idleWithDisc;
+    // Bars belong on screen only while something is actually playing - not just
+    // "not idle-with-a-disc" (that left them visibly stuck at their last frame
+    // once playback stopped with no disc left to show a menu for instead).
+    $("rp-bars").hidden = !progress.playing;
+    if (wasPlaying && !progress.playing) resetVuBars(); // clear the last frame, don't leave it stuck
     $("rp-menu").hidden = !idleWithDisc;
     if (idleWithDisc) {
       $("rp-menu").innerHTML = "";
