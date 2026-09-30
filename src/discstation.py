@@ -599,6 +599,10 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 info["type"] = di.web_type
             info["kind"] = di.kind
             info["label"] = di.label
+            # Same lookup the OLED's DISC_NAME: already uses (TOC-fingerprint match
+            # against burn history for an audio CD, volume label for a data disc/DVD) -
+            # richer than "label" above, which is empty for most audio CDs.
+            info["disc_title"] = disc_title(device) if di.present and not di.transient else ""
             info["menu_items"] = menu_items_for_disc(device) if di.present and not di.transient else []
         except Exception as e:
             print(f"Disc info error: {e}")
@@ -653,7 +657,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('discstation-v33').then(c => c.addAll(['/','/static/style.css?v=33','/static/app.js?v=33']));
+  caches.open('discstation-v35').then(c => c.addAll(['/','/static/style.css?v=35','/static/app.js?v=35']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
@@ -662,7 +666,7 @@ self.addEventListener('fetch', e => {
   if (path === '/' || path.startsWith('/static/')) {
     e.respondWith(fetch(e.request).then(r => {
       const copy = r.clone();
-      caches.open('discstation-v33').then(c => c.put(e.request, copy));
+      caches.open('discstation-v35').then(c => c.put(e.request, copy));
       return r;
     }).catch(() => caches.match(e.request)));
   } else {

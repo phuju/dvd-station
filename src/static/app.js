@@ -135,9 +135,31 @@
   let rpLastPlaying = false;
   function applyPlaybackPanel(progress, hardware, trayOpen) {
     rpLastPlaying = !!progress.playing;
-    // CSS handles the visual cutoff (ellipsis) - no hard slice here so it
-    // never chops a word off abruptly mid-string.
-    $("rp-status").textContent = (progress.status || "READY").toUpperCase();
+    const menuItems = (rpDiscInfo && rpDiscInfo.menu_items) || [];
+
+    // Mirrors the OLED's own state machine (arduino/DiscStation/DiscStation.ino):
+    // playing -> live track status + VU bars (drawPlay); idle with a disc in the
+    // drive -> the disc's name/status line + the modes it offers (drawHome) - the
+    // bars row becomes that mode list instead, since bars only mean anything while
+    // something is actually playing; otherwise just the plain status text.
+    const idleWithDisc = !progress.playing && rpDiscInfo && rpDiscInfo.disc_present && !rpDiscInfo.busy;
+    if (idleWithDisc) {
+      $("rp-status").textContent = (rpDiscInfo.disc_title || discLineText(rpDiscInfo)).toUpperCase();
+    } else {
+      // CSS handles the visual cutoff (ellipsis) - no hard slice here so it
+      // never chops a word off abruptly mid-string.
+      $("rp-status").textContent = (progress.status || "READY").toUpperCase();
+    }
+    $("rp-bars").hidden = idleWithDisc;
+    $("rp-menu").hidden = !idleWithDisc;
+    if (idleWithDisc) {
+      $("rp-menu").innerHTML = "";
+      menuItems.forEach((mode) => {
+        const line = document.createElement("div");
+        line.textContent = mode;
+        $("rp-menu").appendChild(line);
+      });
+    }
 
     const ejectBtn = $("remote-controls").querySelector('[data-role="eject"]');
     if (ejectBtn) { ejectBtn.dataset.cmd = trayOpen ? "CONFIRM" : "EJECT"; ejectBtn.disabled = hardware; }
@@ -152,16 +174,16 @@
     // e.g. correctly dead during a RIP.
     const ppBtn = $("remote-controls").querySelector('[data-role="playpause"]');
     if (ppBtn) {
-      const canPlay = rpMenuItems && rpMenuItems.includes("PLAY");
+      const canPlay = menuItems.includes("PLAY");
       if (progress.playing) { ppBtn.dataset.cmd = "PLAY_BUTTON"; ppBtn.disabled = hardware; }
       else if (canPlay) { ppBtn.dataset.cmd = "SELECT:PLAY"; ppBtn.disabled = hardware; }
       else { ppBtn.disabled = true; }
     }
   }
 
-  let rpMenuItems = null; // latest disc.menu_items - only for the PLAY/PAUSE button's own enabled check
-  function setPlaybackMenuItems(items) {
-    rpMenuItems = items && items.length ? items : null;
+  let rpDiscInfo = null; // latest /disc-info response - drives the idle HOME-style screen
+  function setPlaybackDiscInfo(info) {
+    rpDiscInfo = info || null;
     if (rpLastArgs) applyPlaybackPanel(rpLastArgs.progress, rpLastArgs.hardware, rpLastArgs.trayOpen);
   }
 
@@ -262,7 +284,7 @@
       const info = await response.json();
       renderDiscStatus(info);
       applyMenuItems(info.menu_items);
-      setPlaybackMenuItems(info.menu_items);
+      setPlaybackDiscInfo(info);
       if (info.busy) return;               // burn/rip in progress — keep current
       state.discBytes = Number(info.capacity_bytes || 0);
       state.discType = info.type || "none";
@@ -274,16 +296,19 @@
     }
   }
 
-  function renderDiscStatus(info) {
-    const el = $("remote-disc-status");
-    if (!el) return;
-    if (!info) { el.textContent = "DISC: UNKNOWN"; return; }
-    if (info.busy) { el.textContent = "DISC: BUSY"; return; }
-    if (!info.disc_present) { el.textContent = "DISC: NONE"; return; }
+  function discLineText(info) {
+    if (!info) return "DISC: UNKNOWN";
+    if (info.busy) return "DISC: BUSY";
+    if (!info.disc_present) return "DISC: NONE";
     const kind = (info.type || info.kind || "unknown").toUpperCase();
     const label = info.label ? ` "${info.label}"` : "";
     const size = info.capacity_gb ? ` // ${info.capacity_gb}GB` : "";
-    el.textContent = `DISC: ${kind}${label}${size}`;
+    return `DISC: ${kind}${label}${size}`;
+  }
+
+  function renderDiscStatus(info) {
+    const el = $("remote-disc-status");
+    if (el) el.textContent = discLineText(info);
   }
 
   function renderSelection() {
