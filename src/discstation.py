@@ -653,7 +653,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('discstation-v29').then(c => c.addAll(['/','/static/style.css?v=29','/static/app.js?v=29']));
+  caches.open('discstation-v30').then(c => c.addAll(['/','/static/style.css?v=30','/static/app.js?v=30']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
@@ -662,7 +662,7 @@ self.addEventListener('fetch', e => {
   if (path === '/' || path.startsWith('/static/')) {
     e.respondWith(fetch(e.request).then(r => {
       const copy = r.clone();
-      caches.open('discstation-v29').then(c => c.put(e.request, copy));
+      caches.open('discstation-v30').then(c => c.put(e.request, copy));
       return r;
     }).catch(() => caches.match(e.request)));
   } else {
