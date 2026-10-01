@@ -386,7 +386,33 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
    default [hidden] { display: none } (author styles always win over the UA
    stylesheet) - the `hidden` attribute was being set correctly in JS but doing
    nothing visually without this. */
-.rp-bars[hidden], .rp-menu[hidden] { display: none; }
+.rp-bars[hidden], .rp-menu[hidden], .rp-discsaver[hidden] { display: none; }
+
+/* Fallback for whenever real VU data isn't actually flowing (paused, a host
+   platform with no audio-capture support, or just-started-playing before the
+   first frame arrives) - see updateVuSlot() in app.js. A CSS-only spinning
+   vinyl-record glyph, matching this page's existing all-CSS/Unicode-glyph
+   iconography (no SVG/bitmap assets anywhere else in this file). */
+.rp-discsaver {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-top: 1px solid #262626;
+  padding-top: 4px;
+}
+.rp-discsaver::before {
+  content: "";
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  background: radial-gradient(circle, #0a0a0a 0 22%, transparent 23%),
+              repeating-radial-gradient(var(--ink) 0 1px, transparent 1px 4px);
+  box-shadow: 0 0 6px var(--accent);
+  animation: rp-disc-spin 2.4s linear infinite;
+}
+@keyframes rp-disc-spin { to { transform: rotate(360deg); } }
 .rp-main input[type="range"] { width: 100%; accent-color: var(--accent); }
 .rp-buttons { display: flex; flex-direction: column; gap: 8px; }
 .rp-btn {

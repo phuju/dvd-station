@@ -71,7 +71,7 @@ remote can talk to the host over Wi-Fi instead of a USB cable.
 |------|-------------|
 | **Burn Video DVD** | YouTube URL or local file → ffmpeg 2-pass → DVD-Video disc |
 | **Burn Data DVD** | Any files/folders → ISO/Joliet data disc (no quality loss) |
-| **Play** | Playback via mpv (DVD-Video, Audio CD, VCD, SVCD) — both the OLED remote and the web/app on-screen remote show a live spectrum visualizer of the actual audio (Linux only for now; see `docs/PLATFORM_SUPPORT.md`); while a track plays the screen keeps the track/volume view (or the visualizer) up — the spinning-disc screensaver only appears on the home/standby screens or after playback has been paused for 15 s |
+| **Play** | Playback via mpv (DVD-Video, Audio CD, VCD, SVCD) — both the OLED remote and the web/app on-screen remote show a live spectrum visualizer of the actual audio (Linux only for now; see `docs/PLATFORM_SUPPORT.md`); while a track plays the screen keeps the track/volume view (or the visualizer) up — the OLED's spinning-disc screensaver appears on its home/standby screens or after playback has been paused for 15 s, while the web/app remote shows the same spinning disc immediately in place of the visualizer any time there's no real audio data to show (paused, or a host platform that can't capture audio at all) |
 | **Rip** | Audio CD → FLAC (MusicBrainz); DVD-Video → VIDEO_TS mirror or HandBrake MKV (TMDb naming) |
 
 ## Project Structure
@@ -175,7 +175,9 @@ self-signed cert. On startup the host prints the LAN URL to open
   — and picking one starts it directly, no separate confirm step. Its
   screen mirrors the physical OLED remote: the disc title/status and offered
   modes at idle, and a glowing peak-hold spectrum visualizer that fills the
-  width of the screen during playback (see Play, above). EJECT/CLOSE toggle,
+  width of the screen during playback (see Play, above) - or a spinning-disc
+  animation in its place whenever there's no real audio data to visualize
+  (paused, or a host platform with no audio capture). EJECT/CLOSE toggle,
   volume, and full playback transport including PREV/NEXT track for audio
   CDs. Greys out and auto-collapses the instant a physical remote is
   detected, so the two never fight for control — including mid-burn/rip/play:

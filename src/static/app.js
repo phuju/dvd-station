@@ -212,6 +212,33 @@
     rpBarFillEls.forEach((fill) => { fill.style.height = "0%"; });
     rpBarPeakEls.forEach((peak) => { peak.style.bottom = "0%"; peak.style.opacity = "0"; });
     if (rpBarRafId !== null) { cancelAnimationFrame(rpBarRafId); rpBarRafId = null; }
+    lastVuFrameAt = 0;
+  }
+
+  // Real VU data only ever flows on Linux (PulseAudio capture - see
+  // docs/PLATFORM_SUPPORT.md for why macOS/Windows can't) and stops the moment
+  // playback is paused even there, but `progress.playing` stays true throughout
+  // a pause - so "is a real frame actually arriving right now" has to be tracked
+  // separately, mirroring the firmware's own lastVuAt/VU_TIMEOUT_MS fallback
+  // (arduino/DiscStation/DiscStation.ino). Whenever it isn't, show a spinning
+  // disc in the same slot instead of empty/frozen bars.
+  let lastVuFrameAt = 0;
+  let rpLastIdleWithDisc = false;
+  const VU_TIMEOUT_MS = 1200;
+  function updateVuSlot() {
+    // idleWithDisc owns the slot instead (the title+modes menu) - otherwise
+    // this slot is always showing *something*: real bars while they're
+    // actually flowing, the spinning disc otherwise - covering paused,
+    // platforms with no VU capture, and plain idle-with-no-disc alike (that
+    // last one used to just sit blank).
+    if (rpLastIdleWithDisc) {
+      $("rp-bars").hidden = true;
+      $("rp-discsaver").hidden = true;
+      return;
+    }
+    const vuFlowing = rpLastPlaying && Date.now() - lastVuFrameAt < VU_TIMEOUT_MS;
+    $("rp-bars").hidden = !vuFlowing;
+    $("rp-discsaver").hidden = vuFlowing;
   }
 
   let rpLastPlaying = false;
@@ -232,10 +259,12 @@
       // never chops a word off abruptly mid-string.
       $("rp-status").textContent = (progress.status || "READY").toUpperCase();
     }
-    // Bars belong on screen only while something is actually playing - not just
-    // "not idle-with-a-disc" (that left them visibly stuck at their last frame
-    // once playback stopped with no disc left to show a menu for instead).
-    $("rp-bars").hidden = !progress.playing;
+    // Bars (or, lacking real VU data, the spinning-disc fallback) belong on
+    // screen only while something is actually playing - not just "not
+    // idle-with-a-disc" (that left them visibly stuck at their last frame once
+    // playback stopped with no disc left to show a menu for instead).
+    rpLastIdleWithDisc = idleWithDisc;
+    updateVuSlot();
     if (wasPlaying && !progress.playing) resetVuBars(); // clear the last frame, don't leave it stuck
     $("rp-menu").hidden = !idleWithDisc;
     if (idleWithDisc) {
@@ -588,7 +617,7 @@
       let d;
       try { d = JSON.parse(ev.data); } catch (_) { return; }
       if (d.type === "disc-changed") { loadDiscInfo(); return; }
-      if (d.type === "vu") { renderVuBars(d.levels); return; }
+      if (d.type === "vu") { lastVuFrameAt = Date.now(); renderVuBars(d.levels); updateVuSlot(); return; }
       setConnection(true);
       setLiveStatus(d.status);
       setProgress(d.status, Number(d.progress), d.active);
@@ -604,6 +633,10 @@
     // Backstops: catch a zombie SSE connection, and refresh disc state slowly.
     setInterval(() => { if (!es || es.readyState !== 1) pollStatus(); }, 8000);
     setInterval(loadDiscInfo, 15000);
+    // Nothing else re-checks the clock once VU frames stop arriving (pause, a
+    // host platform with no capture, a dropped connection) - this is what
+    // actually notices and flips to the spinning-disc fallback promptly.
+    setInterval(updateVuSlot, 300);
   }
 
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=8").catch(() => {});

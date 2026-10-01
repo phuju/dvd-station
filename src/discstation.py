@@ -600,10 +600,35 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             # the one already running (CANCEL/EJECT stay available regardless).
             self._respond(200, json.dumps({**_last_disc_info, "busy": True, "menu_items": [], "appliance": _appliance_mode}), "application/json")
             return
+        device = discstation_burn.disc_device()
+        if not _detect_lock.acquire(timeout=1.5):
+            # Something else (almost always the background poller) is already
+            # deep into a classify for this disc - waiting on detect_disc()'s
+            # own (unbounded, blocking) internal acquire would just queue
+            # behind it for however long that takes (seen ~90s on a disc whose
+            # blkid/wodim-toc probes both time out) - an earlier version of
+            # this fix acquired-then-released this same lock before calling
+            # detect_disc() as a "quick test," which didn't actually help: by
+            # the time detect_disc() re-acquired the lock for real, another
+            # thread could (and, live-tested, did) grab it first and leave
+            # this request blocked on that *second*, timeout-less acquire
+            # anyway. Holding the lock we already have for the whole classify
+            # - calling _detect_disc_locked() directly instead of going back
+            # through detect_disc() - is what actually bounds the wait.
+            stale = {**_last_disc_info}
+            stale.setdefault("type", "reading")
+            self._respond(200, json.dumps({**stale, "appliance": _appliance_mode}), "application/json")
+            return
         info = {"disc_present": False, "capacity_bytes": 0, "capacity_gb": 0, "type": "none"}
         try:
-            device = discstation_burn.disc_device()
-            di = detect_disc(device, settle=False, budget=15)
+            try:
+                cached = _detect_cache.get(device)
+                if cached and time.monotonic() - cached[0] < DISC_DETECT_CACHE_TTL:
+                    di = cached[1]
+                else:
+                    di = _detect_disc_locked(device, settle=False, budget=15)
+            finally:
+                _detect_lock.release()
             info["disc_present"] = di.present
             info["capacity_bytes"] = di.capacity_bytes
             info["capacity_gb"] = round(di.capacity_bytes / 1e9, 2)
@@ -673,7 +698,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _serve_sw(self):
         sw = '''self.addEventListener('install', e => {
   self.skipWaiting();
-  caches.open('discstation-v46').then(c => c.addAll(['/','/static/style.css?v=46','/static/app.js?v=46']));
+  caches.open('discstation-v47').then(c => c.addAll(['/','/static/style.css?v=47','/static/app.js?v=47']));
 });
 self.addEventListener('activate', e => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', e => {
@@ -682,7 +707,7 @@ self.addEventListener('fetch', e => {
   if (path === '/' || path.startsWith('/static/')) {
     e.respondWith(fetch(e.request).then(r => {
       const copy = r.clone();
-      caches.open('discstation-v46').then(c => c.put(e.request, copy));
+      caches.open('discstation-v47').then(c => c.put(e.request, copy));
       return r;
     }).catch(() => caches.match(e.request)));
   } else {
