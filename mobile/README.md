@@ -45,6 +45,10 @@ then **SAVE**.
 | DISC LABEL → `POST /set-label` | same |
 | disc-capacity meter from `/disc-info` | same (shown once files are selected) |
 | light / dark toggle | same (☾ / ☀), follows system by default |
+| idle screen: disc title + offered modes | same |
+| live spectrum visualizer (`/events` SSE `"vu"` frames) | same algorithm (interpolation, easing, peak-hold), wider/fewer bars than web - more `Animated.Value` updates per frame cost much more on RN than a direct DOM write |
+| spinning-disc fallback (paused / no audio capture / idle with no disc) | same |
+| PREV/NEXT track (audio CD only) | same |
 
 Not ported: PWA install, service worker, drag-and-drop, `webkitdirectory`
 folder trees.
@@ -66,6 +70,8 @@ landscape — and re-flows live on rotation:
 ## Files
 
 - `App.tsx` — the single screen + settings modal
+- `src/RemotePanel.tsx` — the on-screen remote (transport, idle screen, mode buttons)
+- `src/VuMeter.tsx` — live spectrum visualizer + spinning-disc fallback, own `/events` SSE connection
 - `src/theme.ts` — palette tokens ported from `style.css`
 - `src/responsive.ts` — device-adaptive scale (`ms`, `sp`, breakpoints)
 - `src/api.ts` — host HTTP client (`/progress`, `/disc-info`, `/`, `/set-label`)

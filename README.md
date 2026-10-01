@@ -192,9 +192,13 @@ The `mobile/` Expo app (enter the host's LAN address in its settings screen)
 has the same on-screen remote as the web UI, rendered inline in the main
 screen rather than a popup — same "REMOTE" tag toggle, opens automatically
 with no ESP32 attached, mode buttons filtered to what the disc actually
-supports, and picking one starts it directly. Same auto-collapse behavior
-when a physical ESP32 shows up — mid-operation and without interruption, same
-as the web UI — and the same underlying `/remote/button` protocol.
+supports, and picking one starts it directly. Its screen has the same
+idle title/offered-modes view, live spectrum visualizer (or spinning-disc
+fallback when there's no real audio data to show) and PREV/NEXT track
+controls for audio CDs as the web UI's playback screen - subscribed to the
+same `/events` SSE stream. Same auto-collapse behavior when a physical ESP32
+shows up — mid-operation and without interruption, same as the web UI — and
+the same underlying `/remote/button` protocol.
 
 ## Disc Support
 

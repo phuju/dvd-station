@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { MONO, Palette } from './theme';
 import { Metrics } from './responsive';
 import * as api from './api';
+import VuMeter from './VuMeter';
 
 type Props = {
   visible: boolean;
@@ -69,6 +70,14 @@ export default function RemotePanel({ visible, onClose, c, m, prog, disc }: Prop
     ? MODE_BUTTONS.filter(([, cmd]) => allowedModes.includes(cmd.slice('SELECT:'.length)))
     : MODE_BUTTONS;
 
+  // Mirrors the web's applyPlaybackPanel(): idle with a disc in the drive shows
+  // its title + the modes it offers; everything else (playing, or idle with no
+  // disc) shows the VuMeter slot instead (real bars or the spinning-disc
+  // fallback - VuMeter decides which, based on whether real VU frames are
+  // actually arriving).
+  const idleWithDisc = !prog.playing && !!disc?.disc_present && !disc?.busy;
+  const isAudioCd = disc?.kind === 'audio_cd';
+
   const stepVolume = (delta: number) => {
     const next = Math.max(0, Math.min(100, volume + delta));
     setVolume(next);
@@ -90,8 +99,23 @@ export default function RemotePanel({ visible, onClose, c, m, prog, disc }: Prop
           : 'No physical remote detected — control DiscStation from here.'}
       </Text>
       <View style={s.discStatus}>
-        <Text style={s.discStatusText}>{discStatusText(disc)}</Text>
+        {idleWithDisc ? (
+          <>
+            <Text style={s.discStatusText}>{(disc?.disc_title || discStatusText(disc)).toUpperCase()}</Text>
+            {(disc?.menu_items ?? []).map((mode) => (
+              <Text key={mode} style={s.discMenuLine}>{mode}</Text>
+            ))}
+          </>
+        ) : (
+          <Text style={s.discStatusText}>{discStatusText(disc)}</Text>
+        )}
       </View>
+
+      {!idleWithDisc && (
+        <View style={s.vuSlot}>
+          <VuMeter c={c} m={m} />
+        </View>
+      )}
 
       <View style={s.grid}>
         {visibleModeButtons.map(([label, cmd]) => (
@@ -123,15 +147,19 @@ export default function RemotePanel({ visible, onClose, c, m, prog, disc }: Prop
       {!!prog.playing && (
         <View style={s.transport}>
           <View style={s.grid}>
-            <Pressable style={s.gridBtn} onPress={() => send('REW:BIG')}>
-              <Text style={s.gridBtnText}>⏮ PREV</Text>
-            </Pressable>
+            {isAudioCd && (
+              <Pressable style={s.gridBtn} onPress={() => send('REW:BIG')}>
+                <Text style={s.gridBtnText}>⏮ PREV</Text>
+              </Pressable>
+            )}
             <Pressable style={s.gridBtn} onPress={() => send('PLAY_BUTTON')}>
               <Text style={s.gridBtnText}>⏯ PLAY/PAUSE</Text>
             </Pressable>
-            <Pressable style={s.gridBtn} onPress={() => send('FF:BIG')}>
-              <Text style={s.gridBtnText}>⏭ NEXT</Text>
-            </Pressable>
+            {isAudioCd && (
+              <Pressable style={s.gridBtn} onPress={() => send('FF:BIG')}>
+                <Text style={s.gridBtnText}>⏭ NEXT</Text>
+              </Pressable>
+            )}
             <Pressable style={s.gridBtn} onPress={() => send('PLAY_STOP')}>
               <Text style={s.gridBtnText}>⏹ STOP</Text>
             </Pressable>
@@ -201,6 +229,11 @@ function makeStyles(c: Palette, m: Metrics) {
       marginBottom: sp(14),
     },
     discStatusText: { color: c.ink, fontFamily: MONO, fontSize: ms(10), fontWeight: '700', letterSpacing: 0.6 },
+    discMenuLine: {
+      color: c.accent, fontFamily: MONO, fontSize: ms(10), fontWeight: '700',
+      letterSpacing: 0.6, marginTop: sp(4),
+    },
+    vuSlot: { marginBottom: sp(14) },
     grid: { flexDirection: 'row', flexWrap: 'wrap', gap: sp(8) },
     gridBtn: {
       flexBasis: '48%',

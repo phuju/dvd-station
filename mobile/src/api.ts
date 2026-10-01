@@ -50,6 +50,7 @@ export type DiscInfo = {
   type: string; // "none" | "reading" | "AUDIO_CD" | "DVD5" | ...
   kind?: string;
   label?: string;
+  disc_title?: string; // human title (disc_title() in discstation.py) - prefer over label when present
   busy?: boolean;
   appliance?: 'hardware' | 'software';
   menu_items?: string[]; // which mode buttons are valid for the current disc
