@@ -1841,8 +1841,15 @@ def drive_status(device):
     except OSError:
         return "unknown"
     try:
-        st = fcntl.ioctl(fd, _CDROM_DRIVE_STATUS, 0)
-    except OSError:
+        # Hard-timeout, not just the OSError below: on a wedged/dying drive this
+        # ioctl can block in uninterruptible D-state (blk_execute_rq) forever -
+        # O_NONBLOCK on the fd doesn't bound a block-layer command wait. Without
+        # this, a stuck call here holds _detect_lock forever and wedges the
+        # whole service (every other thread needing disc state queues up behind
+        # it) - see _run_hard_timeout's own docstring for why this is the only
+        # way to get control back.
+        st = _run_hard_timeout(lambda: fcntl.ioctl(fd, _CDROM_DRIVE_STATUS, 0), timeout=3)
+    except Exception:
         return "unknown"
     finally:
         try:
