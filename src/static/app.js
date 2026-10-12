@@ -327,6 +327,29 @@
   });
   initRpBars();
 
+  // Fullscreen toggle for the OLED-mirror screen (e.g. blown up on a
+  // monitor/TV while music plays). iOS Safari has no element-level
+  // Fullscreen API - feature-detect and hide the button there instead of
+  // leaving a control that does nothing.
+  {
+    const rpScreen = $("rp-screen");
+    const fsBtn = $("rp-fullscreen-btn");
+    const requestFs = rpScreen.requestFullscreen || rpScreen.webkitRequestFullscreen;
+    const exitFs = document.exitFullscreen || document.webkitExitFullscreen;
+    if (!requestFs || !exitFs) {
+      fsBtn.hidden = true;
+    } else {
+      const isFs = () => (document.fullscreenElement || document.webkitFullscreenElement) === rpScreen;
+      const syncLabel = () => fsBtn.setAttribute("aria-label", isFs() ? "Exit fullscreen" : "Fullscreen");
+      fsBtn.addEventListener("click", () => {
+        if (isFs()) exitFs.call(document);
+        else requestFs.call(rpScreen);
+      });
+      document.addEventListener("fullscreenchange", syncLabel);
+      document.addEventListener("webkitfullscreenchange", syncLabel);
+    }
+  }
+
   // Firmware row: outside the remote panel on purpose - a hardware remote hides
   // that panel, and hardware is exactly when there is a remote to update.
   function applyFirmwareState(progress) {

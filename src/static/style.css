@@ -317,6 +317,7 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
 }
 .rp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
 .rp-screen {
+  position: relative;
   background: #0a0a0a;
   border: 1px solid var(--ink);
   border-radius: 3px;
@@ -327,6 +328,38 @@ h2 { margin-top: 8px; font-family: var(--display); font-size: clamp(30px, 7vw, 6
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+/* Corner overlay, not a layout element - doesn't push the status/bars around. */
+.rp-fullscreen-btn {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 1;
+  border: 0;
+  background: none;
+  color: #8a8a8a;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.15s linear;
+}
+.rp-fullscreen-btn:hover, .rp-fullscreen-btn:focus-visible { opacity: 1; }
+.rp-fullscreen-btn[hidden] { display: none; }
+/* Blown up to fill the display (e.g. a monitor/TV while music plays) - same
+   OLED look, just bigger. .rp-bars/.rp-bar-col need no changes: they already
+   fill available space, and buildRpBars' ResizeObserver (app.js) recomputes
+   bar count from the now much wider #rp-bars on its own. */
+.rp-screen:fullscreen, .rp-screen:-webkit-full-screen {
+  padding: 28px 32px 24px;
+  justify-content: center;
+}
+.rp-screen:fullscreen .rp-status, .rp-screen:-webkit-full-screen .rp-status {
+  font-size: 22px;
+}
+.rp-screen:fullscreen .rp-fullscreen-btn, .rp-screen:-webkit-full-screen .rp-fullscreen-btn {
+  font-size: 20px;
 }
 .rp-status {
   color: #f2f2f2;

@@ -63,7 +63,8 @@
                 <button class="rp-btn rp-trackbtn" type="button" data-role="prev" data-cmd="REW:BIG" aria-label="Previous track"><span class="rp-glyph">&#x23EE;</span></button>
                 <button class="rp-btn rp-trackbtn" type="button" data-role="next" data-cmd="FF:BIG" aria-label="Next track"><span class="rp-glyph">&#x23ED;</span></button>
               </div>
-              <div class="rp-screen">
+              <div id="rp-screen" class="rp-screen">
+                <button id="rp-fullscreen-btn" class="rp-fullscreen-btn" type="button" aria-label="Fullscreen">&#x26F6;</button>
                 <div id="rp-status" class="rp-status">READY</div>
                 <div id="rp-bars" class="rp-bars"></div>
                 <div id="rp-discsaver" class="rp-discsaver" hidden></div>
@@ -151,7 +152,7 @@
     </footer>
   </div>
   <div id="install-slot"></div>
-  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=47").catch(() => {});</script>
-  <script src="/static/app.js?v=47" defer></script>
+  <script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=48").catch(() => {});</script>
+  <script src="/static/app.js?v=48" defer></script>
 </body>
 </html>
