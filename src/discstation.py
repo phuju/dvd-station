@@ -483,6 +483,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         upload_dir = Path(discstation_burn.WORK) / f"upload_{time.strftime('%Y%m%d_%H%M%S')}"
         upload_dir.mkdir(parents=True, exist_ok=True)
         total = 0
+        upload_order = []  # relative paths, in the order the client sent them
         for i, (filename, data) in enumerate(files):
             rel = filename
             if i < len(paths_list) and paths_list[i].get('p'):
@@ -495,7 +496,14 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
+            upload_order.append(rel.lstrip('/'))
             total += len(data)
+        # burn_audio_flow() prefers this order over its alphabetical fallback,
+        # so an audio burn tracks the order files were actually selected/
+        # arranged on the web page or app, not whatever order their filenames
+        # happen to sort in (the bug: picking "03 intro, 01 verse, 02 chorus"
+        # used to always burn 01/02/03 regardless of pick order).
+        (upload_dir / ".upload_order.json").write_text(json.dumps(upload_order))
         # wait_for_web_url() (already running on the OLED side once a burn
         # mode is selected first - the normal flow: scan the QR code, then
         # upload) only ever reads from _burn_url_queue, same as a pasted
@@ -3207,13 +3215,30 @@ def burn_audio_flow(ser):
     audio_files = []
     audio_exts = {".wav", ".flac", ".mp3", ".aac", ".ogg", ".wma", ".m4a", ".opus"}
     if src_path.is_dir():
-        # rglob, not iterdir: a browser folder upload preserves the
-        # original relative paths (e.g. "Album Name/track.flac"), so the
-        # audio files usually sit one level below src_path, not at its
-        # top - a plain iterdir() only ever saw the subfolder itself.
-        for f in sorted(src_path.rglob("*")):
-            if f.is_file() and f.suffix.lower() in audio_exts:
-                audio_files.append(f)
+        # Prefer the order the web/app upload actually sent (.upload_order.json,
+        # written by _handle_upload) over re-deriving one from the filesystem -
+        # burning in alphabetical-by-filename order regardless of how the user
+        # arranged/picked the files was the whole bug this guards against.
+        order_file = src_path / ".upload_order.json"
+        if order_file.is_file():
+            try:
+                for rel in json.loads(order_file.read_text()):
+                    f = src_path / rel
+                    if f.is_file() and f.suffix.lower() in audio_exts:
+                        audio_files.append(f)
+            except Exception as e:
+                print(f"Upload order manifest unreadable, falling back to alphabetical: {e}")
+                audio_files = []
+        if not audio_files:
+            # rglob, not iterdir: a browser folder upload preserves the
+            # original relative paths (e.g. "Album Name/track.flac"), so the
+            # audio files usually sit one level below src_path, not at its
+            # top - a plain iterdir() only ever saw the subfolder itself.
+            # Also the fallback for a typed/pasted directory path (no upload,
+            # so no order manifest) - alphabetical is the best guess there.
+            for f in sorted(src_path.rglob("*")):
+                if f.is_file() and f.suffix.lower() in audio_exts:
+                    audio_files.append(f)
     elif src_path.is_file():
         audio_files = [src_path]
 
