@@ -24,6 +24,20 @@ are in [`docs/PCB.md`](../../docs/PCB.md).
   eye/logo silkscreen art; import it with KiCad's Image Converter onto B.Silkscreen.
 - LEDs are XL-1608UBC-04 (0603 blue): D2 power and D3 charging on the front, D4 eye on the back.
 
+## Art and test pads
+
+- **Front:** the disc sketch and "DISCSTATION" in the Phuju font, bottom-right.
+- **Back:** the eye sketch, with its pupil on the eye LED (D4).
+- **Test pads:** TP1 is a heart-shaped GND pad at (32.5, 9.0) mm and TP2 is a round 3V3
+  pad at (69.0, 54.0) mm. Both have a 1 mm plated hole, so the pad is on both sides.
+
+The sketches and text are converted to silkscreen polygons, so the font doesn't need to
+be installed. Each piece of art is a group, so you can move it in KiCad as one unit.
+The test-pad footprints are in the project library `discstation.pretty`.
+To redo the art: `python3 art/prep_art.py`, then
+`flatpak run --command=python3 org.kicad.KiCad art/add_art.py` on a board that has
+no art yet.
+
 ## Editing
 
 From r1 on, the KiCad files are edited by hand in KiCad 10: open
