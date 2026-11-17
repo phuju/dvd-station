@@ -12,6 +12,7 @@ except ImportError:
     fcntl = None
 import json
 import mimetypes
+import mmap
 import os
 import signal
 import re
@@ -467,24 +468,31 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_upload(self):
         _set_web_progress("UPLOADING", 0)
-        files = self._parse_multipart(lambda percent: _set_web_progress("UPLOADING", percent))
+        upload_dir = Path(discstation_burn.WORK) / f"upload_{time.strftime('%Y%m%d_%H%M%S')}"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        parts_dir = upload_dir / ".parts"  # same filesystem as the final files, so the move below is a rename
+        try:
+            files = self._parse_multipart(parts_dir, lambda percent: _set_web_progress("UPLOADING", percent))
+        except BaseException:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            _set_web_progress("UPLOAD FAILED", -1)  # else the UI sits at the last percent forever
+            raise
         if not files:
+            shutil.rmtree(upload_dir, ignore_errors=True)
             self._respond(400, 'No files uploaded')
             return
         paths_list = []
-        for filename, data in list(files):
+        for filename, part in list(files):
             if filename == '_paths':
                 try:
-                    parsed = json.loads(data.decode())
+                    parsed = json.loads(part.read_text())
                     paths_list = parsed if isinstance(parsed, list) else []
                 except Exception as e:
                     print(f"Upload path metadata error: {e}")
-                files.remove((filename, data))
-        upload_dir = Path(discstation_burn.WORK) / f"upload_{time.strftime('%Y%m%d_%H%M%S')}"
-        upload_dir.mkdir(parents=True, exist_ok=True)
+                files.remove((filename, part))
         total = 0
         upload_order = []  # relative paths, in the order the client sent them
-        for i, (filename, data) in enumerate(files):
+        for i, (filename, part) in enumerate(files):
             rel = filename
             if i < len(paths_list) and paths_list[i].get('p'):
                 p = paths_list[i]['p']
@@ -495,9 +503,10 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 print(f"Skipping unsafe upload path: {rel}")
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(data)
+            os.replace(part, dest)
             upload_order.append(rel.lstrip('/'))
-            total += len(data)
+            total += dest.stat().st_size
+        shutil.rmtree(parts_dir, ignore_errors=True)
         # burn_audio_flow() prefers this order over its alphabetical fallback,
         # so an audio burn tracks the order files were actually selected/
         # arranged on the web page or app, not whatever order their filenames
@@ -743,7 +752,13 @@ self.addEventListener('fetch', e => {
         }
         self._respond(200, json.dumps(manifest), 'application/json')
 
-    def _parse_multipart(self, progress_callback=None):
+    def _parse_multipart(self, spool_dir, progress_callback=None):
+        """Returns [(filename or '_paths', Path of the spooled part)].
+
+        The body goes to disk and parts are sliced out of it with mmap. The old
+        in-RAM join()+split() held ~3x the upload at once, so a multi-GB upload
+        sat at the 99% cap swapping the host to a halt (and died on MemoryError).
+        """
         content_type = self.headers.get('Content-Type', '')
         boundary = None
         for part in content_type.split(';'):
@@ -753,46 +768,55 @@ self.addEventListener('fetch', e => {
         if not boundary:
             return []
         content_length = int(self.headers.get('Content-Length', 0))
-        chunks = []
+        spool_dir.mkdir(parents=True, exist_ok=True)
+        body_path = spool_dir / "body"
         received = 0
-        while received < content_length:
-            chunk = self.rfile.read(min(1024 * 1024, content_length - received))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            received += len(chunk)
-            if progress_callback and content_length:
-                progress_callback(min(99, int(received * 100 / content_length)))
-        raw = b"".join(chunks)
+        with open(body_path, "wb") as out:
+            while received < content_length:
+                chunk = self.rfile.read(min(1024 * 1024, content_length - received))
+                if not chunk:
+                    break
+                out.write(chunk)
+                received += len(chunk)
+                if progress_callback and content_length:
+                    progress_callback(min(99, int(received * 100 / content_length)))
+        if not received:
+            return []
         boundary_b = ('--' + boundary).encode()
-        parts = raw.split(boundary_b)[1:-1]
         files = []
-        for part in parts:
-            if part.startswith(b'--'):
-                break
-            header_end = part.find(b'\r\n\r\n')
-            if header_end < 0:
-                continue
-            headers_raw = part[:header_end].decode(errors='ignore')
-            body = part[header_end + 4:]
-            if body.endswith(b'\r\n'):
-                body = body[:-2]
-            filename = None
-            for line in headers_raw.split('\r\n'):
-                if line.lower().startswith('content-disposition:'):
-                    for attr in line.split(';'):
-                        attr = attr.strip()
-                        if attr.startswith('filename='):
-                            filename = attr[10:].strip('"')
-            field_name = None
-            for line in headers_raw.split('\r\n'):
-                if line.lower().startswith('content-disposition:'):
-                    for attr in line.split(';'):
-                        attr = attr.strip()
-                        if attr.startswith('name='):
-                            field_name = attr[5:].strip('"')
-            if body and (filename or field_name == '_paths'):
-                files.append((filename or field_name, body))
+        with open(body_path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            start = mm.find(boundary_b)
+            while start >= 0:
+                start += len(boundary_b)
+                if mm[start:start + 2] == b'--':
+                    break
+                nxt = mm.find(boundary_b, start)
+                if nxt < 0:
+                    break
+                header_end = mm.find(b'\r\n\r\n', start, nxt)
+                if header_end >= 0:
+                    headers_raw = mm[start:header_end].decode(errors='ignore')
+                    body_start, body_end = header_end + 4, nxt
+                    if mm[body_end - 2:body_end] == b'\r\n':
+                        body_end -= 2
+                    filename = None
+                    field_name = None
+                    for line in headers_raw.split('\r\n'):
+                        if line.lower().startswith('content-disposition:'):
+                            for attr in line.split(';'):
+                                attr = attr.strip()
+                                if attr.startswith('filename='):
+                                    filename = attr[10:].strip('"')
+                                if attr.startswith('name='):
+                                    field_name = attr[5:].strip('"')
+                    if body_end > body_start and (filename or field_name == '_paths'):
+                        part_path = spool_dir / f"part_{len(files)}"
+                        with open(part_path, "wb") as out:
+                            for pos in range(body_start, body_end, 1024 * 1024):
+                                out.write(mm[pos:min(pos + 1024 * 1024, body_end)])
+                        files.append((filename or field_name, part_path))
+                start = nxt
+        body_path.unlink()
         return files
 
     def _serve_page(self):
