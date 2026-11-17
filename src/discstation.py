@@ -3189,6 +3189,9 @@ def burn_data_flow(ser):
     with _burn_history({"title": title, "disc_type": "Data DVD", "mode": "DATA", "speed": burn_speed or "Auto"}, swallow_cancel=True) as h:
         is_dir = local_path.is_dir() if local_path.exists() else False
         if is_dir:
+            # Burn-order metadata for the audio flow; here it would be burned
+            # onto the disc and make a lone .iso upload look like two files.
+            (local_path / ".upload_order.json").unlink(missing_ok=True)
             files_to_burn = [local_path]
         elif local_path.exists():
             safe_send(ser, "STATUS:Copying files...")
@@ -3213,7 +3216,11 @@ def burn_data_flow(ser):
             if d.is_dir():
                 total_bytes += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
         label = "CD-R" if dl_info.get("is_cd") else ("DVD9" if dl_info["is_dual_layer"] else "DVD5")
-        usable = discstation_burn.disc_output_limit_bytes(disc_bytes)
+        # A ready-made .iso (e.g. a Disc Image Studio image sized to the exact
+        # sector count) is written as-is, so it may fill the whole disc; the
+        # conservative cap only guards content we author ourselves.
+        iso_only = len(files_to_burn) == 1 and files_to_burn[0].suffix.lower() == ".iso"
+        usable = disc_bytes if (iso_only and disc_bytes) else discstation_burn.disc_output_limit_bytes(disc_bytes)
         if usable and total_bytes > usable:
             size_gb = total_bytes / 1e9
             cap_gb = usable / 1e9
