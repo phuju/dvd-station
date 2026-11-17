@@ -1,0 +1,11 @@
+# build intermediates (./build.sh regenerates them)
+build*.log
+logs/
+*.dsn
+*.ses
+*.net
+*.kicad_prl
+drc.json
+erc.rpt
+*-backups/
+fp-info-cache
