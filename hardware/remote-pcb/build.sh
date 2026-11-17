@@ -17,10 +17,18 @@ $KI sch erc --severity-all --exit-code-violations -o erc.rpt $N.kicad_sch
 $KI sch export pdf -o $N-schematic.pdf $N.kicad_sch
 $KI sch export netlist -o $N.net $N.kicad_sch
 $PY gen_pcb.py
-$PY route.py export
-rm -f $N.ses
-java -jar "$FREEROUTING" -de $N.dsn -do $N.ses -mp 40 -da   # needs a display (1.9.0 has no headless mode)
-$PY route.py import
+# Freerouting 1.9 sometimes stops with a link or two left; a repeat pass starts from the
+# routed board and only has to finish those.
+for pass in 1 2 3; do
+  $PY route.py export
+  rm -f $N.ses
+  java -jar "$FREEROUTING" -de $N.dsn -do $N.ses -mp 40 -da   # needs a display (1.9.0 has no headless mode)
+  $PY route.py import
+  $KI pcb drc --format json -o drc.json $N.kicad_pcb >/dev/null
+  left=$(python3 -c "import json; print(len(json.load(open('drc.json'))['unconnected_items']))")
+  echo "routing pass $pass: $left unconnected"
+  [ "$left" = 0 ] && break
+done
 fi
 $KI pcb drc --schematic-parity --severity-error --exit-code-violations --format json -o drc.json $N.kicad_pcb
 

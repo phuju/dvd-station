@@ -42,7 +42,7 @@ voltage at boot).
 | Power switch | Slide switch | Battery side |
 | OLED | 0.96" SSD1306 I2C module on a 4-pin header | Address 0x3C. Recommended over the bare 30-pin FPC panel for v1 |
 | Encoder | EC11 (with push switch) | Through-hole |
-| Buttons | 3× tactile (12 mm or 6 mm) + BOOT + RESET | |
+| Buttons | 3× Cherry MX-style key switches (PLAY, HOME, EJECT) + 2× small tactile (BOOT, RESET) | The PCB-mount footprint takes 3- and 5-pin switches |
 | LED | Any colour + series resistor | ~1-2.2 kΩ for blue at 3.3 V. Without a resistor the LED and the 3V3 rail are stressed |
 
 Check stock and pick exact part numbers on LCSC when ordering; availability

@@ -43,7 +43,7 @@ R("R3", "2k", "PROG", "GND", "power")                # charge current 1000/2k = 
 C("C1", "4.7uF", "VBUS", "GND", "power", C0805)
 C("C2", "4.7uF", "VBAT", "GND", "power", C0805)
 R("R4", "1k", "VBUS", "CHG_LED_A", "power")
-part("D3", "Device:LED", "Red (charging)", "LED_THT:LED_D3.0mm", {"1": "CHG_STAT", "2": "CHG_LED_A"}, "front")
+part("D3", "Device:LED", "XL-1608UBC-04 (charging)", "LED_SMD:LED_0603_1608Metric", {"1": "CHG_STAT", "2": "CHG_LED_A"}, "front")
 part("J3", "Connector_Generic:Conn_01x02", "Battery 1S Li-ion", "Connector_JST:JST_PH_B2B-PH-K_1x02_P2.00mm_Vertical",
      {"1": "VBAT", "2": "GND"}, "power")
 part("SW4", "Switch:SW_SPDT", "Power", "Button_Switch_SMD:SW_SPDT_PCM12",
@@ -104,7 +104,8 @@ R("R14", "10k", "RTS", "Q2_B", "usbserial")
 
 # ---- controls (front) -------------------------------------------------------------
 for ref, net in (("SW1", "BTN_PLAY"), ("SW2", "BTN_HOME"), ("SW3", "BTN_EJECT")):
-    part(ref, "Switch:SW_Push", net.split("_")[1], "Button_Switch_THT:SW_PUSH-12mm", {"1": net, "2": "GND"}, "front")
+    # Cherry MX-style key switch; the PCB-mount footprint also takes 3-pin (plate) switches
+    part(ref, "Switch:SW_Push", net.split("_")[1], "Button_Switch_Keyboard:SW_Cherry_MX_1.00u_PCB", {"1": net, "2": "GND"}, "front")
 part("ENC1", "Device:RotaryEncoder_Switch", "EC11 encoder", "Rotary_Encoder:RotaryEncoder_Alps_EC11E-Switch_Vertical_H20mm",
      {"A": "ENC_A", "B": "ENC_B", "C": "GND", "S1": "ENC_SW", "S2": "GND"}, "front")
 for i, net in enumerate(("BTN_PLAY", "BTN_HOME", "BTN_EJECT", "ENC_A", "ENC_B", "ENC_SW"), start=15):
@@ -115,8 +116,11 @@ R("R21", "4.7k", "+3V3", "SDA", "controls")
 R("R22", "4.7k", "+3V3", "SCL", "controls")
 part("J2", "Connector_Generic:Conn_01x04", "OLED 0.96in I2C (GND VCC SCL SDA)", "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
      {"1": "GND", "2": "+3V3", "3": "SCL", "4": "SDA"}, "front")
-R("R23", "470", "+3V3", "PWR_LED_A", "front")
-part("D2", "Device:LED", "Blue (power)", "LED_THT:LED_D3.0mm", {"1": "GND", "2": "PWR_LED_A"}, "front")
+R("R23", "220", "+3V3", "PWR_LED_A", "front")
+part("D2", "Device:LED", "XL-1608UBC-04 (power)", "LED_SMD:LED_0603_1608Metric", {"1": "GND", "2": "PWR_LED_A"}, "front")
+# decorative: lights the eye artwork on the back, always on while powered (~5 mA; lower R24 for brighter)
+R("R24", "100", "+3V3", "EYE_LED_A", "front")
+part("D4", "Device:LED", "XL-1608UBC-04 (eye)", "LED_SMD:LED_0603_1608Metric", {"1": "GND", "2": "EYE_LED_A"}, "front")
 
 # ---- mechanical ---------------------------------------------------------------------
 for i in range(1, 5):

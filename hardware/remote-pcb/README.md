@@ -14,12 +14,15 @@ are in [`docs/PCB.md`](../../docs/PCB.md).
 | `preview-top.png`, `preview-bottom.png` | 3D renders |
 | `discstation-remote.kicad_pro/.kicad_sch/.kicad_pcb` | KiCad 10 project |
 
-- **Front:** PLAY, HOME and EJECT buttons (12 mm), the EC11 encoder, a 4-pin OLED
+- **Front:** PLAY, HOME and EJECT Cherry MX-style key switches (3- or 5-pin), the EC11 encoder, a 4-pin OLED
   header with 4 M2 standoff holes, the power and charge LEDs.
 - **Back:** ESP32-WROOM-32E (antenna on the right edge, no copper under it),
   CP2102N with DevKit-style auto-program, MCP73831 charger with a power path,
   AP2112K 3.3 V regulator, USB-C and power switch on the bottom edge, JST-PH battery
-  connector, RESET and BOOT buttons.
+  connector (bottom-left), RESET and BOOT buttons, and the always-on eye LED (D4,
+  XL-1608UBC-04) at (55.6, 58.4) mm. The 22 × 13 mm area around D4 is kept free for the
+  eye/logo silkscreen art; import it with KiCad's Image Converter onto B.Silkscreen.
+- LEDs are XL-1608UBC-04 (0603 blue): D2 power and D3 charging on the front, D4 eye on the back.
 
 ## Editing
 
@@ -62,6 +65,9 @@ schematic → ERC → netlist → placement (`gen_pcb.py`) → Freerouting (abou
   edge (the switch lever sticks out about 0.5 mm).
 - **Battery polarity:** pin 1 of J3 is `+`, but JST-PH battery leads are not wired
   the same way by every seller. Check before plugging one in.
+- **Keycap clearance:** the keys keep your EasyEDA layout's spacing (about 18.4 mm
+  between centres, against the usual 19.05 mm). Standard 1u keycaps (about 18 mm wide)
+  leave only ~0.4 mm between them, so check that yours don't rub.
 - **Encoder direction:** if turning the knob scrolls the wrong way, swap
   `ENC_CLK_PIN` and `ENC_DT_PIN` in the firmware.
 - **The BOM has no LCSC part numbers.** Choose them when you upload to JLCPCB. Have

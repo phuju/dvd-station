@@ -22,42 +22,47 @@ NETLIST = HERE / "discstation-remote.net"  # kicad-cli sch export netlist
 OX, OY = 100.0, 100.0          # board origin on the KiCad page
 W, H = 72.0, 64.0
 ANTENNA = (65.3, 9.5, W, 28.5)  # copper keep-out under the ESP32 antenna (x0, y0, x1, y1)
+EYE_ART = (40.0, 51.0, 62.0, H)  # back-side area kept free of parts for the eye/logo silkscreen art
 
 # ref: (x, y, rotation, side, anchor) - anchor "center" = pad-bbox centre, "origin" = footprint origin
 FIXED = {
-    "SW1": (20.0, 15.7, 0, "F", "center"),     # PLAY/PAUSE
-    "SW2": (20.0, 34.1, 0, "F", "center"),     # HOME/BACK
-    "SW3": (20.0, 52.4, 0, "F", "center"),     # EJECT
+    # Key switches: footprint origin is pin 1, the switch centre is at (-2.54, +5.08) from it.
+    # Centres measured from the EasyEDA board: (20.1, 15.6), (20.1, 34.1), (20.1, 52.3).
+    "SW1": (20.1 + 2.54, 15.6 - 5.08, 0, "F", "origin"),   # PLAY/PAUSE
+    "SW2": (20.1 + 2.54, 34.1 - 5.08, 0, "F", "origin"),   # HOME/BACK
+    "SW3": (20.1 + 2.54, 52.3 - 5.08, 0, "F", "origin"),   # EJECT
     "J2": (47.1, 7.6, 90, "F", "origin"),      # OLED header, pin 1 (GND) on the left
     "ENC1": (54.0, 47.5, 0, "F", "center"),
-    "D2": (67.8, 39.3, 0, "F", "center"),      # power LED (where the heart LED was)
+    "D2": (67.8, 39.3, 0, "F", "center"),      # power LED
     "D3": (67.8, 45.5, 0, "F", "center"),      # charge LED
+    "D4": (55.6, 58.4, 0, "B", "center"),      # eye LED in the artwork's pupil, back side (as on the EasyEDA board)
     "H1": (3.5, 4.2, 0, "F", "origin"), "H2": (68.7, 4.2, 0, "F", "origin"),
     "H3": (3.5, 59.8, 0, "F", "origin"), "H4": (68.7, 59.8, 0, "F", "origin"),
     "H5": (39.3, 8.1, 0, "F", "origin"), "H6": (62.4, 8.1, 0, "F", "origin"),     # OLED module standoffs
     "H7": (39.3, 31.8, 0, "F", "origin"), "H8": (62.4, 31.8, 0, "F", "origin"),
     "U1": (59.25, 19.0, 90, "B", "origin"),    # antenna points at the right edge
     "J1": (33.0, H - 3.65, 0, "B", "origin"),  # USB-C opening flush with the bottom edge
-    "J3": (43.0, 59.5, 0, "B", "center"),      # battery JST-PH
-    "SW4": (55.0, 61.4, 0, "B", "origin"),     # power slide switch next to the battery, lever ~0.5 mm past the bottom edge
+    "J3": (9.0, 57.0, 0, "B", "center"),       # battery JST-PH, bottom-left corner
+    "SW4": (21.0, 61.4, 0, "B", "origin"),     # power slide switch under EJECT, lever ~0.5 mm past the bottom edge
 }
 
 # Free back-side parts: (anchor x, y). A spiral search finds the nearest free spot.
 ANCHORS = {
     "U4": (35, 46), "R10": (33, 50), "R11": (37, 50), "R12": (38, 42), "C10": (32, 42), "C11": (34, 41),
-    "Q1": (44, 24), "Q2": (44, 28), "R13": (42, 22), "R14": (42, 30),
+    "Q1": (40, 45), "Q2": (40, 48), "R13": (31, 45), "R14": (31, 48),  # auto-program beside the CP2102N
     "U3": (42, 52), "R3": (46, 52), "C1": (39, 55), "C2": (46, 55), "R4": (40, 49),
-    "Q3": (36, 37), "R5": (33, 36), "D1": (40, 40), "C3": (38, 34),
+    "Q3": (25, 56), "R5": (14, 57), "D1": (40, 50), "C3": (38, 34),  # power path beside the switch/battery
     "U2": (36, 30), "C4": (33, 30), "C5": (39, 30),
     "R6": (44, 38), "R7": (44, 41), "C6": (44, 44),
     "C7": (50, 30), "C8": (52, 31), "R8": (55, 31), "C9": (57, 31), "R9": (47, 30),
     "SW5": (51, 35), "SW6": (57, 35),
     "R15": (44, 14), "R16": (44, 16), "R17": (44, 18), "R18": (44, 20), "R19": (44, 22), "R20": (44, 12),
     "R21": (44, 10), "R22": (42, 10), "C12": (47, 40), "C13": (49, 40),
-    "R1": (29, 54), "R2": (37, 54), "R23": (65, 36),
+    "R1": (29, 54), "R2": (37, 54), "R23": (65, 36), "R24": (64, 55),
 }
 
-POWER_NETS = ["VBUS", "SYS", "VBAT", "BAT_SW"]
+POWER_NETS = ["SYS", "VBAT", "BAT_SW"]
+VBUS_NETS = ["VBUS"]  # 0.35 mm: 0.5 mm does not fit between the USB-C pads; still ~1 A
 
 
 def mm(v):
@@ -195,6 +200,7 @@ def main():
         if ref.startswith("H"):
             placed.append(rect_of(fp.GetBoundingBox(False), 0.5))
     placed.append(ANTENNA)
+    placed.append(EYE_ART)
 
     for ref, (ax, ay) in ANCHORS.items():
         fp = fps[ref]
@@ -258,10 +264,10 @@ def main():
 
     # silkscreen
     for text, x, y, layer, size in (("DISCSTATION", 34, 3.0, pcbnew.F_SilkS, 1.5),
-                                    ("PLAY", 20, 23.2, pcbnew.F_SilkS, 1.0), ("HOME", 20, 41.6, pcbnew.F_SilkS, 1.0),
-                                    ("EJECT", 20, 59.9, pcbnew.F_SilkS, 1.0),
+                                    ("PLAY", 20.1, 23.0, pcbnew.F_SilkS, 1.0), ("HOME", 20.1, 41.5, pcbnew.F_SilkS, 1.0),
+                                    ("EJECT", 20.1, 59.7, pcbnew.F_SilkS, 1.0),
                                     ("DiscStation remote r1", 50, 5.0, pcbnew.B_SilkS, 1.0),
-                                    ("BAT +  -", 43, 55.8, pcbnew.B_SilkS, 0.8)):
+                                    ("BAT +  -", 9.0, 53.4, pcbnew.B_SilkS, 0.8)):
         t = pcbnew.PCB_TEXT(board)
         t.SetText(text)
         t.SetPosition(V(x, y))
@@ -285,9 +291,14 @@ def main():
                {"name": "Power", "clearance": 0.2, "track_width": 0.5, "via_diameter": 0.8, "via_drill": 0.4,
                 "diff_pair_width": 0.2, "diff_pair_gap": 0.25, "microvia_diameter": 0.3, "microvia_drill": 0.1,
                 "wire_width": 6, "bus_width": 12, "line_style": 0, "schematic_color": "rgba(0, 0, 0, 0.000)",
-                "pcb_color": "rgba(0, 0, 0, 0.000)", "priority": 0}],
+                "pcb_color": "rgba(0, 0, 0, 0.000)", "priority": 0},
+               {"name": "VBUS", "clearance": 0.2, "track_width": 0.35, "via_diameter": 0.8, "via_drill": 0.4,
+                "diff_pair_width": 0.2, "diff_pair_gap": 0.25, "microvia_diameter": 0.3, "microvia_drill": 0.1,
+                "wire_width": 6, "bus_width": 12, "line_style": 0, "schematic_color": "rgba(0, 0, 0, 0.000)",
+                "pcb_color": "rgba(0, 0, 0, 0.000)", "priority": 1}],
                "meta": {"version": 4},
-               "netclass_patterns": [{"netclass": "Power", "pattern": n} for n in POWER_NETS]},
+               "netclass_patterns": [{"netclass": "Power", "pattern": n} for n in POWER_NETS]
+                                    + [{"netclass": "VBUS", "pattern": n} for n in VBUS_NETS]},
            "meta": {"filename": "discstation-remote.kicad_pro", "version": 3}}
     (HERE / "discstation-remote.kicad_pro").write_text(json.dumps(pro, indent=2))
 

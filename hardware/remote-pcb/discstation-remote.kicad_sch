@@ -5425,10 +5425,15 @@
     (dnp no)
     (uuid "a9f36892-3604-5c59-8bc0-a6705a3dddb4")
     (property "Reference" "D3" (at 226.06 178.84 0) (effects (font (size 1.27 1.27))))
-    (property "Value" "Red (charging)" (at 226.06 186.92 0) (effects (font (size 1.27 1.27))))
+    (property
+      "Value"
+      "XL-1608UBC-04 (charging)"
+      (at 226.06 186.92 0)
+      (effects (font (size 1.27 1.27)))
+    )
     (property
       "Footprint"
-      "LED_THT:LED_D3.0mm"
+      "LED_SMD:LED_0603_1608Metric"
       (at 226.06 182.88 0)
       (effects (font (size 1.27 1.27)) (hide yes))
     )
@@ -5471,7 +5476,7 @@
     (property "Value" "PLAY" (at 269.24 186.92 0) (effects (font (size 1.27 1.27))))
     (property
       "Footprint"
-      "Button_Switch_THT:SW_PUSH-12mm"
+      "Button_Switch_Keyboard:SW_Cherry_MX_1.00u_PCB"
       (at 269.24 182.88 0)
       (effects (font (size 1.27 1.27)) (hide yes))
     )
@@ -5514,7 +5519,7 @@
     (property "Value" "HOME" (at 304.8 186.92 0) (effects (font (size 1.27 1.27))))
     (property
       "Footprint"
-      "Button_Switch_THT:SW_PUSH-12mm"
+      "Button_Switch_Keyboard:SW_Cherry_MX_1.00u_PCB"
       (at 304.8 182.88 0)
       (effects (font (size 1.27 1.27)) (hide yes))
     )
@@ -5557,7 +5562,7 @@
     (property "Value" "EJECT" (at 342.9 186.92 0) (effects (font (size 1.27 1.27))))
     (property
       "Footprint"
-      "Button_Switch_THT:SW_PUSH-12mm"
+      "Button_Switch_Keyboard:SW_Cherry_MX_1.00u_PCB"
       (at 342.9 182.88 0)
       (effects (font (size 1.27 1.27)) (hide yes))
     )
@@ -5733,7 +5738,7 @@
     (dnp no)
     (uuid "ff42449f-622d-5222-84a4-6a013c896571")
     (property "Reference" "R23" (at 287.02 197.62 0) (effects (font (size 1.27 1.27))))
-    (property "Value" "470" (at 287.02 203.7 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "220" (at 287.02 203.7 0) (effects (font (size 1.27 1.27))))
     (property
       "Footprint"
       "Resistor_SMD:R_0603_1608Metric"
@@ -5776,10 +5781,10 @@
     (dnp no)
     (uuid "5d407456-1a12-52ff-ba69-d9cdddd00004")
     (property "Reference" "D2" (at 322.58 196.62 0) (effects (font (size 1.27 1.27))))
-    (property "Value" "Blue (power)" (at 322.58 204.7 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "XL-1608UBC-04 (power)" (at 322.58 204.7 0) (effects (font (size 1.27 1.27))))
     (property
       "Footprint"
-      "LED_THT:LED_D3.0mm"
+      "LED_SMD:LED_0603_1608Metric"
       (at 322.58 200.66 0)
       (effects (font (size 1.27 1.27)) (hide yes))
     )
@@ -5790,6 +5795,92 @@
       (project
         "discstation-remote"
         (path "/4dc02ddd-3def-5716-a948-dd17e58d6c51" (reference "D2") (unit 1))
+      )
+    )
+  )
+  (global_label
+    "+3V3"
+    (shape passive)
+    (at 356.87 200.66 180)
+    (fields_autoplaced yes)
+    (effects (font (size 1.27 1.27)) (justify right))
+    (uuid "65f69734-4ef6-5172-9386-88745383e726")
+  )
+  (global_label
+    "EYE_LED_A"
+    (shape passive)
+    (at 364.49 200.66 0)
+    (fields_autoplaced yes)
+    (effects (font (size 1.27 1.27)) (justify left))
+    (uuid "4eaa37e7-87fd-5a5a-a7b0-602c71126a3c")
+  )
+  (symbol
+    (lib_id "Device:R")
+    (at 360.68 200.66 90)
+    (unit 1)
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (uuid "015cefb3-f8f1-584f-aaaf-416fe9bdce26")
+    (property "Reference" "R24" (at 360.68 197.62 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "100" (at 360.68 203.7 0) (effects (font (size 1.27 1.27))))
+    (property
+      "Footprint"
+      "Resistor_SMD:R_0603_1608Metric"
+      (at 360.68 200.66 0)
+      (effects (font (size 1.27 1.27)) (hide yes))
+    )
+    (property "Datasheet" "" (at 360.68 200.66 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (pin "1" (uuid "ae217a2d-2e26-5c50-9249-8811bda176b6"))
+    (pin "2" (uuid "a5dbe96b-9e63-57dd-9579-927030e7b680"))
+    (instances
+      (project
+        "discstation-remote"
+        (path "/4dc02ddd-3def-5716-a948-dd17e58d6c51" (reference "R24") (unit 1))
+      )
+    )
+  )
+  (global_label
+    "GND"
+    (shape passive)
+    (at 217.17 220.98 180)
+    (fields_autoplaced yes)
+    (effects (font (size 1.27 1.27)) (justify right))
+    (uuid "f1139e45-d1b3-5cbe-abbf-0fcc81879b0f")
+  )
+  (global_label
+    "EYE_LED_A"
+    (shape passive)
+    (at 224.79 220.98 0)
+    (fields_autoplaced yes)
+    (effects (font (size 1.27 1.27)) (justify left))
+    (uuid "dad87e28-ba4e-5466-8d55-8e756a60b649")
+  )
+  (symbol
+    (lib_id "Device:LED")
+    (at 220.98 220.98 0)
+    (unit 1)
+    (exclude_from_sim no)
+    (in_bom yes)
+    (on_board yes)
+    (dnp no)
+    (uuid "1fc4927e-8ba3-51c0-87f6-1e2846eb5224")
+    (property "Reference" "D4" (at 220.98 216.94 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "XL-1608UBC-04 (eye)" (at 220.98 225.02 0) (effects (font (size 1.27 1.27))))
+    (property
+      "Footprint"
+      "LED_SMD:LED_0603_1608Metric"
+      (at 220.98 220.98 0)
+      (effects (font (size 1.27 1.27)) (hide yes))
+    )
+    (property "Datasheet" "" (at 220.98 220.98 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (pin "1" (uuid "79290351-0ae3-5c63-86cf-080684f5f666"))
+    (pin "2" (uuid "bb623a7c-2920-5297-b351-c436053d4948"))
+    (instances
+      (project
+        "discstation-remote"
+        (path "/4dc02ddd-3def-5716-a948-dd17e58d6c51" (reference "D4") (unit 1))
       )
     )
   )
@@ -5994,29 +6085,29 @@
       )
     )
   )
-  (text "Power flags" (at 206 217.644 0) (effects (font (size 2.54 2.54)) (justify left)))
+  (text "Power flags" (at 15 230.412 0) (effects (font (size 2.54 2.54)) (justify left)))
   (global_label
     "GND"
     (shape passive)
-    (at 213.36 233.68 270)
+    (at 20.32 246.38 270)
     (fields_autoplaced yes)
     (effects (font (size 1.27 1.27)) (justify right))
-    (uuid "65f69734-4ef6-5172-9386-88745383e726")
+    (uuid "f9794bdc-e812-5da0-b872-c2bd89b6981a")
   )
   (symbol
     (lib_id "power:PWR_FLAG")
-    (at 213.36 233.68 0)
+    (at 20.32 246.38 0)
     (unit 1)
     (exclude_from_sim no)
     (in_bom no)
     (on_board no)
     (dnp no)
     (uuid "59b750cf-475a-56c0-b2ed-5d1405bed261")
-    (property "Reference" "#FLG01" (at 213.36 229.64 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (property "Value" "PWR_FLAG" (at 213.36 237.72 0) (effects (font (size 1.27 1.27))))
-    (property "Footprint" "" (at 213.36 233.68 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (property "Datasheet" "" (at 213.36 233.68 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (pin "1" (uuid "ae217a2d-2e26-5c50-9249-8811bda176b6"))
+    (property "Reference" "#FLG01" (at 20.32 242.34 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Value" "PWR_FLAG" (at 20.32 250.42 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 20.32 246.38 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Datasheet" "" (at 20.32 246.38 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (pin "1" (uuid "fa1637bc-9a73-585f-becb-5e452542c526"))
     (instances
       (project
         "discstation-remote"
@@ -6027,25 +6118,25 @@
   (global_label
     "VBUS"
     (shape passive)
-    (at 226.06 233.68 270)
+    (at 35.56 246.38 270)
     (fields_autoplaced yes)
     (effects (font (size 1.27 1.27)) (justify right))
-    (uuid "4eaa37e7-87fd-5a5a-a7b0-602c71126a3c")
+    (uuid "b91a32b0-94be-5696-bb50-bf1bd9bd34b0")
   )
   (symbol
     (lib_id "power:PWR_FLAG")
-    (at 226.06 233.68 0)
+    (at 35.56 246.38 0)
     (unit 1)
     (exclude_from_sim no)
     (in_bom no)
     (on_board no)
     (dnp no)
     (uuid "98671e45-30ca-5cce-b416-4f6647baf4b6")
-    (property "Reference" "#FLG02" (at 226.06 229.64 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (property "Value" "PWR_FLAG" (at 226.06 237.72 0) (effects (font (size 1.27 1.27))))
-    (property "Footprint" "" (at 226.06 233.68 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (property "Datasheet" "" (at 226.06 233.68 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (pin "1" (uuid "a5dbe96b-9e63-57dd-9579-927030e7b680"))
+    (property "Reference" "#FLG02" (at 35.56 242.34 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Value" "PWR_FLAG" (at 35.56 250.42 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 35.56 246.38 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Datasheet" "" (at 35.56 246.38 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (pin "1" (uuid "3ceec11e-f4c7-5a09-b365-523fdbdef51e"))
     (instances
       (project
         "discstation-remote"
@@ -6056,25 +6147,25 @@
   (global_label
     "SYS"
     (shape passive)
-    (at 238.76 233.68 270)
+    (at 48.26 246.38 270)
     (fields_autoplaced yes)
     (effects (font (size 1.27 1.27)) (justify right))
-    (uuid "f1139e45-d1b3-5cbe-abbf-0fcc81879b0f")
+    (uuid "7c82745b-de4b-5114-87d6-877b0ba0c5d8")
   )
   (symbol
     (lib_id "power:PWR_FLAG")
-    (at 238.76 233.68 0)
+    (at 48.26 246.38 0)
     (unit 1)
     (exclude_from_sim no)
     (in_bom no)
     (on_board no)
     (dnp no)
     (uuid "3565ce5a-3b25-5a0b-8149-0e410ace69b6")
-    (property "Reference" "#FLG03" (at 238.76 229.64 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (property "Value" "PWR_FLAG" (at 238.76 237.72 0) (effects (font (size 1.27 1.27))))
-    (property "Footprint" "" (at 238.76 233.68 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (property "Datasheet" "" (at 238.76 233.68 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (pin "1" (uuid "79290351-0ae3-5c63-86cf-080684f5f666"))
+    (property "Reference" "#FLG03" (at 48.26 242.34 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Value" "PWR_FLAG" (at 48.26 250.42 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 48.26 246.38 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Datasheet" "" (at 48.26 246.38 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (pin "1" (uuid "b8534882-41c7-57bf-bdf7-664e211c3d51"))
     (instances
       (project
         "discstation-remote"
@@ -6085,25 +6176,25 @@
   (global_label
     "BAT_SW"
     (shape passive)
-    (at 251.46 233.68 270)
+    (at 60.96 246.38 270)
     (fields_autoplaced yes)
     (effects (font (size 1.27 1.27)) (justify right))
-    (uuid "dad87e28-ba4e-5466-8d55-8e756a60b649")
+    (uuid "df7de6d9-257c-5068-940e-329fe973ddf5")
   )
   (symbol
     (lib_id "power:PWR_FLAG")
-    (at 251.46 233.68 0)
+    (at 60.96 246.38 0)
     (unit 1)
     (exclude_from_sim no)
     (in_bom no)
     (on_board no)
     (dnp no)
     (uuid "5d7a54ce-d800-56f0-a194-0e8cfab01c67")
-    (property "Reference" "#FLG04" (at 251.46 229.64 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (property "Value" "PWR_FLAG" (at 251.46 237.72 0) (effects (font (size 1.27 1.27))))
-    (property "Footprint" "" (at 251.46 233.68 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (property "Datasheet" "" (at 251.46 233.68 0) (effects (font (size 1.27 1.27)) (hide yes)))
-    (pin "1" (uuid "bb623a7c-2920-5297-b351-c436053d4948"))
+    (property "Reference" "#FLG04" (at 60.96 242.34 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Value" "PWR_FLAG" (at 60.96 250.42 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 60.96 246.38 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (property "Datasheet" "" (at 60.96 246.38 0) (effects (font (size 1.27 1.27)) (hide yes)))
+    (pin "1" (uuid "36c26034-d668-5a5e-b419-d2a1b1e109df"))
     (instances
       (project
         "discstation-remote"
